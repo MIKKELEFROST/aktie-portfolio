@@ -7,6 +7,19 @@
 // - Positioner uden kurs (fejl hos Yahoo) tæller ikke med i totalerne, men
 //   markeres, og totalerne får `incomplete: true`.
 
+// Dansk tal-input: "1.234,56" → 1234.56, "612,5" → 612.5, "0.4321" → 0.4321, "1.234" → 1234, "1234.56" → 1234.56.
+// Returnerer null for tom streng og NaN for ugyldigt input. Tal gives uændret tilbage.
+export function parseDanishNumber(value) {
+  if (typeof value === 'number') return value;
+  const s = String(value ?? '').trim().replace(/\s/g, '');
+  if (!s) return null;
+  let norm = s;
+  if (s.includes(',')) norm = s.replace(/\./g, '').replace(',', '.');
+  else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) norm = s.replace(/\./g, '');
+  if (!/^-?(\d+\.?\d*|\.\d+)$/.test(norm)) return NaN;
+  return Number(norm);
+}
+
 export function round(n, decimals = 2) {
   if (n == null || !Number.isFinite(n)) return null;
   const f = 10 ** decimals;

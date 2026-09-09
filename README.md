@@ -54,7 +54,8 @@ Alle indstillinger er valgfrie miljøvariabler (se `.env.example`):
 | `SESSION_SECRET` | *(genereres)* | Nøgle til login-sessioner. Genereres automatisk og gemmes i `auth.json` |
 | `BASE_CURRENCY` | `DKK` | Basisvaluta for totaler (kan også ændres under Indstillinger) |
 | `QUOTE_CACHE_SECONDS` | `60` | Hvor længe kurser caches. Yahoo blokerer ved for mange kald |
-| `SECURE_COOKIES` | `0` | Sæt til `1` bag HTTPS (sættes automatisk ved `X-Forwarded-Proto: https`) |
+| `TRUST_PROXY` | `0` | Sæt til `1` bag en reverse proxy, så `X-Forwarded-For`/`-Proto` bruges til login-bremse og cookies |
+| `SECURE_COOKIES` | `0` | Tving `Secure`-flag på cookies (sættes automatisk bag proxy med `TRUST_PROXY=1` og HTTPS) |
 | `WARM_CACHE` | `1` | Genhent kurser i baggrunden mens en børs er åben, så siden loader øjeblikkeligt |
 | `YAHOO_MOCK` | `0` | `1` = brug indbyggede testkurser i stedet for Yahoo (til udvikling) |
 

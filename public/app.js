@@ -1528,7 +1528,7 @@
       if (state.menu) return closeMenu();
       if (state.panelSymbol && !document.querySelector('dialog[open]')) return closePanel();
     }
-    const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+    const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
     if (typing || document.querySelector('dialog[open]')) return;
     if (e.key === 'n' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();

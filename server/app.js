@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { newId } from './store.js';
-import { computePortfolio, computeValueHistory } from './portfolio-math.js';
+import { computePortfolio, computeValueHistory, parseDanishNumber } from './portfolio-math.js';
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter } from './auth.js';
 import { sendJson, sendError, readJsonBody, parseCookies, cookieHeader, serveStatic, clientIp, HttpError } from './http-utils.js';
 import { YahooError } from './yahoo.js';
@@ -54,6 +54,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   function isSecure(req) {
     if (config.secureCookies) return true;
+    if (!config.trustProxy) return false;
     const proto = req.headers['x-forwarded-proto'];
     return typeof proto === 'string' && proto.split(',')[0].trim() === 'https';
   }
@@ -141,8 +142,11 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       if (allowNull) return null;
       throw new HttpError(400, `${field} mangler`);
     }
-    let n = value;
-    if (typeof n === 'string') n = Number(n.replace(/\./g, '').replace(',', '.').trim() || 'x');
+    const n = parseDanishNumber(value);
+    if (n === null) {
+      if (allowNull) return null;
+      throw new HttpError(400, `${field} mangler`);
+    }
     if (typeof n !== 'number' || !Number.isFinite(n)) throw new HttpError(400, `${field} skal være et tal`);
     if (min !== null && n < min) throw new HttpError(400, `${field} skal være mindst ${min}`);
     if (n > max) throw new HttpError(400, `${field} er for stort`);
@@ -209,7 +213,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     },
 
     async login(req, res) {
-      const ip = clientIp(req);
+      const ip = clientIp(req, { trustProxy: config.trustProxy });
       if (limiter.isBlocked(ip)) {
         const wait = limiter.retryAfterSeconds(ip);
         throw new HttpError(429, `For mange forsøg – prøv igen om ${Math.ceil(wait / 60)} min.`, { retryAfter: wait });
@@ -431,7 +435,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         if (seen.has(symbol)) throw new HttpError(400, `Symbolet ${symbol} optræder flere gange (linje ${i + 1})`);
         seen.add(symbol);
         return {
-          id: typeof raw.id === 'string' && raw.id.length <= 64 ? raw.id : newId(),
+          id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newId(),
           symbol,
           name: String(raw.name || symbol).slice(0, 120),
           currency: raw.currency ? parseCurrency(raw.currency) : null,

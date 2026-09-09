@@ -109,8 +109,12 @@ export async function serveStatic(res, root, urlPath, { cacheControl = 'no-cache
   return true;
 }
 
-export function clientIp(req) {
-  const fwd = req.headers['x-forwarded-for'];
-  if (typeof fwd === 'string' && fwd.length) return fwd.split(',')[0].trim();
+// X-Forwarded-For må kun bruges bag en reverse proxy man stoler på (TRUST_PROXY=1),
+// ellers kan en angriber forfalske sin IP og omgå login-bremsen.
+export function clientIp(req, { trustProxy = false } = {}) {
+  if (trustProxy) {
+    const fwd = req.headers['x-forwarded-for'];
+    if (typeof fwd === 'string' && fwd.length) return fwd.split(',')[0].trim();
+  }
   return req.socket?.remoteAddress || 'unknown';
 }

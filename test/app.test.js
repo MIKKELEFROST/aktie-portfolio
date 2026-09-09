@@ -159,6 +159,10 @@ test('tilføj aktier med validering', async () => {
   const noQty = await request('POST', '/api/holdings', { symbol: 'NOVO-B.CO', quantity: 0, avgPrice: 250 });
   assert.equal(noQty.status, 400);
 
+  const bogus = await request('POST', '/api/holdings', { symbol: 'NOVO-B.CO', quantity: 'ti', avgPrice: 1 });
+  assert.equal(bogus.status, 400);
+  assert.match(bogus.json.error, /skal være et tal/);
+
   const novo = await request('POST', '/api/holdings', { symbol: 'novo-b.co', quantity: '10', avgPrice: '250,50', note: 'Langsigtet' });
   assert.equal(novo.status, 201, novo.text);
   assert.equal(novo.json.holding.symbol, 'NOVO-B.CO');
@@ -170,9 +174,11 @@ test('tilføj aktier med validering', async () => {
   assert.equal(dup.status, 409);
   assert.equal(dup.json.id, novoId);
 
-  const aapl = await request('POST', '/api/holdings', { symbol: 'AAPL', quantity: 2, avgPrice: 150 });
+  const aapl = await request('POST', '/api/holdings', { symbol: 'AAPL', quantity: 2, avgPrice: '150.25' });
   assert.equal(aapl.status, 201);
+  assert.equal(aapl.json.holding.avgPrice, 150.25, 'engelsk decimalpunktum accepteres også');
   aaplId = aapl.json.holding.id;
+  await request('PUT', `/api/holdings/${aaplId}`, { avgPrice: 150 });
 
   const shel = await request('POST', '/api/holdings', { symbol: 'SHEL.L', quantity: 5 });
   assert.equal(shel.status, 201);
@@ -315,10 +321,10 @@ test('sikkerhedsheadere og ukendte ruter', async () => {
   assert.equal((await request('GET', '/findes-ikke')).status, 404);
 });
 
-test('login-bremse efter mange fejl', async () => {
+test('login-bremse efter mange fejl – X-Forwarded-For omgår den ikke', async () => {
   await request('POST', '/api/auth/logout');
   let last;
-  for (let i = 0; i < 9; i++) last = await request('POST', '/api/auth/login', { password: 'forkert' });
+  for (let i = 0; i < 9; i++) last = await request('POST', '/api/auth/login', { password: 'forkert' }, { 'x-forwarded-for': `10.0.0.${i}` });
   assert.equal(last.status, 429);
   assert.ok(last.headers.get('retry-after'));
 });

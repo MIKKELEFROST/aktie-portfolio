@@ -7,7 +7,13 @@
 
   function nextUrl() {
     const next = new URLSearchParams(location.search).get('next') || '/';
-    return next.startsWith('/') && !next.startsWith('//') ? next : '/';
+    try {
+      const url = new URL(next, location.origin);
+      if (url.origin !== location.origin || !/^\/[A-Za-z0-9_\-/]*$/.test(next)) return '/';
+      return url.pathname;
+    } catch {
+      return '/';
+    }
   }
 
   async function api(path, body) {

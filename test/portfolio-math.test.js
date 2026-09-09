@@ -159,3 +159,21 @@ test('round', () => {
   assert.equal(round(null), null);
   assert.equal(round(NaN), null);
 });
+
+test('parseDanishNumber: danske og engelske formater', async () => {
+  const { parseDanishNumber } = await import('../server/portfolio-math.js');
+  assert.equal(parseDanishNumber('1.234,50'), 1234.5);
+  assert.equal(parseDanishNumber('1234,5'), 1234.5);
+  assert.equal(parseDanishNumber('1234.56'), 1234.56);
+  assert.equal(parseDanishNumber('1.234'), 1234);
+  assert.equal(parseDanishNumber('1.234.567'), 1234567);
+  assert.equal(parseDanishNumber('0.4321'), 0.4321);
+  assert.equal(parseDanishNumber('0,4321'), 0.4321);
+  assert.equal(parseDanishNumber(' 612,50 '), 612.5);
+  assert.equal(parseDanishNumber(42), 42);
+  assert.equal(parseDanishNumber(''), null);
+  assert.equal(parseDanishNumber(null), null);
+  assert.ok(Number.isNaN(parseDanishNumber('abc')));
+  assert.ok(Number.isNaN(parseDanishNumber('1e5')));
+  assert.ok(Number.isNaN(parseDanishNumber('1,234,567')));
+});

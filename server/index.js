@@ -18,6 +18,7 @@ export function loadConfig(env = process.env) {
     baseCurrency: (env.BASE_CURRENCY || 'DKK').toUpperCase(),
     secureCookies: env.SECURE_COOKIES === '1' || env.SECURE_COOKIES === 'true',
     mockYahoo: env.YAHOO_MOCK === '1' || env.YAHOO_MOCK === 'true',
+    trustProxy: env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true',
     warmCache: env.WARM_CACHE !== '0',
   };
 }
