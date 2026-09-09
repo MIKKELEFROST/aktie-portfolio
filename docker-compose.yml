@@ -1,0 +1,15 @@
+services:
+  aktie-portfolio:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      # Valgfrit: sæt adgangskoden her, ellers oprettes den i browseren første gang.
+      # DASHBOARD_PASSWORD: skift-mig
+      BASE_CURRENCY: DKK
+    volumes:
+      - aktie-data:/data
+    restart: unless-stopped
+
+volumes:
+  aktie-data:

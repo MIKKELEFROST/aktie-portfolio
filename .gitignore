@@ -1,0 +1,24 @@
+# Personlige data (beholdninger, adgangskode, session-nøgle) – commit aldrig disse
+data/
+!data/.gitkeep
+
+# Miljø
+.env
+.env.*
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Test-artefakter
+test-results/
+playwright-report/
+*.png
+!public/*.png
+!docs/*.png

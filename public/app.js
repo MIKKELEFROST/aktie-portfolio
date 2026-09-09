@@ -1,0 +1,1692 @@
+// Min Portefølje – dashboard-klient. Vanilla JS, ingen afhængigheder.
+(() => {
+  'use strict';
+
+  // ======================================================================
+  // Hjælpere
+  // ======================================================================
+
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const icon = (name, cls = 'icon') => `<svg class="${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+  const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+  const isNum = (n) => typeof n === 'number' && Number.isFinite(n);
+
+  const CURRENCY_SYMBOLS = { DKK: 'kr.', EUR: '€', USD: '$', GBP: '£', SEK: 'kr', NOK: 'kr', CHF: 'CHF' };
+  const BASE_CURRENCIES = ['DKK', 'EUR', 'USD', 'SEK', 'NOK', 'GBP', 'CHF'];
+  const PALETTE = ['#2563eb', '#0ea5e9', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316', '#84cc16', '#6366f1'];
+  const REFRESH_MS = 60_000;
+  const RANGES = [
+    { key: '1mo', label: '1M' },
+    { key: '3mo', label: '3M' },
+    { key: '6mo', label: '6M' },
+    { key: 'ytd', label: 'ÅTD' },
+    { key: '1y', label: '1Å' },
+    { key: '5y', label: '5Å' },
+  ];
+
+  const nf = (opts) => new Intl.NumberFormat('da-DK', opts);
+  const fmtNum = (n, min = 2, max = 2) => (isNum(n) ? nf({ minimumFractionDigits: min, maximumFractionDigits: max }).format(n) : '–');
+
+  // Beløb i basisvaluta: "1.234.567 kr." – decimaler kan slås til i indstillinger.
+  function fmtAmount(n, currency = state.baseCurrency, { decimals = null, sign = false } = {}) {
+    if (!isNum(n)) return '–';
+    const d = decimals ?? (state.settings.showDecimals ? 2 : 0);
+    const abs = nf({ minimumFractionDigits: d, maximumFractionDigits: d }).format(Math.abs(n));
+    const sym = CURRENCY_SYMBOLS[currency] || currency;
+    const prefix = n < 0 ? '−' : sign && n > 0 ? '+' : '';
+    return `${prefix}${abs} ${sym}`;
+  }
+
+  // Kurs i aktiens egen valuta: 2 decimaler, flere for små kurser.
+  function fmtPrice(n) {
+    if (!isNum(n)) return '–';
+    const d = Math.abs(n) < 1 ? 4 : 2;
+    return fmtNum(n, d, d);
+  }
+
+  function fmtPct(n, { sign = true } = {}) {
+    if (!isNum(n)) return '–';
+    const abs = fmtNum(Math.abs(n), 1, 2);
+    const prefix = n < 0 ? '−' : sign && n > 0 ? '+' : '';
+    return `${prefix}${abs} %`;
+  }
+
+  function fmtQty(n) {
+    if (!isNum(n)) return '–';
+    return nf({ minimumFractionDigits: 0, maximumFractionDigits: 4 }).format(n);
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return '–';
+    return new Intl.DateTimeFormat('da-DK', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Copenhagen' }).format(new Date(iso));
+  }
+
+  function fmtDateTime(iso) {
+    if (!iso) return '–';
+    const d = new Date(iso);
+    const date = new Intl.DateTimeFormat('da-DK', { day: 'numeric', month: 'short', timeZone: 'Europe/Copenhagen' }).format(d);
+    return `${date} kl. ${fmtTime(iso)}`;
+  }
+
+  function fmtDate(iso, { year = false } = {}) {
+    if (!iso) return '–';
+    return new Intl.DateTimeFormat('da-DK', { day: 'numeric', month: 'short', year: year ? 'numeric' : undefined, timeZone: 'Europe/Copenhagen' }).format(new Date(iso));
+  }
+
+  // Kompakt aksemærkat: 1,28 mio. / 128.000
+  function fmtCompact(n) {
+    if (!isNum(n)) return '';
+    if (Math.abs(n) >= 1e9) return `${fmtNum(n / 1e9, 1, 2)} mia.`;
+    if (Math.abs(n) >= 1e6) return `${fmtNum(n / 1e6, 1, 2)} mio.`;
+    return fmtNum(n, 0, 0);
+  }
+
+  // Dansk tal-input: "1.234,56" → 1234.56, "612,5" → 612.5, "0.4321" → 0.4321, "1.234" → 1234
+  function parseInput(str) {
+    const s = String(str ?? '').trim().replace(/\s/g, '');
+    if (!s) return null;
+    let norm = s;
+    if (s.includes(',')) norm = s.replace(/\./g, '').replace(',', '.');
+    else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) norm = s.replace(/\./g, '');
+    const n = Number(norm);
+    return Number.isFinite(n) ? n : NaN;
+  }
+
+  const signClass = (n) => (!isNum(n) || Math.abs(n) < 1e-9 ? 'flat' : n > 0 ? 'pos' : 'neg');
+  const arrow = (n) => (!isNum(n) || Math.abs(n) < 1e-9 ? '' : n > 0 ? '▲ ' : '▼ ');
+  const initials = (symbol) => symbol.replace(/[^A-Z0-9]/gi, '').slice(0, 3).toUpperCase();
+  const yahooUrl = (symbol) => `https://finance.yahoo.com/quote/${encodeURIComponent(symbol)}`;
+
+  function storageGet(key, fallback) {
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? fallback : v;
+    } catch {
+      return fallback;
+    }
+  }
+  function storageSet(key, value) {
+    try {
+      localStorage.setItem(key, value);
+    } catch {}
+  }
+
+  // ======================================================================
+  // Tilstand
+  // ======================================================================
+
+  const state = {
+    portfolio: null, // svar fra /api/portfolio
+    settings: {},
+    baseCurrency: 'DKK',
+    loading: false,
+    loadError: null,
+    lastFetch: 0,
+    sort: JSON.parse(storageGet('sort', 'null')) || { key: 'valueBase', dir: 'desc' },
+    filter: '',
+    privacy: storageGet('privacy', '0') === '1',
+    theme: storageGet('theme', 'system'),
+    autoRefresh: storageGet('autoRefresh', '1') === '1',
+    range: storageGet('range', '1y'),
+    history: {}, // range -> { points, ... } | { error }
+    historyLoading: null,
+    panelSymbol: null,
+    menu: null,
+    pending: null, // beholdninger vist før kurserne er hentet
+    failures: 0,
+    lastAttempt: 0,
+    lastManual: 0,
+    usesEnvPassword: false,
+  };
+
+  // ======================================================================
+  // API
+  // ======================================================================
+
+  async function api(method, path, body) {
+    const opts = { method, credentials: 'same-origin', headers: {} };
+    if (method !== 'GET') {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body ?? {});
+    }
+    let res;
+    try {
+      res = await fetch(path, opts);
+    } catch {
+      throw new Error('Ingen forbindelse til serveren');
+    }
+    if (res.status === 401) {
+      location.href = `/login?next=${encodeURIComponent(location.pathname)}`;
+      throw new Error('Du er logget ud');
+    }
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {}
+    if (!res.ok) {
+      const err = new Error(data?.error || `Serveren svarede ${res.status}`);
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
+  }
+
+  // ======================================================================
+  // Indlæsning
+  // ======================================================================
+
+  let refreshTimer = null;
+  let inflight = null;
+
+  // Samtidige kald deles; `fresh: true` venter på det igangværende og henter derefter igen
+  // (bruges efter en ændring, så svaret garanteret indeholder ændringen).
+  function loadPortfolio(opts = {}) {
+    if (inflight) {
+      if (!opts.fresh) return inflight;
+      return inflight.catch(() => {}).then(() => loadPortfolio({ ...opts, fresh: false }));
+    }
+    inflight = doLoadPortfolio(opts).finally(() => {
+      inflight = null;
+    });
+    return inflight;
+  }
+
+  async function doLoadPortfolio({ silent = false } = {}) {
+    state.loading = true;
+    state.lastAttempt = Date.now();
+    if (!silent) setRefreshing(true);
+    try {
+      const data = await api('GET', '/api/portfolio');
+      state.portfolio = data;
+      state.pending = null;
+      state.settings = data.settings || {};
+      state.baseCurrency = data.baseCurrency;
+      state.loadError = null;
+      state.failures = 0;
+      state.lastFetch = Date.now();
+    } catch (err) {
+      state.loadError = err.message;
+      state.failures += 1;
+      if (!silent || !state.portfolio) toast(err.message, 'error');
+    } finally {
+      state.loading = false;
+      setRefreshing(false);
+      render({ silent });
+      if (state.panelSymbol) renderPanel();
+    }
+  }
+
+  async function afterMutation() {
+    await loadPortfolio({ silent: true, fresh: true });
+    invalidateHistory();
+  }
+
+  const historyReq = {};
+
+  // Ændrer beholdningen sig (også fra en anden enhed), skal grafen beregnes igen.
+  function historyKey() {
+    return `${state.baseCurrency}|${positions().map((p) => `${p.symbol}:${p.quantity}`).sort().join(',')}`;
+  }
+
+  async function loadHistory(range, { force = false } = {}) {
+    const cached = state.history[range];
+    if (!force && cached && !cached.error && cached.key === historyKey()) return;
+    const seq = (historyReq[range] = (historyReq[range] || 0) + 1);
+    state.historyLoading = range;
+    if (!cached || cached.error) renderChartCard();
+    let result;
+    try {
+      const key = historyKey();
+      result = await api('GET', `/api/portfolio/history?range=${encodeURIComponent(range)}`);
+      result.fetchedAt = Date.now();
+      result.key = key;
+    } catch (err) {
+      result = { error: err.message };
+    }
+    if (historyReq[range] !== seq) return; // overhalet af et nyere kald
+    state.history[range] = result;
+    if (state.historyLoading === range) state.historyLoading = null;
+    renderChartCard();
+  }
+
+  function setRefreshing(on) {
+    $$('[data-action="refresh"]').forEach((b) => b.classList.toggle('is-loading', on));
+  }
+
+  // 60 s mens en børs er åben, 5 min når alle er lukket; fordobles ved fejl (maks 10 min).
+  function refreshInterval() {
+    const open = state.portfolio?.totals?.anyMarketOpen;
+    let ms = open ? REFRESH_MS : 5 * 60_000;
+    if (state.failures) ms = Math.min(10 * 60_000, ms * 2 ** state.failures);
+    return ms;
+  }
+
+  function scheduleRefresh() {
+    clearInterval(refreshTimer);
+    refreshTimer = setInterval(() => {
+      if (!state.autoRefresh || document.hidden) return;
+      if (Date.now() - state.lastAttempt >= refreshInterval()) {
+        loadPortfolio({ silent: true });
+        const h = state.history[state.range];
+        if (h && !h.error && Date.now() - (h.fetchedAt || 0) > 15 * 60_000) loadHistory(state.range, { force: true });
+      } else if (state.portfolio && Date.now() - state.lastFetch > 5 * 60_000) {
+        renderSidebarStatus();
+      }
+    }, 5000);
+  }
+
+  function manualRefresh() {
+    if (Date.now() - state.lastManual < 10_000) {
+      toast('Vent lidt – kurserne blev lige hentet. Yahoo blokerer ved for mange kald.');
+      return;
+    }
+    state.lastManual = Date.now();
+    loadPortfolio();
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && state.autoRefresh && Date.now() - state.lastFetch > 20_000) loadPortfolio({ silent: true });
+  });
+
+  // ======================================================================
+  // Routing
+  // ======================================================================
+
+  const ROUTES = { '/': 'overview', '/beholdninger': 'holdings', '/indstillinger': 'settings' };
+  const TITLES = { overview: 'Overblik', holdings: 'Beholdninger', settings: 'Indstillinger' };
+
+  function currentRoute() {
+    return ROUTES[location.pathname] || 'overview';
+  }
+
+  function navigate(path) {
+    if (!(path in ROUTES)) path = '/';
+    if (location.pathname !== path) history.pushState({}, '', path);
+    closePanel();
+    render();
+    window.scrollTo({ top: 0 });
+  }
+
+  window.addEventListener('popstate', () => {
+    closePanel();
+    render();
+  });
+
+  // ======================================================================
+  // Rendering
+  // ======================================================================
+
+  function render({ silent = false } = {}) {
+    const route = currentRoute();
+    document.title = `${TITLES[route]} – Min Portefølje`;
+    $$('[data-nav]').forEach((a) => {
+      const active = ROUTES[a.dataset.nav] === route;
+      a.classList.toggle('active', active);
+      if (active) a.setAttribute('aria-current', 'page');
+      else a.removeAttribute('aria-current');
+    });
+    // Afbryd ikke brugeren midt i et felt ved en stille baggrundsopdatering.
+    if (silent && ['filter', 'set-name', 'set-cash'].includes(document.activeElement?.id)) {
+      renderSidebarStatus();
+      return;
+    }
+    const page = $('#page');
+    if (route === 'overview') page.innerHTML = renderOverview();
+    else if (route === 'holdings') page.innerHTML = renderHoldings();
+    else page.innerHTML = renderSettings();
+    if (route === 'overview') afterRenderOverview();
+    renderSidebarStatus();
+    document.body.classList.toggle('private', state.privacy);
+    $$('[data-action="privacy"] use').forEach((u) => u.setAttribute('href', state.privacy ? '#i-eye-off' : '#i-eye'));
+  }
+
+  function renderSidebarStatus() {
+    const el = $('#sidebar-status');
+    if (!el) return;
+    const p = state.portfolio;
+    if (!p) {
+      el.textContent = 'Henter kurser…';
+      return;
+    }
+    const chip = freshness();
+    el.innerHTML = `<span class="market-dot ${chip.cls}"></span> ${esc(chip.text)}<br>${p.totals.positionCount} ${p.totals.positionCount === 1 ? 'aktie' : 'aktier'} · ${esc(state.baseCurrency)}`;
+  }
+
+  function positions() {
+    if (state.portfolio) return state.portfolio.positions;
+    if (state.pending) return state.pending;
+    return [];
+  }
+
+  // Yahoo's børsnavne → danske
+  const EXCHANGE_NAMES = {
+    Copenhagen: 'København', CPH: 'København', NasdaqGS: 'New York', NasdaqGM: 'New York', NasdaqCM: 'New York', NYSE: 'New York',
+    'NYSE Arca': 'New York', 'NYSE American': 'New York', NYQ: 'New York', NMS: 'New York', Stockholm: 'Stockholm', STO: 'Stockholm',
+    Oslo: 'Oslo', OSL: 'Oslo', Helsinki: 'Helsinki', HEL: 'Helsinki', XETRA: 'Frankfurt', Frankfurt: 'Frankfurt', GER: 'Frankfurt',
+    Amsterdam: 'Amsterdam', AMS: 'Amsterdam', LSE: 'London', London: 'London', Paris: 'Paris', PAR: 'Paris', Zurich: 'Zürich',
+    Toronto: 'Toronto', 'Swiss Exchange': 'Zürich', Milan: 'Milano', Madrid: 'Madrid', Tokyo: 'Tokyo', 'Hong Kong': 'Hongkong',
+  };
+  const exchangeName = (ex) => EXCHANGE_NAMES[ex] || ex || 'Ukendt børs';
+
+  // Én samlet friskheds-status: { cls: 'open'|'closed'|'warn'|'error', text }
+  function freshness() {
+    const p = state.portfolio;
+    if (!p) return { cls: 'closed', text: 'Henter kurser…' };
+    const pos = p.positions;
+    const t = p.totals;
+    if (pos.length && t.errorCount === pos.length) return { cls: 'error', text: 'Ingen forbindelse til Yahoo Finance' };
+    if (state.loadError) return { cls: 'warn', text: `Kunne ikke opdatere · viser tal fra kl. ${fmtTime(p.updatedAt)}` };
+    if (t.hasStale) {
+      const s = pos.find((x) => x.status === 'stale');
+      return { cls: 'warn', text: `Forældede kurser${s?.fetchedAt ? ` · fra ${fmtDateTime(s.fetchedAt)}` : ''}` };
+    }
+    const ageMin = Math.floor((Date.now() - state.lastFetch) / 60_000);
+    if (ageMin >= 5) return { cls: 'warn', text: `Opdateret for ${ageMin} min siden` };
+    const known = pos.filter((x) => x.marketOpen === true || x.marketOpen === false);
+    if (!known.length) return { cls: 'closed', text: `Opdateret kl. ${fmtTime(p.updatedAt)}` };
+    const byEx = new Map();
+    for (const x of known) {
+      const name = exchangeName(x.exchange);
+      const e = byEx.get(name) || { open: 0, closed: 0 };
+      if (x.marketOpen) e.open++;
+      else e.closed++;
+      byEx.set(name, e);
+    }
+    const list = [...byEx.entries()].map(([name, e]) => ({ name, open: e.open >= e.closed }));
+    const openCount = list.filter((e) => e.open).length;
+    if (openCount === 0) {
+      const last = known.map((x) => x.marketTime).filter(Boolean).sort().at(-1);
+      return { cls: 'closed', text: `Markederne er lukket${last ? ` · kurser fra ${fmtDateTime(last)}` : ''}` };
+    }
+    const text = list.length <= 3 ? list.map((e) => `${e.name} ${e.open ? 'åben' : 'lukket'}`).join(' · ') : `${openCount} af ${list.length} børser åbne`;
+    return { cls: 'open', text };
+  }
+
+  function greeting() {
+    const hour = Number(new Intl.DateTimeFormat('da-DK', { hour: 'numeric', hour12: false, timeZone: 'Europe/Copenhagen' }).format(new Date()));
+    const word = hour < 5 ? 'Godnat' : hour < 10 ? 'Godmorgen' : hour < 18 ? 'Goddag' : 'Godaften';
+    const name = (state.settings.displayName || '').trim();
+    return name ? `${word}, ${name}` : 'Overblik';
+  }
+
+  function marketPill() {
+    if (!state.portfolio || !state.portfolio.positions.length) return '';
+    const f = freshness();
+    return `<span class="status-pill ${f.cls}" role="status"><span class="dot"></span>${esc(f.text)}</span>`;
+  }
+
+  function allMarketsClosed() {
+    const pos = positions();
+    return pos.length > 0 && pos.some((x) => x.marketOpen === false) && !pos.some((x) => x.marketOpen === true);
+  }
+
+  function pageHeader(title, sub, actions = '') {
+    return `<div class="page-header">
+      <div><h1>${esc(title)}</h1><div class="sub">${sub}</div></div>
+      <div class="page-actions">${actions}</div>
+    </div>`;
+  }
+
+  function headerActions({ add = true } = {}) {
+    return `
+      <button class="btn btn-ghost btn-icon" data-action="privacy" title="${state.privacy ? 'Vis beløb' : 'Skjul beløb'}" aria-label="${state.privacy ? 'Vis beløb' : 'Skjul beløb'}" aria-pressed="${state.privacy}">${icon(state.privacy ? 'eye-off' : 'eye')}</button>
+      <button class="btn btn-ghost btn-icon${state.loading ? ' is-loading' : ''}" data-action="refresh" title="Opdatér kurser" aria-label="Opdatér kurser">${icon('refresh')}</button>
+      ${add ? `<button class="btn btn-primary" data-action="add">${icon('plus')}<span>Tilføj aktie</span></button>` : ''}`;
+  }
+
+  function updatedSub() {
+    const p = state.portfolio;
+    if (!p) return '<span>Henter kurser…</span>';
+    return `<span>Opdateret kl. ${esc(fmtTime(p.updatedAt))}</span>${marketPill()}`;
+  }
+
+  function banners() {
+    const p = state.portfolio;
+    const out = [];
+    if (state.loadError && p) {
+      out.push(`<div class="banner error">${icon('warn')}<div><b>Kunne ikke opdatere kurserne.</b> ${esc(state.loadError)}. Viser tal fra kl. ${esc(fmtTime(p.updatedAt))}. <a href="#" data-action="refresh">Prøv igen</a></div></div>`);
+    }
+    if (!p) return out.join('');
+    const errors = p.positions.filter((x) => x.status === 'error' || x.status === 'fx_error');
+    if (errors.length) {
+      const list = errors.map((x) => `${esc(x.symbol)} (${esc(x.error?.message || 'ingen kurs')})`).join(', ');
+      out.push(`<div class="banner">${icon('warn')}<div><b>${errors.length === 1 ? '1 aktie mangler kurs' : `${errors.length} aktier mangler kurs`}</b> – totalerne er ufuldstændige. ${list}</div></div>`);
+    }
+    const stale = p.positions.filter((x) => x.status === 'stale');
+    if (stale.length) {
+      out.push(`<div class="banner">${icon('info')}<div><b>Kunne ikke hente nye kurser for ${stale.map((x) => esc(x.symbol)).join(', ')}.</b> Viser seneste kendte kurs${stale[0].fetchedAt ? ` fra ${esc(fmtDateTime(stale[0].fetchedAt))}` : ''}.</div></div>`);
+    }
+    return out.join('');
+  }
+
+  // ---------- Overblik ----------
+
+  const AFKAST_TOOLTIP = 'Kursafkast i forhold til din gns. købskurs, omregnet til basisvalutaen med dagens valutakurs. Valutaudsving siden købet indgår ikke.';
+
+  function renderOverview() {
+    const p = state.portfolio;
+    const t = p?.totals;
+    const todayLabel = allMarketsClosed() ? 'Seneste handelsdag' : 'I dag';
+    const kpi = (label, value, sub = '', cls = '', title = '') => `<div class="card kpi ${cls}"><div class="kpi-label" ${title ? `title="${esc(title)}"` : ''}>${label}</div><div class="kpi-value ${p ? '' : 'skeleton'}">${value}</div><div class="kpi-sub">${sub}</div></div>`;
+
+    let kpis;
+    if (!p) {
+      kpis = [kpi('Porteføljeværdi', '000.000 kr.', '', 'kpi-hero'), kpi('I dag', '0.000 kr.'), kpi('Samlet afkast', '0.000 kr.'), kpi('Investeret', '000.000 kr.')].join('');
+    } else {
+      const pill = (n) => (isNum(n) ? `<span class="pill ${signClass(n)}">${fmtPct(n)}</span>` : '');
+      const noQuote = t.errorCount;
+      const noCost = p.positions.filter((x) => x.valueBase != null && x.costBase == null).length;
+      const excl = (n, what) => (n ? `<span class="muted">· ekskl. ${n} ${n === 1 ? 'aktie' : 'aktier'} ${what}</span>` : '');
+      const lastTrade = p.positions.map((x) => x.marketTime).filter(Boolean).sort().at(-1);
+      kpis = [
+        kpi('Porteføljeværdi', `<span class="amount">${fmtAmount(t.totalValueBase ?? t.valueBase)}</span>`,
+          `<span>${t.positionCount} ${t.positionCount === 1 ? 'aktie' : 'aktier'}${t.cashBase ? ` · heraf kontanter <span class="amount">${fmtAmount(t.cashBase)}</span>` : ''}</span>${excl(noQuote, 'uden kurs')}`,
+          'kpi-hero', 'Antal × kurs for alle aktier, omregnet til basisvalutaen med dagens valutakurs' + (t.cashBase ? ', plus kontanter' : '')),
+        kpi(todayLabel, `<span class="amount ${signClass(t.dayChangeBase)}">${fmtAmount(t.dayChangeBase, state.baseCurrency, { sign: true })}</span>`,
+          `${pill(t.dayChangePercent)}<span>${todayLabel === 'I dag' ? 'siden forrige lukkekurs' : lastTrade ? `handlet ${fmtDateTime(lastTrade)}` : 'siden forrige lukkekurs'}</span>`,
+          '', 'Ændring i forhold til forrige lukkekurs på aktiens egen børs'),
+        kpi('Samlet afkast', `<span class="amount ${signClass(t.gainBase)}">${fmtAmount(t.gainBase, state.baseCurrency, { sign: true })}</span>`,
+          `${pill(t.gainPercent)}<span>urealiseret, siden køb</span>${excl(noCost, 'uden købskurs')}`, '', AFKAST_TOOLTIP),
+        kpi('Investeret', `<span class="amount">${fmtAmount(t.costBase)}</span>`, `<span>købskurs × antal, til dagens valutakurs</span>${excl(noCost, 'uden købskurs')}`, '', 'Gns. købskurs × antal for alle aktier med kendt købskurs, omregnet med dagens valutakurs'),
+      ].join('');
+    }
+
+    const empty = p ? p.positions.length === 0 : state.pending ? state.pending.length === 0 : false;
+    return `
+      ${pageHeader(greeting(), updatedSub(), headerActions())}
+      ${banners()}
+      <div class="grid grid-kpi">${kpis}</div>
+      ${empty ? emptyState() : `
+      <div class="grid grid-2">
+        <div class="card" id="chart-card">${chartCardInner()}</div>
+        <div class="stack">
+          <div class="card">${allocationCardInner()}</div>
+          <div class="card">${moversCardInner()}</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h2>${icon('briefcase')}Beholdning</h2><a href="/beholdninger" data-link class="small">Administrér →</a></div>
+        ${holdingsTable({ compact: true })}
+      </div>`}
+      <p class="footer-note">Kurser fra Yahoo Finance – kan være op til 15 min. forsinkede. Beløb i ${esc(state.baseCurrency)}. Ikke investeringsrådgivning.</p>`;
+  }
+
+  function afterRenderOverview() {
+    if (state.portfolio && state.portfolio.positions.length) {
+      loadHistory(state.range);
+      renderChartCard();
+    }
+  }
+
+  function emptyState() {
+    const chips = ['Novo Nordisk', 'Mærsk', 'Apple', 'MSCI World'].map((q) => `<button class="chip-btn" data-action="add" data-query="${esc(q)}">${esc(q)}</button>`).join('');
+    return `<div class="card"><div class="empty">${icon('briefcase')}<h3>Din portefølje er tom</h3><p>Tilføj din første aktie for at se værdi, dagens bevægelse og afkast.</p><button class="btn btn-primary" data-action="add">${icon('plus')}Tilføj din første aktie</button><div class="chip-row"><span class="muted small">Prøv f.eks.</span>${chips}</div></div></div>`;
+  }
+
+  // ---------- Graf ----------
+
+  function chartCardInner() {
+    const pills = RANGES.map((r) => `<button type="button" data-range="${r.key}" class="${r.key === state.range ? 'active' : ''}">${r.label}</button>`).join('');
+    return `<div class="card-header"><h2>${icon('chart')}Udvikling <span class="hint">ca.</span></h2><div class="range-pills">${pills}</div></div>
+      <div id="chart-summary" class="chart-summary"></div>
+      <div class="chart-box" id="chart-box"></div>
+      <div class="chart-legend"><span><i></i>Porteføljeværdi</span><span><i class="dashed"></i>Investeret</span><span class="muted">Beregnet ud fra din nuværende beholdning og historiske lukkekurser.</span></div>`;
+  }
+
+  function renderChartCard() {
+    const box = $('#chart-box');
+    const summary = $('#chart-summary');
+    if (!box) return;
+    $$('#chart-card [data-range]').forEach((b) => b.classList.toggle('active', b.dataset.range === state.range));
+    const h = state.history[state.range];
+    if (!h) {
+      box.innerHTML = `<div class="chart-msg">Henter historik…</div>`;
+      summary.innerHTML = '';
+      return;
+    }
+    if (h.error) {
+      box.innerHTML = `<div class="chart-msg">Kunne ikke hente historik: ${esc(h.error)}</div>`;
+      summary.innerHTML = '';
+      return;
+    }
+    if (!h.points || h.points.length < 2) {
+      box.innerHTML = `<div class="chart-msg">Ikke nok historik til at tegne en graf${h.missing?.length ? ` (${h.missing.map((m) => esc(m.symbol)).join(', ')} mangler data)` : ''}.</div>`;
+      summary.innerHTML = '';
+      return;
+    }
+    const first = h.points[0];
+    const last = h.points[h.points.length - 1];
+    const diff = last.value - first.value;
+    const pct = first.value ? (diff / first.value) * 100 : null;
+    summary.innerHTML = `<span class="big amount">${fmtAmount(last.value)}</span><span class="${signClass(diff)}"><span class="amount">${fmtAmount(diff, state.baseCurrency, { sign: true })}</span> (${fmtPct(pct)})</span><span class="muted small">siden ${esc(fmtDate(first.date, { year: longRange() }))}${h.missing?.length ? ` · ${h.missing.length} aktie${h.missing.length > 1 ? 'r' : ''} uden historik` : ''}${state.historyLoading === state.range ? ' · opdaterer…' : ''}</span>`;
+    drawChart(box, h.points, state.portfolio?.totals?.costBase ?? null);
+  }
+
+  const longRange = () => ['1y', '2y', '5y', 'max'].includes(state.range);
+
+  function drawChart(box, points, invested) {
+    const W = Math.max(280, box.clientWidth || 600);
+    const H = box.clientHeight || 240;
+    const padL = 8, padR = 8, padT = 14, padB = 26;
+    const values = points.map((p) => p.value);
+    let min = Math.min(...values);
+    let max = Math.max(...values);
+    if (isNum(invested) && invested > 0) {
+      min = Math.min(min, invested);
+      max = Math.max(max, invested);
+    }
+    if (max === min) { max += 1; min -= 1; }
+    const span = max - min;
+    min -= span * 0.08;
+    max += span * 0.08;
+    const t0 = Date.parse(points[0].date);
+    const t1 = Date.parse(points[points.length - 1].date);
+    const x = (date) => padL + ((Date.parse(date) - t0) / Math.max(1, t1 - t0)) * (W - padL - padR);
+    const y = (v) => padT + (1 - (v - min) / (max - min)) * (H - padT - padB);
+
+    const path = points.map((p, i) => `${i ? 'L' : 'M'}${x(p.date).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ');
+    const area = `${path} L${x(points[points.length - 1].date).toFixed(1)},${(H - padB).toFixed(1)} L${x(points[0].date).toFixed(1)},${(H - padB).toFixed(1)} Z`;
+
+    const gridLines = [];
+    const steps = 4;
+    for (let i = 0; i <= steps; i++) {
+      const v = min + ((max - min) * i) / steps;
+      const yy = y(v).toFixed(1);
+      gridLines.push(`<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="var(--chart-grid)" stroke-width="1"/>`);
+      if (i > 0 && i < steps) gridLines.push(`<text x="${W - padR}" y="${yy - 3}" text-anchor="end" font-size="10" fill="var(--muted)" class="amount">${esc(fmtCompact(v))}</text>`);
+    }
+    const labelCount = W < 480 ? 3 : 5;
+    const xLabels = [];
+    for (let i = 0; i < labelCount; i++) {
+      const idx = Math.round(((points.length - 1) * i) / (labelCount - 1));
+      const p = points[idx];
+      const anchor = i === 0 ? 'start' : i === labelCount - 1 ? 'end' : 'middle';
+      xLabels.push(`<text x="${x(p.date).toFixed(1)}" y="${H - 8}" text-anchor="${anchor}" font-size="10" fill="var(--muted)">${esc(fmtDate(p.date, { year: longRange() }))}</text>`);
+    }
+    const investedLine = isNum(invested) && invested > 0
+      ? `<line x1="${padL}" x2="${W - padR}" y1="${y(invested).toFixed(1)}" y2="${y(invested).toFixed(1)}" stroke="var(--chart-invested)" stroke-width="1.5" stroke-dasharray="5 4"/>`
+      : '';
+    const last = points[points.length - 1];
+    box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" width="${W}" height="${H}">
+      <defs><linearGradient id="chart-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--chart-line)" stop-opacity="0.22"/><stop offset="1" stop-color="var(--chart-line)" stop-opacity="0"/></linearGradient></defs>
+      ${gridLines.join('')}
+      <path d="${area}" fill="url(#chart-grad)"/>
+      ${investedLine}
+      <path d="${path}" fill="none" stroke="var(--chart-line)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      <circle cx="${x(last.date).toFixed(1)}" cy="${y(last.value).toFixed(1)}" r="3.5" fill="var(--chart-line)" stroke="var(--surface)" stroke-width="2"/>
+      <line id="chart-cursor" x1="0" x2="0" y1="${padT}" y2="${H - padB}" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 3" style="display:none"/>
+      <circle id="chart-dot" r="4" fill="var(--chart-line)" stroke="var(--surface)" stroke-width="2" style="display:none"/>
+      ${xLabels.join('')}
+    </svg><div class="chart-tip" id="chart-tip" style="display:none"></div>`;
+
+    const svg = $('svg', box);
+    const tip = $('#chart-tip', box);
+    const cursor = $('#chart-cursor', box);
+    const dot = $('#chart-dot', box);
+    const xs = points.map((p) => x(p.date));
+    const move = (clientX) => {
+      const rect = svg.getBoundingClientRect();
+      const px = ((clientX - rect.left) / rect.width) * W;
+      let best = 0;
+      let bestD = Infinity;
+      for (let i = 0; i < xs.length; i++) {
+        const d = Math.abs(xs[i] - px);
+        if (d < bestD) { bestD = d; best = i; }
+      }
+      const p = points[best];
+      const cx = xs[best];
+      const cy = y(p.value);
+      cursor.setAttribute('x1', cx); cursor.setAttribute('x2', cx); cursor.style.display = '';
+      dot.setAttribute('cx', cx); dot.setAttribute('cy', cy); dot.style.display = '';
+      const change = p.value - points[0].value;
+      tip.innerHTML = `${esc(fmtDate(p.date, { year: true }))}<b class="amount">${fmtAmount(p.value)}</b><span class="amount">${fmtAmount(change, state.baseCurrency, { sign: true })}</span> siden start`;
+      tip.style.display = '';
+      const leftPx = clamp((cx / W) * rect.width, 70, rect.width - 70);
+      tip.style.left = `${leftPx}px`;
+      tip.style.top = `${(cy / H) * rect.height - 10}px`;
+    };
+    const hide = () => { tip.style.display = 'none'; cursor.style.display = 'none'; dot.style.display = 'none'; };
+    svg.addEventListener('mousemove', (e) => move(e.clientX));
+    svg.addEventListener('touchmove', (e) => { move(e.touches[0].clientX); }, { passive: true });
+    svg.addEventListener('mouseleave', hide);
+    svg.addEventListener('touchend', hide);
+  }
+
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { if ($('#chart-box')) renderChartCard(); }, 150);
+  });
+
+  // ---------- Fordeling ----------
+
+  function allocationCardInner() {
+    const pos = positions().filter((p) => isNum(p.weight)).sort((a, b) => b.weight - a.weight);
+    if (!pos.length) return `<div class="card-header"><h2>Fordeling</h2></div><p class="muted">Ingen kurser endnu.</p>`;
+    const top = pos.slice(0, 6);
+    const rest = pos.slice(6);
+    const segs = top.map((p, i) => ({ name: p.name || p.symbol, symbol: p.symbol, pct: p.weight, color: PALETTE[i % PALETTE.length] }));
+    if (rest.length) segs.push({ name: `Andre (${rest.length})`, pct: rest.reduce((s, p) => s + p.weight, 0), color: '#9ca3af' });
+
+    const byCur = {};
+    for (const p of pos) byCur[p.currency] = (byCur[p.currency] || 0) + p.weight;
+    const curs = Object.entries(byCur).sort((a, b) => b[1] - a[1]).map(([cur, pct], i) => ({ name: cur, pct, color: PALETTE[(i + 3) % PALETTE.length] }));
+
+    const bar = (items) => `<div class="alloc-bar">${items.map((s) => `<span style="width:${s.pct.toFixed(2)}%;background:${s.color}" title="${esc(s.name)}: ${fmtPct(s.pct, { sign: false })}"></span>`).join('')}</div>`;
+    const legend = (items) => `<ul class="alloc-legend">${items.map((s) => `<li${s.symbol ? ` data-action="open" data-symbol="${esc(s.symbol)}" style="cursor:pointer"` : ''}><span class="swatch" style="background:${s.color}"></span><span class="name">${esc(s.name)}</span><span class="pct">${fmtPct(s.pct, { sign: false })}</span></li>`).join('')}</ul>`;
+    return `<div class="card-header"><h2>Fordeling</h2><span class="hint">Andel af værdi</span></div>
+      ${bar(segs)}${legend(segs)}
+      ${curs.length > 1 ? `<div class="alloc-title">Efter valuta</div>${bar(curs)}${legend(curs)}` : ''}`;
+  }
+
+  // ---------- Dagens bevægelser ----------
+
+  function moversCardInner() {
+    const pos = positions().filter((p) => isNum(p.dayChangePercent));
+    if (pos.length < 2) return `<div class="card-header"><h2>Dagens bevægelser</h2></div><p class="muted">Tilføj flere aktier for at se dagens største bevægelser.</p>`;
+    const sorted = [...pos].sort((a, b) => b.dayChangePercent - a.dayChangePercent);
+    const up = sorted.filter((p) => p.dayChangePercent > 0).slice(0, 3);
+    const down = sorted.filter((p) => p.dayChangePercent < 0).reverse().slice(0, 3);
+    const li = (p) => `<li data-action="open" data-symbol="${esc(p.symbol)}"><span class="mover-l"><span class="sym">${esc(p.symbol)}</span><span class="nm">${esc(p.name || p.symbol)}</span></span><span class="cell-2"><span class="${signClass(p.dayChangePercent)}">${fmtPct(p.dayChangePercent)}</span><span class="sub amount">${fmtAmount(p.dayChangeBase, state.baseCurrency, { sign: true })}</span></span></li>`;
+    return `<div class="card-header"><h2>Dagens bevægelser</h2></div>
+      <div class="movers">
+        <div><h3>Stiger mest</h3>${up.length ? `<ul>${up.map(li).join('')}</ul>` : '<p class="muted small">Ingen stigninger i dag.</p>'}</div>
+        <div><h3>Falder mest</h3>${down.length ? `<ul>${down.map(li).join('')}</ul>` : '<p class="muted small">Ingen fald i dag.</p>'}</div>
+      </div>`;
+  }
+
+  // ---------- Beholdningstabel ----------
+
+  const SORTERS = {
+    name: (p) => (p.name || p.symbol).toLowerCase(),
+    quantity: (p) => p.quantity,
+    price: (p) => p.price,
+    dayChangePercent: (p) => p.dayChangePercent,
+    avgPrice: (p) => p.avgPrice,
+    valueBase: (p) => p.valueBase,
+    gainBase: (p) => p.gainBase,
+    weight: (p) => p.weight,
+  };
+
+  function sortedPositions({ applyFilter = true } = {}) {
+    const key = SORTERS[state.sort.key] ? state.sort.key : 'valueBase';
+    const get = SORTERS[key];
+    const dir = state.sort.dir === 'asc' ? 1 : -1;
+    const filter = applyFilter ? state.filter.trim().toLowerCase() : '';
+    return positions()
+      .filter((p) => !filter || (p.name || '').toLowerCase().includes(filter) || p.symbol.toLowerCase().includes(filter))
+      .sort((a, b) => {
+        const va = get(a);
+        const vb = get(b);
+        if (va == null && vb == null) return 0;
+        if (va == null) return 1;
+        if (vb == null) return -1;
+        if (typeof va === 'string') return va.localeCompare(vb, 'da') * dir;
+        return (va - vb) * dir;
+      });
+  }
+
+  function staleTitle(p) {
+    return `Seneste kendte kurs${p.fetchedAt ? ` fra ${fmtDateTime(p.fetchedAt)}` : ''} – kunne ikke opdateres`;
+  }
+
+  function stockCell(p) {
+    const dot = p.marketOpen === true ? '<span class="market-dot open" title="Børsen er åben"></span>' : p.marketOpen === false ? '<span class="market-dot" title="Børsen er lukket"></span>' : '';
+    const errMsg = p.error?.code === 'NOT_FOUND' ? 'Symbolet findes ikke længere hos Yahoo Finance' : p.error?.message || 'Ingen kurs';
+    const warn = p.status === 'error' || p.status === 'fx_error' ? `<span class="warn-dot" title="${esc(errMsg)}"></span>` : p.status === 'stale' ? `<span class="warn-dot" title="${esc(staleTitle(p))}"></span>` : '';
+    return `<div class="stock-cell">
+      <span class="stock-avatar">${esc(initials(p.symbol))}</span>
+      <div><div class="stock-name">${warn}${esc(p.name || p.symbol)}</div>
+      <div class="stock-meta">${esc(p.symbol)}${p.currency ? ` <span class="chip">${esc(p.currency)}</span>` : ''}${dot}${p.exchange ? ` <span>${esc(p.exchange)}</span>` : ''}</div></div>
+    </div>`;
+  }
+
+  function holdingsTable({ compact = false } = {}) {
+    const rows = sortedPositions({ applyFilter: !compact });
+    const t = state.portfolio?.totals;
+    const pendingOnly = !state.portfolio; // beholdninger kendt, kurser på vej
+    if (pendingOnly && !state.pending) return `<div class="table-wrap"><table class="holdings"><tbody>${[1, 2, 3].map(() => `<tr><td colspan="8"><span class="skeleton">Henter beholdning…</span></td></tr>`).join('')}</tbody></table></div>`;
+    if (!rows.length) {
+      return !compact && state.filter ? `<p class="muted" style="padding:16px 0">Ingen aktier matcher "${esc(state.filter)}".</p>` : '';
+    }
+    const todayLabel = allMarketsClosed() ? 'Seneste handelsdag' : 'I dag';
+    const anyOpen = rows.some((p) => p.marketOpen === true);
+    const cols = [
+      { key: 'name', label: 'Aktie', n: false },
+      { key: 'quantity', label: 'Antal', n: true, hide: compact },
+      { key: 'price', label: 'Kurs', n: true, title: 'Seneste kurs i aktiens egen valuta' },
+      { key: 'dayChangePercent', label: todayLabel, n: true, title: 'Ændring i forhold til forrige lukkekurs på aktiens egen børs' },
+      { key: 'avgPrice', label: 'Gns. købskurs', n: true, hide: compact },
+      { key: 'valueBase', label: `Værdi (${esc(state.baseCurrency)})`, n: true },
+      { key: 'gainBase', label: 'Afkast', n: true, title: AFKAST_TOOLTIP },
+      { key: 'weight', label: 'Andel', n: true, title: 'Andel af porteføljens samlede aktieværdi' },
+    ].filter((c) => !c.hide);
+    const th = cols.map((c) => {
+      const sorted = state.sort.key === c.key;
+      const ariaSort = sorted ? (state.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none';
+      return `<th class="${c.n ? 'n' : ''}${sorted ? ' sorted' : ''}" data-sort="${c.key}" aria-sort="${ariaSort}" ${c.title ? `title="${esc(c.title)}"` : ''}>${c.label}<span class="sort-ind">${sorted ? (state.sort.dir === 'asc' ? '▲' : '▼') : ''}</span></th>`;
+    }).join('') + (compact ? '' : '<th class="n"><span class="sr-only">Handlinger</span></th>');
+
+    const sk = '<span class="skeleton">00.000</span>';
+    const tr = rows.map((p) => {
+      if (pendingOnly) {
+        const cells = [`<td>${stockCell(p)}</td>`];
+        if (!compact) cells.push(`<td class="n">${fmtQty(p.quantity)}</td>`);
+        cells.push(`<td class="n">${sk}</td><td class="n">${sk}</td>`);
+        if (!compact) cells.push(`<td class="n">${isNum(p.avgPrice) ? fmtPrice(p.avgPrice) : '<span class="muted">–</span>'}</td>`);
+        cells.push(`<td class="n">${sk}</td><td class="n">${sk}</td><td class="n">${sk}</td>`);
+        if (!compact) cells.push('<td></td>');
+        return `<tr>${cells.join('')}</tr>`;
+      }
+      const hasPrice = isNum(p.price);
+      const stale = p.status === 'stale';
+      const closedWhileOthersOpen = anyOpen && p.marketOpen === false;
+      const dayMuted = stale || closedWhileOthersOpen;
+      const dayTitle = stale ? staleTitle(p) : closedWhileOthersOpen ? `Lukket${p.marketTime ? ` · sidste handel ${fmtDateTime(p.marketTime)}` : ''}` : '';
+      const cells = [];
+      cells.push(`<td>${stockCell(p)}</td>`);
+      if (!compact) cells.push(`<td class="n">${fmtQty(p.quantity)}</td>`);
+      cells.push(`<td class="n${stale ? ' stale' : ''}" ${stale ? `title="${esc(staleTitle(p))}"` : ''}>${hasPrice ? `${stale ? '⏱ ' : ''}${fmtPrice(p.price)} <span class="muted small">${esc(p.currency || '')}</span>` : '–'}</td>`);
+      cells.push(`<td class="n${dayMuted ? ' stale' : ''}" ${dayTitle ? `title="${esc(dayTitle)}"` : ''}><div class="cell-2"><span class="${dayMuted ? '' : signClass(p.dayChangePercent)}">${arrow(p.dayChangePercent)}${fmtPct(p.dayChangePercent)}</span><span class="sub amount">${fmtAmount(p.dayChangeBase, state.baseCurrency, { sign: true })}</span></div></td>`);
+      if (!compact) cells.push(`<td class="n">${isNum(p.avgPrice) ? fmtPrice(p.avgPrice) : '<span class="muted">–</span>'}</td>`);
+      cells.push(`<td class="n"><b class="amount">${fmtAmount(p.valueBase)}</b></td>`);
+      cells.push(`<td class="n"><div class="cell-2"><span class="amount ${signClass(p.gainBase)}">${fmtAmount(p.gainBase, state.baseCurrency, { sign: true })}</span><span class="sub ${signClass(p.gainPercent)}">${fmtPct(p.gainPercent)}</span></div></td>`);
+      cells.push(`<td class="n">${isNum(p.weight) ? `${fmtPct(p.weight, { sign: false })}<span class="weight-bar"><i style="width:${clamp(p.weight, 0, 100).toFixed(1)}%"></i></span>` : '–'}</td>`);
+      if (!compact) cells.push(`<td class="n"><div class="row-actions"><button class="btn btn-ghost btn-icon" data-action="menu" data-id="${esc(p.id)}" title="Handlinger" aria-label="Handlinger for ${esc(p.name)}">${icon('more')}</button></div></td>`);
+      return `<tr data-action="open" data-symbol="${esc(p.symbol)}" class="${hasPrice ? '' : 'error-row'}">${cells.join('')}</tr>`;
+    }).join('');
+
+    const foot = t && !pendingOnly ? `<tfoot><tr>
+      <td>I alt</td>${compact ? '' : '<td></td>'}<td></td>
+      <td class="n"><div class="cell-2"><span class="${signClass(t.dayChangePercent)}">${fmtPct(t.dayChangePercent)}</span><span class="sub amount ${signClass(t.dayChangeBase)}">${fmtAmount(t.dayChangeBase, state.baseCurrency, { sign: true })}</span></div></td>
+      ${compact ? '' : '<td></td>'}
+      <td class="n"><span class="amount">${fmtAmount(t.valueBase)}</span></td>
+      <td class="n"><div class="cell-2"><span class="amount ${signClass(t.gainBase)}">${fmtAmount(t.gainBase, state.baseCurrency, { sign: true })}</span><span class="sub ${signClass(t.gainPercent)}">${fmtPct(t.gainPercent)}</span></div></td>
+      <td class="n">100 %</td>${compact ? '' : '<td></td>'}
+    </tr></tfoot>` : '';
+
+    const cards = rows.map((p) => pendingOnly
+      ? `<div class="hcard"><div class="l1">${esc(p.name || p.symbol)}</div><div class="r1">${sk}</div><div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk.</div><div class="r2">${sk}</div></div>`
+      : `<div class="hcard" data-action="open" data-symbol="${esc(p.symbol)}">
+      <div class="l1">${p.status !== 'ok' ? '<span class="warn-dot"></span>' : ''}${esc(p.name || p.symbol)}</div>
+      <div class="r1 amount">${fmtAmount(p.valueBase)}</div>
+      <div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk. · ${isNum(p.price) ? `${fmtPrice(p.price)} ${esc(p.currency || '')}` : 'ingen kurs'}</div>
+      <div class="r2"><span class="${p.status === 'stale' ? 'stale' : signClass(p.dayChangePercent)}">${arrow(p.dayChangePercent)}${fmtPct(p.dayChangePercent)}</span> <span class="muted">·</span> <span class="muted small">Afkast</span> <span class="${signClass(p.gainPercent)}">${fmtPct(p.gainPercent)}</span></div>
+    </div>`).join('');
+    const cardTotal = t && !pendingOnly ? `<div class="hcard-total"><span>I alt</span><span class="amount">${fmtAmount(t.valueBase)}</span></div>` : '';
+
+    return `<div class="table-wrap"><table class="holdings"><thead><tr>${th}</tr></thead><tbody>${tr}</tbody>${foot}</table><div class="holding-cards">${cards}${cardTotal}</div></div>`;
+  }
+
+  // ---------- Beholdninger (side) ----------
+
+  function renderHoldings() {
+    const p = state.portfolio;
+    const empty = p ? p.positions.length === 0 : state.pending ? state.pending.length === 0 : false;
+    return `
+      ${pageHeader('Beholdninger', updatedSub(), headerActions())}
+      ${banners()}
+      ${empty ? emptyState() : `
+      <div class="card">
+        <div class="card-header">
+          <h2>${icon('list')}Alle aktier ${p ? `<span class="hint">${p.totals.positionCount}</span>` : ''}</h2>
+          <div class="input-group" style="max-width:260px"><input class="input" id="filter" type="search" placeholder="Filtrér…" value="${esc(state.filter)}" aria-label="Filtrér aktier"></div>
+        </div>
+        ${holdingsTable({ compact: false })}
+      </div>
+      <p class="footer-note">Tryk på en aktie for detaljer. Brug ⋯-menuen til at købe til, sælge, redigere eller slette.</p>`}`;
+  }
+
+  // ---------- Indstillinger ----------
+
+  function renderSettings() {
+    const s = state.settings;
+    const opt = (v, label, cur) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${label}</option>`;
+    const usesEnvPassword = Boolean(state.usesEnvPassword);
+    return `
+      ${pageHeader('Indstillinger', '<span>Dine præferencer og data</span>', headerActions({ add: false }))}
+      <div class="settings-grid">
+        <div class="card">
+          <div class="card-header"><h2>${icon('lock')}Konto</h2></div>
+          <div class="setting-row"><div><div class="lbl">Dit navn</div><div class="desc">Bruges i hilsenen på forsiden.</div></div><input class="input" id="set-name" style="max-width:180px" value="${esc(s.displayName || '')}" placeholder="F.eks. Mikkel" maxlength="40"></div>
+          <div class="setting-row"><div><div class="lbl">Adgangskode</div><div class="desc">${usesEnvPassword ? 'Styres af DASHBOARD_PASSWORD på serveren.' : 'Skift adgangskoden til dashboardet.'}</div></div><button class="btn btn-sm" data-action="change-password" ${usesEnvPassword ? 'disabled' : ''}>Skift adgangskode</button></div>
+          <div class="setting-row"><div><div class="lbl">Log ud på alle enheder</div><div class="desc">Ugyldiggør alle aktive logins, også dette.</div></div><button class="btn btn-sm" data-action="logout-all">Log ud overalt</button></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>${icon('eye')}Visning</h2></div>
+          <div class="setting-row"><div><div class="lbl">Tema</div><div class="desc">Lys, mørk eller følg systemet.</div></div><select class="select-inline" id="set-theme">${opt('system', 'Følg systemet', state.theme)}${opt('light', 'Lys', state.theme)}${opt('dark', 'Mørk', state.theme)}</select></div>
+          <div class="setting-row"><div><div class="lbl">Basisvaluta</div><div class="desc">Alle totaler omregnes til denne valuta.</div></div><select class="select-inline" id="set-currency">${BASE_CURRENCIES.map((c) => opt(c, c, state.baseCurrency)).join('')}</select></div>
+          <div class="setting-row"><div><div class="lbl">Kontanter</div><div class="desc">Uinvesterede penge i depotet. Lægges til porteføljeværdien.</div></div><div class="input-group" style="max-width:180px"><input class="input n" id="set-cash" inputmode="decimal" value="${s.cash ? fmtNum(s.cash, 0, 2) : ''}" placeholder="0"><span class="addon">${esc(state.baseCurrency)}</span></div></div>
+          <div class="setting-row"><div><div class="lbl">Vis ører på beløb</div><div class="desc">Vis to decimaler på alle beløb i basisvalutaen.</div></div><label class="switch"><input type="checkbox" id="set-decimals" ${s.showDecimals ? 'checked' : ''}><span class="track"></span></label></div>
+          <div class="setting-row"><div><div class="lbl">Skjul beløb</div><div class="desc">Slører beløb, når andre kigger med. Procenter vises stadig.</div></div><label class="switch"><input type="checkbox" id="set-privacy" ${state.privacy ? 'checked' : ''}><span class="track"></span></label></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>${icon('refresh')}Kurser</h2></div>
+          <div class="setting-row"><div><div class="lbl">Opdatér automatisk</div><div class="desc">Henter nye kurser hvert minut, mens siden er åben.</div></div><label class="switch"><input type="checkbox" id="set-autorefresh" ${state.autoRefresh ? 'checked' : ''}><span class="track"></span></label></div>
+          <div class="setting-row"><div><div class="lbl">Seneste hentning</div><div class="desc">${state.portfolio ? `${esc(fmtDateTime(state.portfolio.updatedAt))} · ${state.portfolio.totals.okCount} af ${state.portfolio.totals.positionCount} kurser hentet · ${Object.keys(state.portfolio.fxRates || {}).filter((c) => c !== state.baseCurrency).length} valutakurser` : '–'}</div></div><button class="btn btn-sm" data-action="refresh">Hent nu</button></div>
+          <div class="setting-row"><div><div class="lbl">Hvor tit?</div><div class="desc">Hvert minut mens en børs er åben, hvert 5. minut når alle er lukket, og aldrig mens fanen er skjult.</div></div></div>
+          <div class="setting-row"><div><div class="lbl">Kilde</div><div class="desc">Yahoo Finance. Kurser kan være op til 15 min. forsinkede og er ikke rådgivning.</div></div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>${icon('download')}Data</h2></div>
+          <div class="setting-row"><div><div class="lbl">Sikkerhedskopi</div><div class="desc">Download alle beholdninger som en JSON-fil.</div></div><button class="btn btn-sm" data-action="backup">${icon('download', 'icon icon-sm')}Download</button></div>
+          <div class="setting-row"><div><div class="lbl">Gendan</div><div class="desc">Erstat beholdningerne med indholdet af en sikkerhedskopi.</div></div><button class="btn btn-sm" data-action="restore">${icon('upload', 'icon icon-sm')}Vælg fil…</button></div>
+          <div class="setting-row"><div><div class="lbl">Hvor ligger mine data?</div><div class="desc">I en JSON-fil i serverens datamappe. Ingen data sendes til andre end Yahoo Finance (kun symboler).</div></div></div>
+        </div>
+      </div>`;
+  }
+
+  // ======================================================================
+  // Detaljepanel
+  // ======================================================================
+
+  function openPanel(symbol) {
+    state.panelSymbol = symbol;
+    renderPanel();
+    $('#panel').classList.add('show');
+    $('#panel-backdrop').classList.add('show');
+  }
+
+  function closePanel() {
+    if (!state.panelSymbol) return;
+    state.panelSymbol = null;
+    $('#panel').classList.remove('show');
+    $('#panel-backdrop').classList.remove('show');
+  }
+
+  function renderPanel() {
+    const p = positions().find((x) => x.symbol === state.panelSymbol);
+    const panel = $('#panel');
+    if (!p) {
+      closePanel();
+      return;
+    }
+    const cur = p.currency || '';
+    const hasPrice = isNum(p.price);
+    const fx = p.fxRate && cur !== state.baseCurrency ? `<div class="muted small">Omregnet med ${esc(cur)}/${esc(state.baseCurrency)} ${fmtNum(p.fxRate, 2, 4)}</div>` : '';
+    let range52 = '';
+    if (isNum(p.fiftyTwoWeekLow) && isNum(p.fiftyTwoWeekHigh) && hasPrice && p.fiftyTwoWeekHigh > p.fiftyTwoWeekLow) {
+      const pct = clamp(((p.price - p.fiftyTwoWeekLow) / (p.fiftyTwoWeekHigh - p.fiftyTwoWeekLow)) * 100, 0, 100);
+      range52 = `<div><h3>52 ugers interval</h3><div class="range52"><i style="left:${pct.toFixed(1)}%"></i></div><div class="range52-labels"><span>${fmtPrice(p.fiftyTwoWeekLow)}</span><span>${fmtPrice(p.fiftyTwoWeekHigh)}</span></div></div>`;
+    }
+    const dayRange = isNum(p.dayLow) && isNum(p.dayHigh) ? `<dt>Dagens interval</dt><dd>${fmtPrice(p.dayLow)} – ${fmtPrice(p.dayHigh)}</dd>` : '';
+    const status = p.status === 'error' || p.status === 'fx_error' ? `<div class="banner error">${icon('warn')}<div>${esc(p.error?.message || 'Ingen kurs')}</div></div>` : p.status === 'stale' ? `<div class="banner">${icon('info')}<div>Kunne ikke opdatere kursen – viser seneste kendte kurs${p.fetchedAt ? ` fra ${esc(fmtDateTime(p.fetchedAt))}` : ''}.</div></div>` : '';
+
+    panel.innerHTML = `
+      <div class="panel-head">
+        <div>
+          <h2>${esc(p.name || p.symbol)}</h2>
+          <div class="stock-meta">${esc(p.symbol)}${p.exchange ? ` · ${esc(p.exchange)}` : ''}${cur ? ` <span class="chip">${esc(cur)}</span>` : ''}${p.marketOpen === true ? ' <span class="market-dot open"></span> Åben' : p.marketOpen === false ? ' <span class="market-dot"></span> Lukket' : ''}</div>
+        </div>
+        <button class="btn btn-ghost btn-icon" data-action="close-panel" aria-label="Luk">${icon('x')}</button>
+      </div>
+      <div class="panel-body">
+        ${status}
+        <div>
+          <div class="panel-price"><span class="big${p.status === 'stale' ? ' stale' : ''}">${hasPrice ? fmtPrice(p.price) : '–'}</span><span class="muted">${esc(cur)}</span><span class="${p.status === 'stale' ? 'stale' : signClass(p.changePercent)}">${arrow(p.changePercent)}${fmtPct(p.changePercent)}${isNum(p.previousClose) && hasPrice ? ` (${fmtPrice(p.price - p.previousClose)})` : ''}</span></div>
+          <div class="muted small">${p.marketTime ? `Seneste handel: ${esc(fmtDateTime(p.marketTime))}` : ''}${p.fetchedAt ? ` · kurs hentet kl. ${esc(fmtTime(p.fetchedAt))}` : ''}</div>
+          <dl class="kv" style="margin-top:10px">${dayRange}${isNum(p.previousClose) ? `<dt>Forrige lukkekurs</dt><dd>${fmtPrice(p.previousClose)}</dd>` : ''}</dl>
+        </div>
+        ${range52}
+        <div>
+          <h3>Din position</h3>
+          <dl class="kv">
+            <dt>Antal</dt><dd>${fmtQty(p.quantity)} stk.</dd>
+            <dt>Gns. købskurs</dt><dd>${isNum(p.avgPrice) ? `${fmtPrice(p.avgPrice)} ${esc(cur)}` : '<span class="muted">ikke angivet</span>'}</dd>
+            <dt>Investeret</dt><dd class="amount">${fmtAmount(p.costBase)}</dd>
+            <dt>Værdi</dt><dd class="amount">${fmtAmount(p.valueBase)}</dd>
+            <dt>Afkast</dt><dd class="${signClass(p.gainBase)}">${isNum(p.gainBase) ? `<span class="amount">${fmtAmount(p.gainBase, state.baseCurrency, { sign: true })}</span> (${fmtPct(p.gainPercent)})` : '<span class="muted">– tilføj købskurs under Redigér</span>'}</dd>
+            <dt>I dag</dt><dd class="${signClass(p.dayChangeBase)}"><span class="amount">${fmtAmount(p.dayChangeBase, state.baseCurrency, { sign: true })}</span></dd>
+            <dt>Andel af portefølje</dt><dd>${fmtPct(p.weight, { sign: false })}</dd>
+          </dl>
+          ${fx}
+          ${isNum(p.gainBase) ? `<div class="muted small" style="margin-top:6px">${esc(AFKAST_TOOLTIP)}</div>` : ''}
+          ${p.note ? `<div class="muted small" style="margin-top:8px">Note: ${esc(p.note)}</div>` : ''}
+        </div>
+        <div class="panel-actions">
+          <button class="btn btn-primary" data-action="trade" data-type="buy" data-id="${esc(p.id)}">${icon('cart')}Køb til</button>
+          <button class="btn" data-action="trade" data-type="sell" data-id="${esc(p.id)}">${icon('sell')}Sælg</button>
+          <button class="btn" data-action="edit" data-id="${esc(p.id)}">${icon('edit')}Redigér</button>
+          <button class="btn btn-danger" data-action="delete" data-id="${esc(p.id)}">${icon('trash')}Slet</button>
+          <a class="btn btn-ghost span2" href="${yahooUrl(p.symbol)}" target="_blank" rel="noopener">${icon('external')}Åbn på Yahoo Finance</a>
+        </div>
+      </div>`;
+  }
+
+  // ======================================================================
+  // Dialoger
+  // ======================================================================
+
+  function openDialog(id) {
+    const dlg = $(id);
+    if (!dlg.open) dlg.showModal();
+    return dlg;
+  }
+
+  function setError(id, msg) {
+    $(id).textContent = msg || '';
+  }
+
+  function confirmDialog({ title, text, okLabel = 'Slet', danger = true }) {
+    return new Promise((resolve) => {
+      const dlg = $('#dlg-confirm');
+      $('#confirm-title').textContent = title;
+      $('#confirm-text').textContent = text;
+      const ok = $('#confirm-ok');
+      ok.textContent = okLabel;
+      ok.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`;
+      let done = false;
+      const finish = (value) => {
+        if (done) return;
+        done = true;
+        dlg.removeEventListener('close', onClose);
+        resolve(value);
+      };
+      const onClose = () => finish(dlg.returnValue === 'ok');
+      dlg.addEventListener('close', onClose);
+      dlg.returnValue = '';
+      ok.onclick = (e) => {
+        e.preventDefault();
+        dlg.close('ok');
+      };
+      dlg.showModal();
+    });
+  }
+
+  // ---------- Tilføj ----------
+
+  const add = { selected: null, results: [], active: -1, timer: null, seq: 0, quote: null };
+
+  function openAdd(query = '') {
+    add.selected = null;
+    add.results = [];
+    add.active = -1;
+    add.quote = null;
+    $('#add-search').value = query;
+    $('#add-results').innerHTML = '';
+    if (query) runSearch(query);
+    $('#add-qty').value = '';
+    $('#add-price').value = '';
+    $('#add-note').value = '';
+    setError('#add-error', '');
+    showAddStep('search');
+    openDialog('#dlg-add');
+    setTimeout(() => {
+      const f = $('#add-search');
+      f.focus();
+      if (query) f.select();
+    }, 50);
+  }
+
+  function showAddStep(step) {
+    const search = step === 'search';
+    $('#add-step-search').classList.toggle('hidden', !search);
+    $('#add-step-form').classList.toggle('hidden', search);
+    $('#add-submit').classList.toggle('hidden', search);
+    $('#add-back').classList.toggle('hidden', search);
+    $('#dlg-add-title').textContent = search ? 'Tilføj aktie' : `Tilføj ${add.selected?.name || ''}`;
+  }
+
+  const SYMBOL_LIKE = /^[A-Z0-9^][A-Z0-9.\-=^]{0,24}$/i;
+
+  function renderAddResults(items, msg, { symbolHint = null } = {}) {
+    const ul = $('#add-results');
+    if (msg) {
+      ul.innerHTML = `<li class="msg">${esc(msg)}</li>${symbolHint ? `<li role="option" data-use-symbol="${esc(symbolHint)}"><span class="stock-avatar">?</span><span class="name">Brug symbolet "${esc(symbolHint)}"<br><span class="meta">Vi tjekker hos Yahoo Finance, om det findes</span></span></li>` : ''}`;
+      return;
+    }
+    const owned = new Set(positions().map((p) => p.symbol));
+    ul.innerHTML = items.map((r, i) => `<li role="option" data-index="${i}" class="${i === add.active ? 'active' : ''}"><span class="stock-avatar">${esc(initials(r.symbol))}</span><span class="name">${esc(r.name)}<br><span class="meta">${esc(r.symbol)}${r.exchange ? ` · ${esc(r.exchange)}` : ''}${r.type && r.type !== 'EQUITY' ? ` · ${esc(typeLabel(r.type))}` : ''}</span></span>${owned.has(r.symbol) ? '<span class="chip">I porteføljen</span>' : ''}</li>`).join('');
+  }
+
+  function typeLabel(t) {
+    return { ETF: 'ETF', MUTUALFUND: 'Fond', INDEX: 'Indeks', CRYPTOCURRENCY: 'Krypto' }[t] || t;
+  }
+
+  async function runSearch(q) {
+    const seq = ++add.seq;
+    if (q.length < 1) {
+      add.results = [];
+      renderAddResults([]);
+      return;
+    }
+    renderAddResults([], 'Søger…');
+    try {
+      const data = await api('GET', `/api/search?q=${encodeURIComponent(q)}`);
+      if (seq !== add.seq) return;
+      add.results = data.results;
+      add.active = data.results.length ? 0 : -1;
+      const hint = SYMBOL_LIKE.test(q) && !data.results.some((r) => r.symbol === q.toUpperCase()) ? q.toUpperCase() : null;
+      if (!data.results.length) renderAddResults([], `Ingen resultater for "${q}". Prøv navnet på engelsk eller et Yahoo-symbol (husk .CO for danske aktier).`, { symbolHint: hint });
+      else renderAddResults(data.results);
+    } catch (err) {
+      if (seq !== add.seq) return;
+      renderAddResults([], `Søgning fejlede: ${err.message}`, { symbolHint: SYMBOL_LIKE.test(q) ? q.toUpperCase() : null });
+    }
+  }
+
+  async function selectStock(result) {
+    add.selected = result;
+    add.quote = null;
+    const existing = positions().find((p) => p.symbol === result.symbol);
+    if (existing) {
+      $('#dlg-add').close();
+      toast(`${result.name} er allerede i porteføljen – redigér den i stedet.`);
+      openEdit(existing.id);
+      return;
+    }
+    $('#add-selected').innerHTML = `<span class="stock-avatar">${esc(initials(result.symbol))}</span><span><span class="name">${esc(result.name)}</span><br><span class="meta">${esc(result.symbol)}${result.exchange ? ` · ${esc(result.exchange)}` : ''}</span></span><span class="meta" id="add-quote-info">Henter kurs…</span>`;
+    $('#add-price-addon').textContent = result.currency || '';
+    $('#add-notice').innerHTML = '';
+    $('#add-submit').disabled = false;
+    showAddStep('form');
+    updateAddSummary();
+    setTimeout(() => $('#add-qty').focus(), 30);
+    try {
+      const data = await api('GET', `/api/quote/${encodeURIComponent(result.symbol)}`);
+      if (add.selected !== result) return;
+      const q = data.quote;
+      add.quote = q;
+      result.name = q.name;
+      result.currency = q.currency;
+      $('#dlg-add-title').textContent = `Tilføj ${q.name}`;
+      $('#add-price-addon').textContent = q.currency;
+      const notices = [];
+      if (q.rawCurrency === 'GBp' || q.rawCurrency === 'GBX') notices.push('Yahoo noterer denne aktie i pence – vi viser og gemmer kurser i GBP (÷100). Skriv din købskurs i GBP.');
+      if (q.type === 'MUTUALFUND') notices.push('Investeringsforening: kursen opdateres typisk kun én gang dagligt.');
+      $('#add-selected').innerHTML = `<span class="stock-avatar">${esc(initials(q.symbol))}</span><span><span class="name">${esc(q.name)}</span><br><span class="meta">${esc(q.symbol)}${q.exchange ? ` · ${esc(q.exchange)}` : ''} · <span class="chip">${esc(q.currency)}</span>${q.marketOpen === true ? ' · åben' : q.marketOpen === false ? ' · lukket' : ''}</span></span><span class="meta" id="add-quote-info">Kurs nu: <b>${fmtPrice(q.price)} ${esc(q.currency)}</b><br><span class="${signClass(q.changePercent)}">${arrow(q.changePercent)}${fmtPct(q.changePercent)}</span></span>`;
+      $('#add-notice').innerHTML = notices.map((n) => `<div class="notice">${esc(n)}</div>`).join('');
+      if (!$('#add-price').value) $('#add-price').placeholder = fmtPrice(q.price);
+      updateAddSummary();
+    } catch (err) {
+      const info = $('#add-quote-info');
+      if (err.status === 404) {
+        if (info) info.textContent = 'Ukendt symbol';
+        setError('#add-error', `Yahoo Finance kender ikke symbolet ${result.symbol} – husk .CO for danske aktier.`);
+        $('#add-submit').disabled = true;
+      } else {
+        if (info) info.textContent = 'Kurs ikke tilgængelig';
+        $('#add-notice').innerHTML = `<div class="notice">Kunne ikke hente kursen lige nu – du kan stadig tilføje aktien; kurs og valuta hentes automatisk senere.</div>`;
+      }
+    }
+  }
+
+  function updateAddSummary() {
+    const qty = parseInput($('#add-qty').value);
+    const price = parseInput($('#add-price').value);
+    const cur = add.quote?.currency || add.selected?.currency || '';
+    const el = $('#add-summary');
+    const parts = [];
+    if (isNum(qty) && qty > 0) parts.push(`<span>${fmtQty(qty)} stk.</span>`);
+    if (isNum(price) && price >= 0 && isNum(qty) && qty > 0) parts.push(`<span>Investeret: <b>${fmtPrice(qty * price)} ${esc(cur)}</b></span>`);
+    if (isNum(qty) && qty > 0 && add.quote && isNum(add.quote.price)) parts.push(`<span>Værdi nu: <b>${fmtPrice(qty * add.quote.price)} ${esc(cur)}</b></span>`);
+    el.innerHTML = parts.join('') || '<span class="muted">Skriv antal – og gerne din gennemsnitlige købskurs.</span>';
+    const warn = $('#add-deviation');
+    if (add.quote && isNum(add.quote.price) && add.quote.price > 0 && isNum(price) && price > 0 && Math.abs(price / add.quote.price - 1) > 0.5) {
+      warn.innerHTML = `<div class="notice">Købskursen afviger ${fmtPct(Math.abs(price / add.quote.price - 1) * 100, { sign: false })} fra dagens kurs (${fmtPrice(add.quote.price)} ${esc(cur)}). Har du skrevet den i den rigtige valuta?</div>`;
+    } else warn.innerHTML = '';
+  }
+
+  async function submitAdd() {
+    setError('#add-error', '');
+    if (!add.selected) return;
+    const qty = parseInput($('#add-qty').value);
+    const price = parseInput($('#add-price').value);
+    if (!isNum(qty) || qty <= 0) return setError('#add-error', 'Antal skal være større end 0.');
+    if ($('#add-price').value.trim() && (!isNum(price) || price < 0)) return setError('#add-error', 'Købskursen skal være et tal.');
+    const btn = $('#add-submit');
+    btn.disabled = true;
+    try {
+      const data = await api('POST', '/api/holdings', { symbol: add.selected.symbol, quantity: qty, avgPrice: price ?? null, note: $('#add-note').value, name: add.selected.name });
+      $('#dlg-add').close();
+      toast(`${data.holding.name} er tilføjet`, 'success');
+      if (data.warning) toast(data.warning);
+      await afterMutation();
+    } catch (err) {
+      setError('#add-error', err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // ---------- Redigér ----------
+
+  const edit = { id: null };
+
+  function openEdit(id) {
+    const p = positions().find((x) => x.id === id);
+    if (!p) return;
+    edit.id = id;
+    $('#dlg-edit-title').textContent = `Redigér ${p.name || p.symbol}`;
+    $('#edit-qty').value = fmtQty(p.quantity);
+    $('#edit-price').value = isNum(p.avgPrice) ? fmtPrice(p.avgPrice) : '';
+    $('#edit-price-addon').textContent = p.currency || '';
+    $('#edit-note').value = p.note || '';
+    setError('#edit-error', '');
+    updateEditSummary();
+    openDialog('#dlg-edit');
+    setTimeout(() => $('#edit-qty').select(), 30);
+  }
+
+  function updateEditSummary() {
+    const p = positions().find((x) => x.id === edit.id);
+    const qty = parseInput($('#edit-qty').value);
+    const price = parseInput($('#edit-price').value);
+    const el = $('#edit-summary');
+    if (!p || !isNum(qty)) return (el.innerHTML = '');
+    const parts = [`<span>${fmtQty(qty)} stk.</span>`];
+    if (isNum(price)) parts.push(`<span>Investeret: <b>${fmtPrice(qty * price)} ${esc(p.currency || '')}</b></span>`);
+    if (isNum(p.price)) parts.push(`<span>Værdi nu: <b>${fmtPrice(qty * p.price)} ${esc(p.currency || '')}</b></span>`);
+    el.innerHTML = parts.join('');
+  }
+
+  async function submitEdit() {
+    setError('#edit-error', '');
+    const qty = parseInput($('#edit-qty').value);
+    const priceRaw = $('#edit-price').value.trim();
+    const price = parseInput(priceRaw);
+    if (!isNum(qty) || qty <= 0) return setError('#edit-error', 'Antal skal være større end 0.');
+    if (priceRaw && (!isNum(price) || price < 0)) return setError('#edit-error', 'Købskursen skal være et tal.');
+    try {
+      await api('PUT', `/api/holdings/${encodeURIComponent(edit.id)}`, { quantity: qty, avgPrice: priceRaw ? price : null, note: $('#edit-note').value });
+      $('#dlg-edit').close();
+      toast('Gemt', 'success');
+      await afterMutation();
+    } catch (err) {
+      setError('#edit-error', err.message);
+    }
+  }
+
+  // ---------- Køb til / sælg ----------
+
+  const trade = { id: null, type: 'buy' };
+
+  function openTrade(id, type) {
+    const p = positions().find((x) => x.id === id);
+    if (!p) return;
+    trade.id = id;
+    trade.type = type;
+    $('#trade-qty').value = '';
+    $('#trade-price').value = isNum(p.price) ? fmtPrice(p.price) : '';
+    $('#trade-price-addon').textContent = p.currency || '';
+    setError('#trade-error', '');
+    applyTradeType();
+    openDialog('#dlg-trade');
+    setTimeout(() => $('#trade-qty').focus(), 30);
+  }
+
+  function applyTradeType() {
+    const p = positions().find((x) => x.id === trade.id);
+    const buy = trade.type === 'buy';
+    $$('#dlg-trade [data-trade-type]').forEach((b) => b.classList.toggle('active', b.dataset.tradeType === trade.type));
+    $('#trade-sell-all').classList.toggle('hidden', buy);
+    $('#dlg-trade-title').textContent = `${buy ? 'Køb til' : 'Sælg'} – ${p?.name || ''}`;
+    $('#trade-qty-label').textContent = buy ? 'Antal købt' : 'Antal solgt';
+    $('#trade-submit').textContent = buy ? 'Læg til' : 'Registrér salg';
+    updateTradeSummary();
+  }
+
+  function updateTradeSummary() {
+    const p = positions().find((x) => x.id === trade.id);
+    const el = $('#trade-summary');
+    if (!p) return (el.innerHTML = '');
+    const qty = parseInput($('#trade-qty').value);
+    const price = parseInput($('#trade-price').value);
+    if (!isNum(qty) || qty <= 0) {
+      el.innerHTML = `<span class="muted">Du ejer ${fmtQty(p.quantity)} stk.${isNum(p.avgPrice) ? ` til gns. ${fmtPrice(p.avgPrice)} ${esc(p.currency || '')}` : ''}</span>`;
+      return;
+    }
+    if (trade.type === 'buy') {
+      const newQty = p.quantity + qty;
+      const newAvg = isNum(p.avgPrice) && isNum(price) ? (p.quantity * p.avgPrice + qty * price) / newQty : null;
+      el.innerHTML = `<span>Ny beholdning: <b>${fmtQty(newQty)} stk.</b></span><span>${isNum(newAvg) ? `Ny gns. købskurs: <b>${fmtPrice(newAvg)} ${esc(p.currency || '')}</b>` : !isNum(p.avgPrice) ? '<span class="muted">Gns. købskurs forbliver ukendt – ret den under Redigér</span>' : ''}</span>`;
+    } else {
+      const newQty = p.quantity - qty;
+      el.innerHTML = newQty < -1e-9
+        ? `<span class="neg">Du ejer kun ${fmtQty(p.quantity)} stk.</span>`
+        : `<span>Tilbage: <b>${fmtQty(Math.max(0, newQty))} stk.</b>${newQty <= 1e-9 ? ' – aktien fjernes fra porteføljen' : ''}</span>${isNum(price) ? `<span>Salgssum: <b>${fmtPrice(qty * price)} ${esc(p.currency || '')}</b></span>` : ''}`;
+    }
+  }
+
+  async function submitTrade() {
+    setError('#trade-error', '');
+    const qty = parseInput($('#trade-qty').value);
+    const priceRaw = $('#trade-price').value.trim();
+    const price = parseInput(priceRaw);
+    if (!isNum(qty) || qty <= 0) return setError('#trade-error', 'Antal skal være større end 0.');
+    if (trade.type === 'buy' && (!isNum(price) || price < 0)) return setError('#trade-error', 'Skriv kursen, du købte til.');
+    try {
+      const data = await api('POST', `/api/holdings/${encodeURIComponent(trade.id)}/trade`, { type: trade.type, quantity: qty, price: priceRaw ? price : null });
+      $('#dlg-trade').close();
+      if (data.removed) {
+        toast(`${data.holding.name} er solgt helt og fjernet fra porteføljen`, 'success');
+        closePanel();
+      } else {
+        toast(trade.type === 'buy' ? `Købte ${fmtQty(qty)} stk. ${data.holding.name}` : `Solgte ${fmtQty(qty)} stk. ${data.holding.name}`, 'success');
+      }
+      await afterMutation();
+    } catch (err) {
+      setError('#trade-error', err.message);
+    }
+  }
+
+  // ---------- Slet ----------
+
+  async function deleteHolding(id) {
+    const p = positions().find((x) => x.id === id);
+    if (!p) return;
+    const ok = await confirmDialog({ title: `Slet ${p.name || p.symbol}?`, text: `${fmtQty(p.quantity)} stk. fjernes fra porteføljen. Det kan ikke fortrydes.` });
+    if (!ok) return;
+    try {
+      await api('DELETE', `/api/holdings/${encodeURIComponent(id)}`);
+      closePanel();
+      toast(`${p.name || p.symbol} er slettet`, 'success');
+      await afterMutation();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  function invalidateHistory() {
+    const keep = state.history[state.range];
+    state.history = keep && !keep.error ? { [state.range]: keep } : {};
+    if (currentRoute() === 'overview' && positions().length) loadHistory(state.range, { force: true });
+  }
+
+  // ---------- Adgangskode ----------
+
+  async function submitPassword() {
+    setError('#pw-error', '');
+    const current = $('#pw-current').value;
+    const next = $('#pw-new').value;
+    const confirm = $('#pw-confirm').value;
+    if (next.length < 8) return setError('#pw-error', 'Den nye adgangskode skal være mindst 8 tegn.');
+    if (next !== confirm) return setError('#pw-error', 'De to nye adgangskoder er ikke ens.');
+    try {
+      await api('POST', '/api/auth/change-password', { currentPassword: current, newPassword: next });
+      $('#dlg-password').close();
+      $('#form-password').reset();
+      toast('Adgangskoden er ændret', 'success');
+    } catch (err) {
+      setError('#pw-error', err.message);
+    }
+  }
+
+  // ---------- Backup / gendan ----------
+
+  async function downloadBackup() {
+    try {
+      const res = await fetch('/api/backup', { credentials: 'same-origin' });
+      if (!res.ok) throw new Error('Kunne ikke hente sikkerhedskopi');
+      const blob = await res.blob();
+      const name = (res.headers.get('content-disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'aktie-portfolio.json';
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast('Sikkerhedskopi downloadet', 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  async function restoreFromFile(file) {
+    let data;
+    try {
+      data = JSON.parse(await file.text());
+    } catch {
+      return toast('Filen er ikke gyldig JSON', 'error');
+    }
+    if (!Array.isArray(data.holdings)) return toast('Filen indeholder ingen beholdninger', 'error');
+    const ok = await confirmDialog({
+      title: 'Gendan fra sikkerhedskopi?',
+      text: `Dine nuværende ${positions().length} aktier erstattes med de ${data.holdings.length} aktier fra filen "${file.name}".`,
+      okLabel: 'Gendan',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const res = await api('POST', '/api/restore', { holdings: data.holdings, settings: data.settings });
+      toast(`${res.count} aktier gendannet`, 'success');
+      await afterMutation();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  // ======================================================================
+  // Toast & menu
+  // ======================================================================
+
+  function toast(message, type = '') {
+    const el = document.createElement('div');
+    el.className = `toast ${type}`;
+    el.textContent = message;
+    $('#toasts').appendChild(el);
+    setTimeout(() => el.remove(), type === 'error' ? 7000 : 4000);
+  }
+
+  function openMenu(anchor, id) {
+    closeMenu();
+    const p = positions().find((x) => x.id === id);
+    if (!p) return;
+    const menu = document.createElement('div');
+    menu.className = 'menu';
+    menu.innerHTML = `
+      <button data-action="open" data-symbol="${esc(p.symbol)}">${icon('info', 'icon icon-sm')}Vis detaljer</button>
+      <button data-action="trade" data-type="buy" data-id="${esc(id)}">${icon('cart', 'icon icon-sm')}Køb til</button>
+      <button data-action="trade" data-type="sell" data-id="${esc(id)}">${icon('sell', 'icon icon-sm')}Sælg</button>
+      <button data-action="edit" data-id="${esc(id)}">${icon('edit', 'icon icon-sm')}Redigér</button>
+      <hr>
+      <button class="danger" data-action="delete" data-id="${esc(id)}">${icon('trash', 'icon icon-sm')}Slet</button>`;
+    document.body.appendChild(menu);
+    const r = anchor.getBoundingClientRect();
+    const mw = 180;
+    menu.style.left = `${clamp(r.right - mw, 8, window.innerWidth - mw - 8)}px`;
+    menu.style.top = `${Math.min(r.bottom + 4, window.innerHeight - 240)}px`;
+    state.menu = menu;
+  }
+
+  function closeMenu() {
+    if (state.menu) {
+      state.menu.remove();
+      state.menu = null;
+    }
+  }
+
+  // ======================================================================
+  // Hændelser
+  // ======================================================================
+
+  document.addEventListener('click', (e) => {
+    const link = e.target.closest('a[data-link]');
+    if (link) {
+      e.preventDefault();
+      navigate(new URL(link.href).pathname);
+      return;
+    }
+    const closeBtn = e.target.closest('[data-close]');
+    if (closeBtn) {
+      closeBtn.closest('dialog')?.close();
+      return;
+    }
+    const th = e.target.closest('th[data-sort]');
+    if (th) {
+      const key = th.dataset.sort;
+      if (state.sort.key === key) state.sort.dir = state.sort.dir === 'asc' ? 'desc' : 'asc';
+      else state.sort = { key, dir: key === 'name' ? 'asc' : 'desc' };
+      storageSet('sort', JSON.stringify(state.sort));
+      render();
+      return;
+    }
+    const rangeBtn = e.target.closest('[data-range]');
+    if (rangeBtn) {
+      state.range = rangeBtn.dataset.range;
+      storageSet('range', state.range);
+      renderChartCard();
+      loadHistory(state.range);
+      return;
+    }
+    const tradeType = e.target.closest('[data-trade-type]');
+    if (tradeType) {
+      trade.type = tradeType.dataset.tradeType;
+      applyTradeType();
+      return;
+    }
+    const result = e.target.closest('#add-results li[data-index]');
+    if (result) {
+      selectStock(add.results[Number(result.dataset.index)]);
+      return;
+    }
+    const useSymbol = e.target.closest('#add-results li[data-use-symbol]');
+    if (useSymbol) {
+      const sym = useSymbol.dataset.useSymbol;
+      selectStock({ symbol: sym, name: sym, exchange: null, type: 'EQUITY' });
+      return;
+    }
+    if (e.target.closest('#trade-sell-all')) {
+      e.preventDefault();
+      const p = positions().find((x) => x.id === trade.id);
+      if (p) {
+        $('#trade-qty').value = fmtQty(p.quantity);
+        updateTradeSummary();
+      }
+      return;
+    }
+    const el = e.target.closest('[data-action]');
+    const inMenu = state.menu && state.menu.contains(e.target);
+    if (!inMenu && state.menu && !e.target.closest('[data-action="menu"]')) closeMenu();
+    if (!el) return;
+    const action = el.dataset.action;
+    if (el.tagName === 'A') e.preventDefault();
+    if (inMenu) closeMenu();
+
+    switch (action) {
+      case 'add': return openAdd(el.dataset.query || '');
+      case 'refresh': return manualRefresh();
+      case 'privacy':
+        state.privacy = !state.privacy;
+        storageSet('privacy', state.privacy ? '1' : '0');
+        return render();
+      case 'logout':
+        api('POST', '/api/auth/logout').finally(() => location.replace('/login'));
+        return;
+      case 'open':
+        e.stopPropagation();
+        return openPanel(el.dataset.symbol);
+      case 'close-panel': return closePanel();
+      case 'menu':
+        e.stopPropagation();
+        return state.menu ? closeMenu() : openMenu(el, el.dataset.id);
+      case 'edit':
+        e.stopPropagation();
+        return openEdit(el.dataset.id);
+      case 'trade':
+        e.stopPropagation();
+        return openTrade(el.dataset.id, el.dataset.type);
+      case 'delete':
+        e.stopPropagation();
+        return deleteHolding(el.dataset.id);
+      case 'change-password':
+        $('#form-password').reset();
+        setError('#pw-error', '');
+        openDialog('#dlg-password');
+        setTimeout(() => $('#pw-current').focus(), 30);
+        return;
+      case 'logout-all':
+        confirmDialog({ title: 'Log ud på alle enheder?', text: 'Alle aktive logins ugyldiggøres – også dette. Du skal logge ind igen.', okLabel: 'Log ud overalt' }).then(async (ok) => {
+          if (!ok) return;
+          try {
+            await api('POST', '/api/auth/logout-all');
+          } catch (err) {
+            return toast(err.message, 'error');
+          }
+          location.replace('/login');
+        });
+        return;
+      case 'backup': return downloadBackup();
+      case 'restore': return $('#restore-file').click();
+      default: return;
+    }
+  });
+
+  // Klik på tabel-rækker må ikke åbne panelet når man trykker på en knap i rækken
+  $('#panel-backdrop').addEventListener('click', closePanel);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (state.menu) return closeMenu();
+      if (state.panelSymbol && !document.querySelector('dialog[open]')) return closePanel();
+    }
+    const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+    if (typing || document.querySelector('dialog[open]')) return;
+    if (e.key === 'n' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      openAdd();
+    }
+    if (e.key === 'r' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      manualRefresh();
+    }
+  });
+
+  document.addEventListener('input', (e) => {
+    const id = e.target.id;
+    if (id === 'add-search') {
+      clearTimeout(add.timer);
+      const q = e.target.value.trim();
+      add.timer = setTimeout(() => runSearch(q), 250);
+    } else if (id === 'add-qty' || id === 'add-price') updateAddSummary();
+    else if (id === 'edit-qty' || id === 'edit-price') updateEditSummary();
+    else if (id === 'trade-qty' || id === 'trade-price') updateTradeSummary();
+    else if (id === 'filter') {
+      state.filter = e.target.value;
+      const card = $('#filter')?.closest('.card');
+      if (card) {
+        const wrap = $('.table-wrap', card) || $('p.muted', card);
+        const html = holdingsTable({ compact: false });
+        if (wrap) wrap.outerHTML = html || '<p class="muted" style="padding:16px 0"></p>';
+      }
+    }
+  });
+
+  document.addEventListener('change', async (e) => {
+    const id = e.target.id;
+    try {
+      if (id === 'set-theme') {
+        state.theme = e.target.value;
+        storageSet('theme', state.theme);
+        applyTheme();
+      } else if (id === 'set-currency') {
+        const data = await api('PUT', '/api/settings', { baseCurrency: e.target.value });
+        state.settings = data.settings;
+        toast(`Basisvaluta ændret til ${data.settings.baseCurrency}`, 'success');
+        state.history = {};
+        await loadPortfolio();
+      } else if (id === 'set-decimals') {
+        const data = await api('PUT', '/api/settings', { showDecimals: e.target.checked });
+        state.settings = data.settings;
+        render();
+      } else if (id === 'set-privacy') {
+        state.privacy = e.target.checked;
+        storageSet('privacy', state.privacy ? '1' : '0');
+        render();
+      } else if (id === 'set-autorefresh') {
+        state.autoRefresh = e.target.checked;
+        storageSet('autoRefresh', state.autoRefresh ? '1' : '0');
+      } else if (id === 'set-name') {
+        const data = await api('PUT', '/api/settings', { displayName: e.target.value });
+        state.settings = data.settings;
+        toast('Navn gemt', 'success');
+      } else if (id === 'set-cash') {
+        const n = parseInput(e.target.value);
+        if (e.target.value.trim() && (!isNum(n) || n < 0)) throw new Error('Kontanter skal være et tal, f.eks. 12.500');
+        const data = await api('PUT', '/api/settings', { cash: n ?? 0 });
+        state.settings = data.settings;
+        toast('Kontanter gemt', 'success');
+        await loadPortfolio({ silent: true });
+      } else if (id === 'restore-file') {
+        const file = e.target.files[0];
+        e.target.value = '';
+        if (file) await restoreFromFile(file);
+      }
+    } catch (err) {
+      toast(err.message, 'error');
+      if (id === 'set-currency') render();
+    }
+  });
+
+  // Tastatur i søgeresultater
+  $('#add-search').addEventListener('keydown', (e) => {
+    if (!add.results.length) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const q = e.target.value.trim();
+        if (q) {
+          clearTimeout(add.timer);
+          runSearch(q);
+        }
+      }
+      return;
+    }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const delta = e.key === 'ArrowDown' ? 1 : -1;
+      add.active = (add.active + delta + add.results.length) % add.results.length;
+      renderAddResults(add.results);
+      $(`#add-results li[data-index="${add.active}"]`)?.scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (add.active >= 0) selectStock(add.results[add.active]);
+    }
+  });
+
+  $('#form-add').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (add.selected) submitAdd();
+  });
+  $('#add-back').addEventListener('click', () => {
+    add.selected = null;
+    showAddStep('search');
+    setTimeout(() => $('#add-search').focus(), 30);
+  });
+  $('#form-edit').addEventListener('submit', (e) => { e.preventDefault(); submitEdit(); });
+  $('#edit-delete').addEventListener('click', () => { $('#dlg-edit').close(); deleteHolding(edit.id); });
+  $('#form-trade').addEventListener('submit', (e) => { e.preventDefault(); submitTrade(); });
+  $('#form-password').addEventListener('submit', (e) => { e.preventDefault(); submitPassword(); });
+  $('#dlg-confirm form').addEventListener('submit', (e) => { e.preventDefault(); $('#dlg-confirm').close('ok'); });
+
+  // Luk dialog ved klik på baggrunden
+  $$('dialog').forEach((dlg) => {
+    dlg.addEventListener('click', (e) => {
+      if (e.target === dlg) dlg.close();
+    });
+  });
+
+  // ======================================================================
+  // Tema & start
+  // ======================================================================
+
+  function applyTheme() {
+    const root = document.documentElement;
+    if (state.theme === 'dark' || state.theme === 'light') root.setAttribute('data-theme', state.theme);
+    else root.removeAttribute('data-theme');
+    const meta = $('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', '#0f172a');
+  }
+
+  async function init() {
+    applyTheme();
+    document.body.classList.toggle('private', state.privacy);
+    render();
+    try {
+      const status = await api('GET', '/api/auth/status');
+      state.usesEnvPassword = status.usesEnvPassword;
+      if (!status.authenticated) return location.replace('/login');
+    } catch {}
+    // Vis beholdningerne med det samme; kurserne fylder ind, når de er hentet.
+    const quick = api('GET', '/api/holdings')
+      .then((data) => {
+        if (state.portfolio) return;
+        state.settings = data.settings || {};
+        state.baseCurrency = data.settings?.baseCurrency || state.baseCurrency;
+        state.pending = data.holdings.map((h) => ({ ...h, status: 'loading', price: null, valueBase: null, weight: null }));
+        render();
+      })
+      .catch(() => {});
+    await Promise.all([quick, loadPortfolio()]);
+    scheduleRefresh();
+  }
+
+  init();
+})();
