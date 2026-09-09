@@ -275,7 +275,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const q = (url.searchParams.get('q') || '').trim();
       if (q.length < 1) return sendJson(res, 200, { results: [] });
       if (q.length > 60) throw new HttpError(400, 'Søgningen er for lang');
-      const results = rankSearchResults(await yahoo.search(q));
+      const results = rankSearchResults(await yahoo.search(q), q);
       sendJson(res, 200, { results });
     },
 
@@ -575,10 +575,14 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 const EXCHANGE_PRIORITY = { Copenhagen: 0, CPH: 0, Stockholm: 1, STO: 1, Oslo: 1, OSL: 1, Helsinki: 1, HEL: 1 };
 const TYPE_PRIORITY = { EQUITY: 0, ETF: 1, MUTUALFUND: 2, INDEX: 3, CRYPTOCURRENCY: 4 };
 
-export function rankSearchResults(results) {
+export function rankSearchResults(results, query = '') {
+  const exact = query.trim().toUpperCase();
   return results
     .map((r, i) => ({ r, i }))
     .sort((a, b) => {
+      const xa = a.r.symbol === exact ? 0 : 1;
+      const xb = b.r.symbol === exact ? 0 : 1;
+      if (xa !== xb) return xa - xb;
       const ea = EXCHANGE_PRIORITY[a.r.exchange] ?? 2;
       const eb = EXCHANGE_PRIORITY[b.r.exchange] ?? 2;
       if (ea !== eb) return ea - eb;

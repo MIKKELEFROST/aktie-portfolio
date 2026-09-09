@@ -1637,8 +1637,11 @@
   });
   $('#add-back').addEventListener('click', () => {
     add.selected = null;
+    add.quote = null;
+    setError('#add-error', '');
+    $('#add-submit').disabled = false;
     showAddStep('search');
-    setTimeout(() => $('#add-search').focus(), 30);
+    setTimeout(() => $('#add-search').select(), 30);
   });
   $('#form-edit').addEventListener('submit', (e) => { e.preventDefault(); submitEdit(); });
   $('#edit-delete').addEventListener('click', () => { $('#dlg-edit').close(); deleteHolding(edit.id); });

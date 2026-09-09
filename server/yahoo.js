@@ -308,6 +308,14 @@ export function createYahooClient({ quoteTtlMs = 60_000 } = {}) {
           merged.push(item);
         }
       }
+      // Yahoo finder ofte ikke et præcist symbol med børs-suffiks ("BP.L"), men finder det
+      // på grunddelen ("BP"). Prøv det og sæt det præcise match øverst.
+      const exact = q.toUpperCase();
+      if (!seen.has(exact) && /^[A-Z0-9^-]+\.[A-Z]{1,4}$/i.test(q)) {
+        const extra = await searchOnce(q.split('.')[0]).catch(() => []);
+        const hit = extra.find((r) => r.symbol === exact);
+        if (hit) merged.unshift(hit);
+      }
       return merged.slice(0, 10);
     });
   }

@@ -44,7 +44,7 @@ const fakeYahoo = {
     return [
       { symbol: 'NVO', name: 'Novo Nordisk A/S', exchange: 'NYSE', type: 'EQUITY' },
       { symbol: 'NOVO-B.CO', name: 'Novo Nordisk A/S', exchange: 'Copenhagen', type: 'EQUITY' },
-    ].filter((r) => r.name.toLowerCase().includes(q.toLowerCase()));
+    ].filter((r) => r.name.toLowerCase().includes(q.toLowerCase()) || r.symbol.toLowerCase().includes(q.toLowerCase()));
   },
   async getHistory(symbol, range) {
     const p = PRICES[symbol];
@@ -232,10 +232,12 @@ test('redigér, køb til, sælg', async () => {
   assert.equal(missing.status, 404);
 });
 
-test('søgning rangerer København først', async () => {
+test('søgning rangerer København først, præcist symbol øverst', async () => {
   const res = await request('GET', '/api/search?q=novo');
   assert.equal(res.json.results[0].symbol, 'NOVO-B.CO');
   assert.equal(res.json.results[1].symbol, 'NVO');
+  const exact = await request('GET', '/api/search?q=nvo');
+  assert.equal(exact.json.results[0].symbol, 'NVO', 'præcist symbol-match først');
   assert.deepEqual((await request('GET', '/api/search?q=')).json.results, []);
 });
 
