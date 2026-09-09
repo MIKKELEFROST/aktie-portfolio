@@ -1,10 +1,11 @@
 # Personlige data (beholdninger, adgangskode, session-nøgle) – commit aldrig disse
-data/
+data/*
 !data/.gitkeep
 
 # Miljø
 .env
 .env.*
+!.env.example
 
 # Node
 node_modules/
