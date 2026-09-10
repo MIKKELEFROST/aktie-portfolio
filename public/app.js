@@ -148,6 +148,7 @@
     usesEnvPassword: false,
     storage: 'server', // 'server' (fil/redis med login) eller 'browser' (localStorage, intet login)
     account: storageGet('account', 'all'), // 'all' | 'none' | depot-id
+    localImport: null, // data fundet i browserens lager, som kan overføres til kontoen
     allHoldings: [], // alle beholdninger uanset depot-filter (til tilføj/køb til og "Uden depot"-chip)
   };
 
@@ -200,6 +201,7 @@
   // ======================================================================
 
   const LOCAL_KEY = 'portfolio-local-v1';
+  const LOCAL_KEY_ARCHIVE = 'portfolio-local-overfoert';
   const HOLDABLE = ['EQUITY', 'ETF', 'MUTUALFUND'];
 
   function localLoad() {
@@ -235,6 +237,16 @@
       names.add(name.toLowerCase());
       return { id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newLocalId(), name };
     });
+  }
+
+  function localHasData() {
+    try {
+      const raw = localStorage.getItem(LOCAL_KEY);
+      const d = raw ? JSON.parse(raw) : null;
+      return Boolean(d && Array.isArray(d.holdings) && d.holdings.length);
+    } catch {
+      return false;
+    }
   }
 
   function localSave(data) {
@@ -455,11 +467,92 @@
     invalidateHistory();
   }
 
+  // Har brugeren tidligere brugt browser-tilstand, tilbydes dataene overført til kontoen.
+  function checkLocalImport() {
+    if (state.storage !== 'server') return;
+    if (storageGet('importDismissed', '') === '1') return;
+    try {
+      const raw = localStorage.getItem(LOCAL_KEY);
+      if (!raw) return;
+      const local = JSON.parse(raw);
+      if (local && Array.isArray(local.holdings) && local.holdings.length) state.localImport = local;
+    } catch {}
+  }
+
+  function checkLocalImportForce() {
+    try {
+      const raw = localStorage.getItem(LOCAL_KEY);
+      const local = raw ? JSON.parse(raw) : null;
+      if (local && Array.isArray(local.holdings) && local.holdings.length) state.localImport = local;
+    } catch {}
+  }
+
+  async function importLocal() {
+    const local = state.localImport;
+    if (!local) return;
+    const btn = $('[data-action="import-local"]');
+    if (btn) btn.disabled = true;
+    try {
+      // 1) Depoter matches på navn; dem der mangler, oprettes.
+      const localAccounts = Array.isArray(local.settings?.accounts) ? local.settings.accounts : [];
+      const missing = localAccounts.filter((a) => a?.name && !accounts().some((s) => s.name.toLowerCase() === String(a.name).toLowerCase()));
+      if (missing.length) {
+        const data = await api('PUT', '/api/settings', { accounts: [...accounts(), ...missing.map((a) => ({ name: String(a.name) }))] });
+        state.settings = data.settings;
+      }
+      const idByName = new Map(accounts().map((a) => [a.name.toLowerCase(), a.id]));
+      const mapAccount = (localId) => {
+        const name = localAccounts.find((a) => a.id === localId)?.name;
+        return name ? idByName.get(String(name).toLowerCase()) || null : null;
+      };
+
+      // 2) Kun beholdninger der ikke allerede findes i samme depot – så en gentagelse ikke dublerer.
+      const existing = (await api('GET', '/api/holdings')).holdings;
+      let added = 0;
+      let skipped = 0;
+      for (const h of local.holdings) {
+        const accountId = mapAccount(h.accountId);
+        if (existing.some((x) => sameSlot(x, h.symbol, accountId))) {
+          skipped++;
+          continue;
+        }
+        await api('POST', '/api/holdings', { symbol: h.symbol, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', name: h.name, accountId });
+        added++;
+      }
+
+      // 3) Kontanter og navn overføres kun, hvis kontoen ikke har dem i forvejen.
+      const patch = {};
+      if (!state.settings.cash && local.settings?.cash) patch.cash = local.settings.cash;
+      if (!state.settings.displayName && local.settings?.displayName) patch.displayName = local.settings.displayName;
+      if (Object.keys(patch).length) state.settings = (await api('PUT', '/api/settings', patch)).settings;
+
+      // 4) Behold en kopi i browseren som sikkerhedsnet, men stop med at bruge den.
+      try {
+        localStorage.setItem(LOCAL_KEY_ARCHIVE, JSON.stringify(local));
+        localStorage.removeItem(LOCAL_KEY);
+      } catch {}
+      state.localImport = null;
+      toast(added ? `${added} ${added === 1 ? 'aktie' : 'aktier'} overført til din konto${skipped ? `, ${skipped} fandtes allerede` : ''}` : 'Alt lå allerede i din konto', 'success');
+      await afterMutation();
+    } catch (err) {
+      toast(err.message, 'error');
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // Depot-linjen afhænger af, om der findes aktier uden depot. Gentegn kun når det ændrer sig,
+  // så en baggrundshentning ikke river grafen ned midt i en interaktion.
+  const accountBarSignature = () => `${accounts().map((a) => a.id + a.name).join('|')}#${state.allHoldings.some((h) => !h.accountId)}`;
+
   async function loadAllHoldings() {
+    const before = accountBarSignature();
     try {
       const data = await api('GET', '/api/holdings');
       state.allHoldings = data.holdings || [];
-    } catch {}
+    } catch {
+      return;
+    }
+    if (accountBarSignature() !== before) render();
   }
 
   function setAccount(id, { reload = true } = {}) {
@@ -719,6 +812,10 @@
   function banners() {
     const p = state.portfolio;
     const out = [];
+    if (state.localImport) {
+      const n = state.localImport.holdings.length;
+      out.push(`<div class="banner info">${icon('upload')}<div><b>${n} ${n === 1 ? 'aktie' : 'aktier'} ligger gemt i denne browser.</b> Overfør dem til din konto, så de følger med på alle dine enheder. <span class="banner-actions"><button class="btn btn-sm btn-primary" data-action="import-local">Overfør</button> <button class="btn btn-sm" data-action="import-dismiss">Ikke nu</button></span></div></div>`);
+    }
     if (state.loadError && !p) {
       out.push(`<div class="banner error">${icon('warn')}<div><b>Kunne ikke hente kurser.</b> ${esc(state.loadError)}. <a href="#" data-action="refresh">Prøv igen</a></div></div>`);
     }
@@ -1176,6 +1273,7 @@
           <div class="card-header"><h2>${icon('download')}Data</h2></div>
           <div class="setting-row"><div><div class="lbl">Sikkerhedskopi</div><div class="desc">Download alle beholdninger som en JSON-fil.</div></div><button class="btn btn-sm" data-action="backup">${icon('download', 'icon icon-sm')}Download</button></div>
           <div class="setting-row"><div><div class="lbl">Gendan</div><div class="desc">Erstat beholdningerne med indholdet af en sikkerhedskopi.</div></div><button class="btn btn-sm" data-action="restore">${icon('upload', 'icon icon-sm')}Vælg fil…</button></div>
+          ${state.storage === 'server' && localHasData() ? `<div class="setting-row"><div><div class="lbl">Data fra denne browser</div><div class="desc">Der ligger stadig aktier gemt lokalt i denne browser fra før. Overfør dem til din konto, så de følger med på alle enheder.</div></div><button class="btn btn-sm btn-primary" data-action="import-local">Overfør</button></div>` : ''}
           <div class="setting-row"><div><div class="lbl">Hvor ligger mine data?</div><div class="desc">${state.storage === 'browser' ? 'I denne browsers lokale lager (localStorage). Rydder du browserdata, forsvinder de – så download en sikkerhedskopi.' : 'I serverens database/datamappe.'} Ingen data sendes til andre end Yahoo Finance (kun symboler).</div></div></div>
         </div>
       </div>`;
@@ -1935,6 +2033,13 @@
         return;
       case 'backup': return downloadBackup();
       case 'restore': return $('#restore-file').click();
+      case 'import-local':
+        if (!state.localImport) checkLocalImportForce();
+        return importLocal();
+      case 'import-dismiss':
+        state.localImport = null;
+        storageSet('importDismissed', '1');
+        return render();
       case 'account-add': return addAccount();
       case 'account-delete': return deleteAccount(el.dataset.id);
       default: return;
@@ -2118,6 +2223,7 @@
       state.storage = status.storage === 'browser' ? 'browser' : 'server';
       document.body.classList.toggle('browser-mode', state.storage === 'browser');
       if (state.storage !== 'browser' && !status.authenticated) return location.replace('/login');
+      checkLocalImport();
     } catch {}
     // Vis beholdningerne med det samme; kurserne fylder ind, når de er hentet.
     const quick = api('GET', '/api/holdings')
@@ -2130,7 +2236,6 @@
       })
       .catch(() => {});
     await Promise.all([quick, loadPortfolio(), loadAllHoldings()]);
-    render();
     scheduleRefresh();
   }
 

@@ -49,14 +49,17 @@ Dashboardet kører på port 3000, og dine data ligger i Docker-volumen `aktie-da
 
 Appen kan køre som én serverless-funktion på [Vercel](https://vercel.com) med data i Upstash Redis:
 
-1. **Importér repoet** i Vercel: *Add New → Project → Import* `aktie-portfolio`. Framework: *Other*. Deploy (siden viser en fejl indtil trin 2 og 3 er klaret).
-2. **Database**: I projektet → *Storage → Create Database → Upstash Redis* (gratis tier). Vercel sætter selv `KV_REST_API_URL`/`KV_REST_API_TOKEN`.
+1. **Importér repoet** i Vercel: *Add New → Project → Import* `aktie-portfolio`. Framework: *Other*. Deploy.
+   Uden trin 2–3 kører siden i *browser-tilstand*: den virker med det samme, men data ligger kun i den enkelte browser.
+2. **Database** (giver login og synkronisering mellem enheder): I projektet → *Storage → Create Database* → vælg en Redis-database, fx Upstash → *Connect to Project*. Vercel sætter selv `KV_REST_API_URL` og `KV_REST_API_TOKEN`.
 3. **Miljøvariabler** under *Settings → Environment Variables*:
-   - `DASHBOARD_PASSWORD` – din adgangskode (påkrævet; Vercel har ingen terminal at læse en opsætningsnøgle fra).
-   - `SESSION_SECRET` – en lang tilfældig streng (valgfri, men anbefalet; fx `openssl rand -hex 32`).
+   - `DASHBOARD_PASSWORD` – din adgangskode, mindst 8 tegn. Påkrævet, fordi hver serverless-instans er sin egen proces og derfor ikke kan dele en midlertidig opsætningsnøgle.
+   - `SESSION_SECRET` – en lang tilfældig streng, fx fra `openssl rand -hex 32`. Valgfri, men uden den logges du ud, når databasen nulstilles.
 4. **Redeploy** (*Deployments → ⋯ → Redeploy*). Åbn projektets URL og log ind.
 
-**Uden database virker siden også** – i *browser-tilstand*: der er intet login, og dine aktier gemmes kun i din egen browser (localStorage), mens serveren leverer kurser og beregninger. Det er nemt, men data følger ikke med til andre enheder, og rydder du browserdata, er de væk – så brug *Indstillinger → Download sikkerhedskopi*. Trin 2–3 ovenfor giver login og synkronisering.
+Har du allerede brugt siden i browser-tilstand, spørger den efter login, om dine hidtidige aktier skal overføres til kontoen. Depoter matches på navn, og aktier der allerede findes i samme depot springes over, så en gentagelse ikke dublerer noget. En kopi bliver liggende i browseren som sikkerhedsnet.
+
+**Uden database virker siden også** – i *browser-tilstand*: der er intet login, og dine aktier gemmes kun i din egen browser (localStorage), mens serveren leverer kurser og beregninger. Det er nemt, men data følger ikke med til andre enheder, og rydder du browserdata, er de væk – så brug *Indstillinger → Download sikkerhedskopi*. Trin 2–3 ovenfor giver login, synkronisering mellem alle enheder og serverside-backup.
 
 Hvert push til `main` deployer automatisk. Bemærk: på Vercel er der ingen baggrunds-opvarmning af kurser, så første visning efter en pause tager 1–2 sekunder. Yahoo kan desuden afvise flere kald fra cloud-IP'er end fra en hjemme-PC; appen viser i så fald seneste kendte kurser tydeligt markeret.
 
