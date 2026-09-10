@@ -44,6 +44,9 @@ export function loadConfig(env = process.env) {
     mockYahoo: env.YAHOO_MOCK === '1' || env.YAHOO_MOCK === 'true',
     trustProxy: env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true',
     publicAccess: env.PUBLIC_ACCESS === '1' || env.PUBLIC_ACCESS === 'true',
+    // Profiler med hver sin portefølje. Kræver en database; sæt PLATFORM=0 for at
+    // køre som ét enkelt dashboard med én adgangskode.
+    platform: env.PLATFORM !== '0' && env.PLATFORM !== 'false',
     setupToken: env.SETUP_TOKEN || randomBytes(12).toString('hex'),
     storageMode: env.STORAGE === 'browser' ? 'browser' : null, // null = vælges ud fra miljøet (fil/redis)
     warmCache: env.WARM_CACHE !== '0',
@@ -109,9 +112,11 @@ export async function startServer(config = loadConfig()) {
     const shownHost = config.host === '0.0.0.0' ? 'localhost' : config.host;
     console.log(`Aktie-portfolio kører på http://${shownHost}:${config.port}`);
     console.log(config.storageMode === 'browser' ? 'STORAGE=browser: data gemmes i brugerens browser, intet login.' : database === 'supabase' ? 'Data gemmes i Supabase' : database === 'redis' ? 'Data gemmes i Redis (Upstash)' : `Data gemmes i ${config.dataDir}`);
-    if (config.publicAccess && config.storageMode !== 'browser') console.log('PUBLIC_ACCESS=1: ingen login – alle med adressen kan se og ændre porteføljen.');
+    const platform = config.platform && config.storageMode !== 'browser';
+    if (platform) console.log('Platform: hver profil har sin egen portefølje. Den første profil oprettes uden invitationskode.');
+    if (!platform && config.publicAccess && config.storageMode !== 'browser') console.log('PUBLIC_ACCESS=1: ingen login – alle med adressen kan se og ændre porteføljen.');
     if (config.mockYahoo) console.log('YAHOO_MOCK=1: bruger falske kurser (ingen kald til Yahoo Finance).');
-    if (!config.envPassword && config.storageMode !== 'browser' && !config.publicAccess) {
+    if (!config.envPassword && config.storageMode !== 'browser' && !config.publicAccess && !platform) {
       store.getAuth().then((auth) => {
         if (auth.passwordHash) return;
         console.log('Ingen adgangskode endnu – åbn siden i browseren for at oprette den.');

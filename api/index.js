@@ -24,7 +24,9 @@ config.trustProxy = true; // Vercel sætter selv X-Forwarded-For/-Proto
 config.secureCookies = true; // altid HTTPS
 config.alwaysRequireSetupToken = true; // "localhost" findes ikke på Vercel
 config.storageMode = database || 'browser';
-config.publicAccess = process.env.PUBLIC_ACCESS === '0' || process.env.PUBLIC_ACCESS === 'false'
+// Med en database er siden en platform: hver bruger opretter sin egen profil og portefølje.
+config.platform = Boolean(database) && process.env.PLATFORM !== '0' && process.env.PLATFORM !== 'false';
+config.publicAccess = config.platform || process.env.PUBLIC_ACCESS === '0' || process.env.PUBLIC_ACCESS === 'false'
   ? false
   : Boolean(database) && !config.envPassword;
 
@@ -44,10 +46,11 @@ function plain(res, status, lines) {
 let databaseChecked = !database;
 
 // Hver serverless-instans er sin egen proces, så en tilfældig opsætningsnøgle ville skifte
-// mellem kald. Kræves der login, skal den første adgangskode derfor komme fra
+// mellem kald. Kræves der ét fælles login, skal adgangskoden derfor komme fra
 // DASHBOARD_PASSWORD og ikke oprettes i browseren.
-// Uden database er der hverken login eller noget at slå op – så er der intet at bekræfte.
-let passwordConfirmed = !database || config.publicAccess || Boolean(config.envPassword);
+// Som platform har hver profil sin egen adgangskode, og uden database er der intet login –
+// i begge tilfælde er der intet at bekræfte.
+let passwordConfirmed = !database || config.platform || config.publicAccess || Boolean(config.envPassword);
 
 export default async function handler(req, res) {
   if (!databaseChecked) {

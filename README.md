@@ -57,14 +57,9 @@ Appen kan køre som én serverless-funktion på [Vercel](https://vercel.com):
    - **Supabase** (Postgres): opret et projekt på [supabase.com](https://supabase.com), kør SQL'en i [`docs/database.md`](docs/database.md), og sæt `SUPABASE_URL` og `SUPABASE_KEY` under *Settings → Environment Variables*.
 3. **Redeploy** (*Deployments → ⋯ → Redeploy*), og åbn projektets URL.
 
-Med en database og ingen adgangskode er siden **åben**: porteføljen vises, så snart adressen åbnes – på alle enheder og i alle browsere, uden login. Det er også prisen: alle der kender adressen, kan se og ændre den.
+Med en database kører siden som **platform**: er man ikke logget ind, lander man på log ind / tilmeld. Se afsnittet nedenfor.
 
-Vil du have login, kan du **oprette adgangskoden direkte i dashboardet**: der står et felt øverst på forsiden (og en knap under *Indstillinger → Konto*). Fra det øjeblik kræver siden login overalt – også i den browser, du sad i, men du bliver logget ind med det samme, så du ikke skal taste igen. Der er ingen opsætningsnøgle at finde frem: så længe siden er åben, er der ikke noget skjult at beskytte, og det at sætte en adgangskode kan kun lukke den mere.
-
-Alternativt kan du sætte det som miljøvariabler i stedet:
-
-- `DASHBOARD_PASSWORD` – fast adgangskode. Så er siden aldrig åben, heller ikke det første øjeblik efter en deploy.
-- `SESSION_SECRET` – en lang tilfældig streng, fx fra `openssl rand -hex 32`. Valgfri, men uden den logges du ud, når databasen nulstilles.
+`SESSION_SECRET` er valgfri (en lang tilfældig streng, fx fra `openssl rand -hex 32`), men uden den logges alle ud, når databasen nulstilles. `PLATFORM=0` slår profilerne fra og kører i stedet ét dashboard med én fælles adgangskode fra `DASHBOARD_PASSWORD`.
 
 Har du allerede brugt siden i browser-tilstand, spørger den, om dine hidtidige aktier skal overføres til databasen. Depoter matches på navn, og aktier der allerede findes i samme depot springes over, så en gentagelse ikke dublerer noget. En kopi bliver liggende i browseren som sikkerhedsnet.
 
@@ -73,6 +68,18 @@ Har du allerede brugt siden i browser-tilstand, spørger den, om dine hidtidige 
 Hvert push til `main` deployer automatisk. Bemærk: på Vercel er der ingen baggrunds-opvarmning af kurser, så første visning efter en pause tager 1–2 sekunder. Yahoo kan desuden afvise flere kald fra cloud-IP'er end fra en hjemme-PC; appen viser i så fald seneste kendte kurser tydeligt markeret.
 
 Sådan vælges lageret, i den rækkefølge: findes `SUPABASE_URL`/`SUPABASE_KEY`, bruges Supabase; ellers `KV_REST_API_URL`/`KV_REST_API_TOKEN` (eller `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN`) → Redis; ellers JSON-filen i `DATA_DIR`. Det gælder også lokalt og i Docker.
+
+## Profiler og at følge hinanden
+
+Med en database har hver bruger sin egen profil og sin egen portefølje.
+
+- **Tilmelding.** Den allerførste profil oprettes uden invitationskode – der er endnu intet at beskytte – og bliver *ejer*. Ejeren får en kode, som står under *Indstillinger → Konto* og kan kopieres eller skiftes ud. Alle senere profiler skal bruge den kode. Uden kode kan ingen tilmelde sig, selvom de kender adressen.
+- **Log ind.** Med e-mail og adgangskode. Er man ikke logget ind, sendes man til log ind / tilmeld-siden; intet andet er tilgængeligt.
+- **Følg andre.** Under *Folk* søger man på navn (mindst to bogstaver) eller på en hel e-mailadresse – stumper af en e-mail giver intet, så listen over hvem der er tilmeldt, ikke kan afsøges. Man sender en anmodning, og **først når modtageren godkender**, kan man se vedkommendes portefølje.
+- **Hvad en følger ser.** Det hele: aktier, antal, gennemsnitskurs, værdi og afkast – de samme tal som ejeren selv ser. Men kun til at kigge på; der findes ingen vej til at ændre en andens portefølje.
+- **Fortryd.** Både den, der følger, og den, der bliver fulgt, kan afbryde når som helst. Adgangen forsvinder med det samme.
+
+E-mailadresser deles aldrig med andre brugere – de bruges kun til at logge ind og til at finde hinanden.
 
 ## Konfiguration
 
@@ -95,7 +102,8 @@ Alle indstillinger er valgfrie miljøvariabler. Læg dem i en `.env`-fil i proje
 | `STORAGE` | *(auto)* | `browser` = tving browser-tilstand (intet login, data i brugerens browser). På Vercel vælges den automatisk, når der ingen database er |
 | `SUPABASE_URL` + `SUPABASE_KEY` | *(tom)* | Supabase-projekt. Når de findes, gemmes data dér. Kræver tabellerne og funktionerne i [`docs/database.md`](docs/database.md) |
 | `KV_REST_API_URL` + `KV_REST_API_TOKEN` | *(tom)* | Upstash Redis (sættes automatisk af Vercel). Når de findes, gemmes data i Redis i stedet for `DATA_DIR` |
-| `PUBLIC_ACCESS` | *(auto)* | `1` = ingen login; alle med adressen ser og redigerer den samme portefølje. På Vercel slås den automatisk til, når der er en database og ingen `DASHBOARD_PASSWORD`. `0` slår den fra igen |
+| `PLATFORM` | `1` | Profiler med hver sin portefølje (kræver en database). `0` = ét dashboard med én fælles adgangskode |
+| `PUBLIC_ACCESS` | *(auto)* | Kun uden profiler (`PLATFORM=0`): `1` = ingen login; alle med adressen ser og redigerer den samme portefølje |
 
 ## Sådan virker det
 
@@ -127,6 +135,8 @@ vercel.json         rewrites + funktionsopsætning til Vercel
 server/
   index.js          start, konfiguration, cache-opvarmning, .env
   app.js            routing, auth, API
+  accounts.js       brugerprofiler, tilmelding og invitationskode
+  social.js         følge-anmodninger og hvem der må se hvad
   storage.js        vælger Supabase-, Redis- eller fil-lager ud fra miljøet
   resolve.js        finder Yahoo-symbol ud fra ISIN eller navn
   store-redis.js    Upstash Redis-lager (REST, compare-and-set, backups)

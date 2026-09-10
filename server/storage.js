@@ -67,6 +67,9 @@ function withBaseCurrency(store, baseCurrency) {
     ...store,
     getPortfolio: () => store.getPortfolio(baseCurrency),
     updatePortfolio: (fn) => store.updatePortfolio(fn, baseCurrency),
+    getUserPortfolio: (userId) => store.getUserPortfolio(userId, baseCurrency),
+    updateUserPortfolio: (userId, fn) => store.updateUserPortfolio(userId, fn, baseCurrency),
+    deleteUserPortfolio: (userId) => store.deleteUserPortfolio(userId, baseCurrency),
     getSessionSecret: (envSecret) => store.getSessionSecret(envSecret),
   };
 }

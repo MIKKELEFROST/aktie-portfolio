@@ -149,6 +149,11 @@
     storage: 'server', // 'server' (database eller fil) eller 'browser' (localStorage)
     access: 'login', // 'login' = adgangskode kræves | 'open' = åben adgang for alle med adressen | 'browser'
     canSetPassword: false, // åben adgang uden adgangskode: siden kan lukkes herfra
+    me: null, // min profil på platformen: { id, name, email, isOwner }
+    viewing: null, // ser jeg en andens portefølje? { id, name }
+    people: { q: '', results: [], loading: false, searched: false },
+    follows: { following: [], followers: [] },
+    inviteCode: null,
     account: storageGet('account', 'all'), // 'all' | 'none' | depot-id
     localImport: null, // data fundet i browserens lager, som kan overføres til kontoen
     allHoldings: [], // alle beholdninger uanset depot-filter (til tilføj/køb til og "Uden depot"-chip)
@@ -442,13 +447,16 @@
     state.lastAttempt = Date.now();
     if (!silent) setRefreshing(true);
     try {
-      const data = await api('GET', `/api/portfolio${accountQuery()}`);
+      // Ser man en andens portefølje, hentes deres – uden ens eget depot-filter.
+      const v = state.viewing;
+      const data = await api('GET', v ? `/api/users/${encodeURIComponent(v.id)}/portfolio` : `/api/portfolio${accountQuery()}`);
       if (seq !== portfolioSeq) return; // overhalet af en nyere hentning
+      if (v && data.person) state.viewing = { id: v.id, name: data.person.name };
       state.portfolio = data;
       state.pending = null;
       state.settings = data.settings || {};
       // Et valgt depot, der ikke findes længere (slettet fra en anden enhed) → tilbage til "Alle".
-      if (state.account !== 'all' && state.account !== 'none' && !accounts().some((a) => a.id === state.account)) {
+      if (!state.viewing && state.account !== 'all' && state.account !== 'none' && !accounts().some((a) => a.id === state.account)) {
         setAccount('all', { reload: true });
         return;
       }
@@ -460,7 +468,8 @@
       if (seq !== portfolioSeq) return;
       state.loadError = err.message;
       state.failures += 1;
-      if (!silent || !state.portfolio) toast(err.message, 'error');
+      if (state.viewing) state.viewingDenied = true; // stop med at prøve igen
+      else if (!silent || !state.portfolio) toast(err.message, 'error');
     } finally {
       if (seq === portfolioSeq) {
         state.loading = false;
@@ -617,6 +626,7 @@
     clearInterval(refreshTimer);
     refreshTimer = setInterval(() => {
       if (!state.autoRefresh || document.hidden || state.importing) return;
+      if (state.viewingDenied) return; // en profil man ikke må se, prøves ikke igen
       if (Date.now() - state.lastAttempt >= refreshInterval()) {
         loadPortfolio({ silent: true });
         const h = state.history[state.range];
@@ -644,15 +654,19 @@
   // Routing
   // ======================================================================
 
-  const ROUTES = { '/': 'overview', '/beholdninger': 'holdings', '/indstillinger': 'settings' };
-  const TITLES = { overview: 'Overblik', holdings: 'Beholdninger', settings: 'Indstillinger' };
+  const ROUTES = { '/': 'overview', '/beholdninger': 'holdings', '/indstillinger': 'settings', '/folk': 'people' };
+  const TITLES = { overview: 'Overblik', holdings: 'Beholdninger', settings: 'Indstillinger', people: 'Folk', person: 'Profil' };
+  const PERSON_PATH = /^\/profil\/([^/]+)$/;
+
+  const personIdFromPath = () => PERSON_PATH.exec(location.pathname)?.[1] || null;
 
   function currentRoute() {
+    if (personIdFromPath()) return 'person';
     return ROUTES[location.pathname] || 'overview';
   }
 
   function navigate(path) {
-    if (!(path in ROUTES)) path = '/';
+    if (!(path in ROUTES) && !PERSON_PATH.test(path)) path = '/';
     if (location.pathname !== path) history.pushState({}, '', path);
     closeMenu();
     closePanel();
@@ -665,12 +679,29 @@
     render();
   });
 
+  // Sørger for, at siden har de data, den viser. Kaldes ved hver tegning, men
+  // henter kun når noget rent faktisk mangler.
+  let followsLoaded = false;
+  function routeData(route) {
+    if (route === 'person') {
+      const id = personIdFromPath();
+      if (id) viewPerson(id);
+      return;
+    }
+    if (state.viewing) stopViewing();
+    if (route === 'people' && state.access === 'platform' && !followsLoaded) {
+      followsLoaded = true;
+      loadFollows();
+    }
+  }
+
   // ======================================================================
   // Rendering
   // ======================================================================
 
   function render({ silent = false } = {}) {
     const route = currentRoute();
+    routeData(route);
     document.title = `${TITLES[route]} – Min Portefølje`;
     $$('[data-nav]').forEach((a) => {
       const active = ROUTES[a.dataset.nav] === route;
@@ -687,10 +718,14 @@
     const page = $('#page');
     if (route === 'overview') page.innerHTML = renderOverview();
     else if (route === 'holdings') page.innerHTML = renderHoldings();
+    else if (route === 'people') page.innerHTML = renderPeople();
+    else if (route === 'person') page.innerHTML = renderPerson();
     else page.innerHTML = renderSettings();
     if (route === 'overview') afterRenderOverview();
     renderSidebarStatus();
     document.body.classList.toggle('private', state.privacy);
+    // "Tilføj aktie" ville lægge i ens egen portefølje – forvirrende mens man ser en andens.
+    document.body.classList.toggle('viewing-person', Boolean(state.viewing));
     $$('[data-action="privacy"]').forEach((b) => {
       const label = state.privacy ? 'Vis beløb' : 'Skjul beløb';
       b.title = label;
@@ -765,7 +800,7 @@
   function greeting() {
     const hour = Number(new Intl.DateTimeFormat('da-DK', { hour: 'numeric', hour12: false, timeZone: 'Europe/Copenhagen' }).format(new Date()));
     const word = hour < 5 ? 'Godnat' : hour < 10 ? 'Godmorgen' : hour < 18 ? 'Goddag' : 'Godaften';
-    const name = (state.settings.displayName || '').trim();
+    const name = (state.me?.name || state.settings.displayName || '').trim();
     return name ? `${word}, ${name}` : 'Overblik';
   }
 
@@ -1146,6 +1181,10 @@
   }
 
   function holdingsTable({ compact = false } = {}) {
+    // Ser man en andens portefølje, er der intet at redigere: ingen handlingskolonne
+    // og ingen klikbare rækker.
+    if (state.viewing) compact = compact || false;
+    const readonly = Boolean(state.viewing);
     const rows = sortedPositions({ applyFilter: !compact });
     const t = state.portfolio?.totals;
     const pendingOnly = !state.portfolio; // beholdninger kendt, kurser på vej
@@ -1169,7 +1208,7 @@
       const sorted = state.sort.key === c.key;
       const ariaSort = sorted ? (state.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none';
       return `<th class="${c.n ? 'n' : ''}${sorted ? ' sorted' : ''}" data-sort="${c.key}" aria-sort="${ariaSort}" tabindex="0" role="columnheader button" ${c.title ? `title="${esc(c.title)}"` : ''}>${c.label}<span class="sort-ind">${sorted ? (state.sort.dir === 'asc' ? '▲' : '▼') : ''}</span></th>`;
-    }).join('') + (compact ? '' : '<th class="n"><span class="sr-only">Handlinger</span></th>');
+    }).join('') + (compact || readonly ? '' : '<th class="n"><span class="sr-only">Handlinger</span></th>');
 
     const sk = '<span class="skeleton">00.000</span>';
     const tr = rows.map((p) => {
@@ -1196,22 +1235,23 @@
       cells.push(`<td class="n"><b class="amount">${fmtAmount(p.valueBase)}</b></td>`);
       cells.push(`<td class="n"><div class="cell-2"><span class="amount ${signClass(p.gainBase)}">${fmtAmount(p.gainBase, state.baseCurrency, { sign: true })}</span><span class="sub ${signClass(p.gainPercent)}">${fmtPct(p.gainPercent)}</span></div></td>`);
       cells.push(`<td class="n">${isNum(p.weight) ? `${fmtPct(p.weight, { sign: false })}<span class="weight-bar"><i style="width:${clamp(p.weight, 0, 100).toFixed(1)}%"></i></span>` : '–'}</td>`);
-      if (!compact) cells.push(`<td class="n"><div class="row-actions"><button class="btn btn-ghost btn-icon" data-action="menu" data-id="${esc(p.id)}" title="Handlinger" aria-label="Handlinger for ${esc(p.name)}">${icon('more')}</button></div></td>`);
+      if (!compact && !readonly) cells.push(`<td class="n"><div class="row-actions"><button class="btn btn-ghost btn-icon" data-action="menu" data-id="${esc(p.id)}" title="Handlinger" aria-label="Handlinger for ${esc(p.name)}">${icon('more')}</button></div></td>`);
+      if (readonly) return `<tr data-symbol="${esc(p.symbol)}" class="${hasPrice ? '' : 'error-row'}">${cells.join('')}</tr>`;
       return `<tr data-action="open" data-symbol="${esc(p.symbol)}" class="${hasPrice ? '' : 'error-row'}" tabindex="0" aria-label="Vis detaljer for ${esc(p.name || p.symbol)}">${cells.join('')}</tr>`;
     }).join('');
 
     const foot = t && !pendingOnly ? `<tfoot><tr>
-      <td>I alt</td>${compact ? '' : '<td></td>'}<td></td>
+      <td>I alt</td>${compact || readonly ? '' : '<td></td>'}<td></td>
       <td class="n"><div class="cell-2"><span class="${signClass(t.dayChangePercent)}">${fmtPct(t.dayChangePercent)}</span><span class="sub amount ${signClass(t.dayChangeBase)}">${fmtAmount(t.dayChangeBase, state.baseCurrency, { sign: true })}</span></div></td>
-      ${compact ? '' : '<td></td>'}
+      ${compact || readonly ? '' : '<td></td>'}
       <td class="n"><span class="amount">${fmtAmount(t.valueBase)}</span></td>
       <td class="n"><div class="cell-2"><span class="amount ${signClass(t.gainBase)}">${fmtAmount(t.gainBase, state.baseCurrency, { sign: true })}</span><span class="sub ${signClass(t.gainPercent)}">${fmtPct(t.gainPercent)}</span></div></td>
-      <td class="n">100 %</td>${compact ? '' : '<td></td>'}
+      <td class="n">100 %</td>${compact || readonly ? '' : '<td></td>'}
     </tr></tfoot>` : '';
 
     const cards = rows.map((p) => pendingOnly
       ? `<div class="hcard"><div class="l1">${esc(p.name || p.symbol)}</div><div class="r1">${sk}</div><div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk.</div><div class="r2">${sk}</div></div>`
-      : `<div class="hcard" data-action="open" data-symbol="${esc(p.symbol)}" tabindex="0" role="button">
+      : `<div class="hcard"${readonly ? '' : ` data-action="open" data-symbol="${esc(p.symbol)}" tabindex="0" role="button"`}>
       <div class="l1">${p.status !== 'ok' ? '<span class="warn-dot"></span>' : ''}${esc(p.name || p.symbol)}</div>
       <div class="r1 amount">${fmtAmount(p.valueBase)}</div>
       <div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk. · ${isNum(p.price) ? `${fmtPrice(p.price)} ${esc(p.currency || '')}` : 'ingen kurs'}${p.accountName && state.account === 'all' ? ` · ${esc(p.accountName)}` : ''}</div>
@@ -1242,6 +1282,172 @@
       <p class="footer-note">Tryk på en aktie for detaljer – her kan du købe til, sælge, redigere eller slette.</p>`}`;
   }
 
+  // ---------- Platform: profil, følgere, søgning ----------
+
+  async function loadMe() {
+    try {
+      const data = await api('GET', '/api/me');
+      state.me = data.user;
+      state.pendingRequests = data.pending || 0;
+      state.inviteCode = data.inviteCode || null;
+    } catch {
+      /* ikke logget ind eller ikke en platform – siden virker uden */
+    }
+  }
+
+  async function loadFollows() {
+    try {
+      state.follows = await api('GET', '/api/follows');
+      state.pendingRequests = state.follows.followers.filter((f) => f.status === 'pending').length;
+      render();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  let peopleTimer = null;
+  function searchPeopleSoon(q) {
+    state.people.q = q;
+    clearTimeout(peopleTimer);
+    if (q.trim().length < 2) {
+      state.people = { q, results: [], loading: false, searched: false };
+      return render();
+    }
+    state.people.loading = true;
+    peopleTimer = setTimeout(async () => {
+      try {
+        const data = await api('GET', `/api/people?q=${encodeURIComponent(q.trim())}`);
+        if (state.people.q !== q) return;
+        state.people = { q, results: data.people, loading: false, searched: true };
+      } catch (err) {
+        state.people = { q, results: [], loading: false, searched: true };
+        toast(err.message, 'error');
+      }
+      render();
+    }, 300);
+  }
+
+  // Skifter til en andens portefølje (eller tilbage til ens egen).
+  function viewPerson(id) {
+    if (state.viewing?.id === id) return;
+    state.viewingDenied = false;
+    state.viewing = { id, name: 'Profil' };
+    state.portfolio = null;
+    state.pending = null;
+    state.loadError = null;
+    render();
+    loadPortfolio();
+  }
+
+  function stopViewing() {
+    if (!state.viewing) return;
+    state.viewing = null;
+    state.portfolio = null;
+    state.pending = null;
+    state.loadError = null;
+    loadPortfolio();
+  }
+
+  async function followAction(method, path, ok) {
+    try {
+      await api(method, path);
+      await loadFollows();
+      if (state.people.q.trim().length >= 2) searchPeopleSoon(state.people.q);
+      if (ok) toast(ok, 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  // ---------- Folk: find, følg, godkend ----------
+
+  const personInitials = (name) => String(name || '?').split(' ').filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
+
+  function personRow(person, actions) {
+    return `<div class="person-row">
+      <span class="avatar" aria-hidden="true">${esc(personInitials(person.name))}</span>
+      <div class="person-name">${esc(person.name)}${person.isOwner ? ' <span class="hint">ejer</span>' : ''}</div>
+      <div class="person-actions">${actions}</div>
+    </div>`;
+  }
+
+  function followButton(person) {
+    if (person.status === 'accepted') return `<a class="btn btn-sm btn-primary" href="/profil/${esc(person.id)}" data-link>Se portefølje</a><button class="btn btn-sm" data-action="unfollow" data-id="${esc(person.id)}">Følg ikke mere</button>`;
+    if (person.status === 'pending') return `<span class="hint">Afventer svar</span><button class="btn btn-sm" data-action="unfollow" data-id="${esc(person.id)}">Fortryd</button>`;
+    return `<button class="btn btn-sm btn-primary" data-action="follow" data-id="${esc(person.id)}">Anmod om at følge</button>`;
+  }
+
+  function renderPeople() {
+    const { following, followers } = state.follows;
+    const anmodninger = followers.filter((f) => f.status === 'pending');
+    const mineFølgere = followers.filter((f) => f.status === 'accepted');
+    const jegFølger = following.filter((f) => f.status === 'accepted');
+    const sendte = following.filter((f) => f.status === 'pending');
+    const p = state.people;
+
+    return `
+      ${pageHeader('Folk', '<span>Find andre og følg deres portefølje</span>', headerActions({ add: false }))}
+
+      ${anmodninger.length ? `<div class="card">
+        <div class="card-header"><h2>${icon('lock')}Vil følge dig <span class="hint">${anmodninger.length}</span></h2></div>
+        <div class="card-body">
+          <p class="muted" style="margin-top:0">Siger du ja, kan personen se hele din portefølje – aktier, antal og beløb. Du kan fjerne adgangen igen når som helst.</p>
+          ${anmodninger.map((f) => personRow(f, `<button class="btn btn-sm btn-primary" data-action="accept-follow" data-id="${esc(f.id)}">Godkend</button><button class="btn btn-sm" data-action="reject-follow" data-id="${esc(f.id)}">Afvis</button>`)).join('')}
+        </div>
+      </div>` : ''}
+
+      <div class="card">
+        <div class="card-header"><h2>${icon('search')}Find en profil</h2></div>
+        <div class="card-body">
+          <div class="input-group" style="max-width:360px"><input class="input" id="people-search" type="search" placeholder="Navn eller hele e-mailen…" value="${esc(p.q)}" aria-label="Søg efter profil"></div>
+          ${p.loading ? '<p class="muted">Søger…</p>' : p.results.length
+            ? p.results.map((person) => personRow(person, followButton(person))).join('')
+            : p.searched ? `<p class="muted">Ingen profiler matcher "${esc(p.q)}". Søger du på e-mail, skal den skrives helt.</p>` : '<p class="muted">Skriv mindst to bogstaver af et navn, eller hele e-mailadressen.</p>'}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2>${icon('list')}Jeg følger <span class="hint">${jegFølger.length}</span></h2></div>
+        <div class="card-body">
+          ${jegFølger.length ? jegFølger.map((f) => personRow(f, followButton(f))).join('') : '<p class="muted">Du følger ingen endnu.</p>'}
+          ${sendte.length ? `<p class="muted" style="margin-bottom:6px">Sendt, men ikke besvaret endnu:</p>${sendte.map((f) => personRow(f, followButton(f))).join('')}` : ''}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2>${icon('eye')}Følger mig <span class="hint">${mineFølgere.length}</span></h2></div>
+        <div class="card-body">
+          ${mineFølgere.length
+            ? mineFølgere.map((f) => personRow(f, `<button class="btn btn-sm" data-action="reject-follow" data-id="${esc(f.id)}">Fjern adgang</button>`)).join('')
+            : '<p class="muted">Ingen følger dig endnu. De skal selv finde dig og sende en anmodning.</p>'}
+        </div>
+      </div>`;
+  }
+
+  // En andens portefølje. Samme tal som ens egen, men intet kan ændres.
+  function renderPerson() {
+    const v = state.viewing;
+    if (state.loadError && !state.portfolio) {
+      return `${pageHeader('Profil', '<span>Kunne ikke hentes</span>')}
+        <div class="banner error">${icon('warn')}<div><b>${esc(state.loadError)}</b> <a href="/folk" data-link>Tilbage til Folk</a></div></div>`;
+    }
+    if (!v) return `${pageHeader('Profil', '<span>Henter…</span>')}`;
+    const p = state.portfolio;
+    return `
+      ${pageHeader(esc(v.name), `<span>Portefølje · kun visning</span>${updatedSub()}`, `<a class="btn" href="/folk" data-link>${icon('list')}<span>Tilbage</span></a><button class="btn btn-ghost btn-icon${state.loading ? ' is-loading' : ''}" data-action="refresh" title="Opdatér kurser" aria-label="Opdatér kurser">${icon('refresh')}</button>`)}
+      <div class="banner info">${icon('eye')}<div>Du ser <b>${esc(v.name)}s</b> portefølje. Du kan ikke ændre noget her.</div></div>
+      ${p ? `
+      <div class="grid grid-kpi">
+        <div class="card kpi kpi-hero"><div class="kpi-label">Porteføljeværdi</div><div class="kpi-value amount">${fmtAmount(p.totals.totalValueBase ?? p.totals.valueBase)}</div><div class="kpi-sub">${p.totals.positionCount} ${p.totals.positionCount === 1 ? 'aktie' : 'aktier'}</div></div>
+        <div class="card kpi"><div class="kpi-label">${allMarketsClosed() ? 'Seneste handelsdag' : 'I dag'}</div><div class="kpi-value amount ${signClass(p.totals.dayChangeBase)}">${fmtAmount(p.totals.dayChangeBase, state.baseCurrency, { sign: true })}</div><div class="kpi-sub ${signClass(p.totals.dayChangePercent)}">${fmtPct(p.totals.dayChangePercent)}</div></div>
+        <div class="card kpi"><div class="kpi-label">Samlet afkast</div><div class="kpi-value amount ${signClass(p.totals.gainBase)}">${fmtAmount(p.totals.gainBase, state.baseCurrency, { sign: true })}</div><div class="kpi-sub ${signClass(p.totals.gainPercent)}">${fmtPct(p.totals.gainPercent)}</div></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h2>${icon('list')}Aktier</h2></div>
+        ${holdingsTable({ compact: false })}
+      </div>` : '<p class="muted">Henter portefølje…</p>'}`;
+  }
+
   // ---------- Indstillinger ----------
 
   function renderSettings() {
@@ -1253,8 +1459,13 @@
       <div class="settings-grid">
         <div class="card">
           <div class="card-header"><h2>${icon('lock')}Konto</h2></div>
-          <div class="setting-row"><div><div class="lbl">Dit navn</div><div class="desc">Bruges i hilsenen på forsiden.</div></div><input class="input" id="set-name" style="max-width:180px" value="${esc(s.displayName || '')}" placeholder="F.eks. Mikkel" maxlength="40" aria-label="Dit navn"></div>
-          ${state.storage === 'browser' ? `<div class="setting-row"><div><div class="lbl">Browser-tilstand – intet login</div><div class="desc">Serveren har ingen database, så dine aktier og indstillinger gemmes kun i denne browser (de sendes til serveren for at få kurser, men gemmes ikke der). Tag jævnligt en sikkerhedskopi under Data. Vil du have, at porteføljen følger med til alle dine enheder, så tilslut en database – se README.</div></div></div>` : state.access === 'open' ? `<div class="setting-row"><div><div class="lbl">Åben adgang – intet login</div><div class="desc">Porteføljen ligger i databasen og vises, så snart siden åbnes – på alle dine enheder og i alle browsere. Det betyder også, at alle der kender adressen, kan se og ændre den.</div></div><button class="btn btn-sm btn-primary" data-action="setup-password">Opret adgangskode</button></div>` : `
+          <div class="setting-row"><div><div class="lbl">Dit navn</div><div class="desc">${state.access === 'platform' ? 'Vises i hilsenen – og er sådan, andre finder dig.' : 'Bruges i hilsenen på forsiden.'}</div></div><input class="input" id="set-name" style="max-width:200px" value="${esc(state.access === 'platform' ? state.me?.name || '' : s.displayName || '')}" placeholder="F.eks. Mikkel Frost" maxlength="40" aria-label="Dit navn"></div>
+          ${state.access === 'platform' ? `
+          <div class="setting-row"><div><div class="lbl">E-mail</div><div class="desc">Bruges til at logge ind. Andre kan finde dig med den, men de får den aldrig at se.</div></div><span class="muted">${esc(state.me?.email || '')}</span></div>
+          <div class="setting-row"><div><div class="lbl">Adgangskode</div><div class="desc">Skifter du den, logges dine andre enheder ud.</div></div><button class="btn btn-sm" data-action="change-password">Skift adgangskode</button></div>
+          ${state.inviteCode ? `<div class="setting-row"><div><div class="lbl">Invitationskode</div><div class="desc">Del den med dem, du vil have med. Uden en kode kan ingen oprette en profil.</div></div><div class="invite-box"><code class="invite-code">${esc(state.inviteCode)}</code><button class="btn btn-sm" data-action="copy-invite">Kopiér</button><button class="btn btn-sm" data-action="rotate-invite">Ny kode</button></div></div>` : ''}
+          ` : ''}
+          ${state.access === 'platform' ? '' : state.storage === 'browser' ? `<div class="setting-row"><div><div class="lbl">Browser-tilstand – intet login</div><div class="desc">Serveren har ingen database, så dine aktier og indstillinger gemmes kun i denne browser (de sendes til serveren for at få kurser, men gemmes ikke der). Tag jævnligt en sikkerhedskopi under Data. Vil du have, at porteføljen følger med til alle dine enheder, så tilslut en database – se README.</div></div></div>` : state.access === 'open' ? `<div class="setting-row"><div><div class="lbl">Åben adgang – intet login</div><div class="desc">Porteføljen ligger i databasen og vises, så snart siden åbnes – på alle dine enheder og i alle browsere. Det betyder også, at alle der kender adressen, kan se og ændre den.</div></div><button class="btn btn-sm btn-primary" data-action="setup-password">Opret adgangskode</button></div>` : `
           <div class="setting-row"><div><div class="lbl">Adgangskode</div><div class="desc">${usesEnvPassword ? 'Styres af DASHBOARD_PASSWORD på serveren.' : 'Skift adgangskoden til dashboardet.'}</div></div><button class="btn btn-sm" data-action="change-password" ${usesEnvPassword ? 'disabled' : ''}>Skift adgangskode</button></div>
           <div class="setting-row"><div><div class="lbl">Log ud på alle enheder</div><div class="desc">Ugyldiggør alle aktive logins, også dette.</div></div><button class="btn btn-sm" data-action="logout-all">Log ud overalt</button></div>`}
         </div>
@@ -2190,6 +2401,36 @@
       case 'delete':
         e.stopPropagation();
         return deleteHolding(el.dataset.id);
+      case 'follow':
+        followAction('POST', `/api/follows/${encodeURIComponent(el.dataset.id)}`, 'Anmodningen er sendt');
+        break;
+      case 'unfollow':
+        followAction('DELETE', `/api/follows/${encodeURIComponent(el.dataset.id)}`);
+        break;
+      case 'accept-follow':
+        followAction('POST', `/api/follows/${encodeURIComponent(el.dataset.id)}/accept`, 'Godkendt – nu kan personen se din portefølje');
+        break;
+      case 'reject-follow':
+        followAction('DELETE', `/api/followers/${encodeURIComponent(el.dataset.id)}`, 'Adgangen er fjernet');
+        break;
+      case 'copy-invite':
+        navigator.clipboard?.writeText(state.inviteCode || '').then(
+          () => toast('Invitationskoden er kopieret', 'success'),
+          () => toast('Kunne ikke kopiere – markér koden og kopiér selv', 'error'),
+        );
+        break;
+      case 'rotate-invite':
+        confirmDialog({ title: 'Ny invitationskode?', text: 'Den nuværende kode holder op med at virke med det samme. Dem, der allerede er tilmeldt, bliver ikke berørt.', okLabel: 'Lav en ny kode' }).then(async (ok) => {
+          if (!ok) return;
+          try {
+            state.inviteCode = (await api('POST', '/api/invite/rotate')).inviteCode;
+            render();
+            toast('Ny invitationskode lavet', 'success');
+          } catch (err) {
+            toast(err.message, 'error');
+          }
+        });
+        break;
       case 'setup-password':
         setError('#setup-error', '');
         $('#form-setup-pw').reset();
@@ -2277,6 +2518,17 @@
       imp.rows[Number(e.target.dataset.importSymbol)].symbol = e.target.value.trim().toUpperCase();
       updateImportCount();
     }
+    else if (id === 'people-search') {
+      const felt = e.target;
+      const pos = felt.selectionStart;
+      searchPeopleSoon(felt.value);
+      // Tegningen erstatter feltet; sæt markøren tilbage hvor den var.
+      const igen = $('#people-search');
+      if (igen && igen !== felt) {
+        igen.focus();
+        igen.setSelectionRange(pos, pos);
+      }
+    }
     else if (id === 'filter') {
       state.filter = e.target.value;
       const card = $('#filter')?.closest('.card');
@@ -2321,8 +2573,14 @@
         state.autoRefresh = e.target.checked;
         storageSet('autoRefresh', state.autoRefresh ? '1' : '0');
       } else if (id === 'set-name') {
-        const data = await api('PUT', '/api/settings', { displayName: e.target.value });
-        state.settings = data.settings;
+        if (state.access === 'platform') {
+          const data = await api('PUT', '/api/me', { name: e.target.value });
+          state.me = data.user;
+          render();
+        } else {
+          const data = await api('PUT', '/api/settings', { displayName: e.target.value });
+          state.settings = data.settings;
+        }
         toast('Navn gemt', 'success');
       } else if (id === 'set-cash') {
         const n = parseInput(e.target.value);
@@ -2427,6 +2685,11 @@
       state.storage = status.storage === 'browser' ? 'browser' : 'server';
       state.access = status.access || (state.storage === 'browser' ? 'browser' : 'login');
       state.canSetPassword = state.access === 'open' && status.setupRequired === true;
+      document.body.classList.toggle('platform', state.access === 'platform');
+      if (state.access === 'platform') {
+        state.me = status.user;
+        loadMe();
+      }
       document.body.classList.toggle('browser-mode', state.storage === 'browser');
       document.body.classList.toggle('open-access', state.access === 'open');
       // Ved åben adgang findes der intet login at sende brugeren til.

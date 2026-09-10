@@ -7,6 +7,8 @@ import { newId } from './store.js';
 import { computePortfolio, computeValueHistory, parseDanishNumber } from './portfolio-math.js';
 import { resolveSecurities } from './resolve.js';
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter, passwordVersion } from './auth.js';
+import { createAccounts, publicProfile, SignupError, normalizeEmail } from './accounts.js';
+import { createSocial, SocialError } from './social.js';
 import { sendJson, sendError, readJsonBody, parseCookies, cookieHeader, serveStatic, clientIp, isLoopback, safeDecode, HttpError } from './http-utils.js';
 import { timingSafeEqual } from 'node:crypto';
 import { YahooError } from './yahoo.js';
@@ -22,7 +24,9 @@ const MIN_PASSWORD_LENGTH = 8;
 
 const SYMBOL_RE = /^[A-Z0-9^][A-Z0-9.\-=^]{0,24}$/;
 const CURRENCY_RE = /^[A-Z]{3}$/;
-const PAGE_ROUTES = new Set(['/', '/beholdninger', '/indstillinger']);
+const PAGE_ROUTES = new Set(['/', '/beholdninger', '/indstillinger', '/folk']);
+// Profil-sider: /profil/<id> viser en andens portefølje, hvis man følger vedkommende.
+const PERSON_PAGE = /^\/profil\/[^/]+$/;
 const HISTORY_RANGES = new Set(['5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '5y', 'max']);
 const HOLDABLE_TYPES = new Set(['EQUITY', 'ETF', 'MUTUALFUND']);
 const MAX_HOLDINGS = 200;
@@ -38,7 +42,12 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   // portefølje. Kræver et lager på serveren, ellers er der intet at dele.
   // Den gælder kun, så længe der ikke er nogen adgangskode: opretter man én, er siden
   // lukket fra det øjeblik – også for de øvrige serverless-instanser.
-  const openAccessAllowed = Boolean(config.publicAccess) && !browserMode && Boolean(store);
+  // Platform: flere profiler, hver med sin egen portefølje, og et følge-forhold imellem dem.
+  // Kræver en database; uden den er der kun browser-tilstanden.
+  const platform = Boolean(config.platform) && !browserMode && Boolean(store);
+  const accounts = platform ? createAccounts(store) : null;
+  const social = platform ? createSocial(store) : null;
+  const openAccessAllowed = !platform && Boolean(config.publicAccess) && !browserMode && Boolean(store);
   const OPEN_CHECK_TTL = 10_000;
   let passwordExists = false;
   let openCheckedAt = 0;
@@ -52,6 +61,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     return !passwordExists;
   }
   const apiLimiter = createLoginLimiter({ limit: 240, windowMs: 60_000 });
+  const USER_CACHE = Symbol('bruger'); // sessionens profil slås kun op én gang pr. kald
   let envPasswordHash = null;
 
   async function getEnvPasswordHash() {
@@ -72,7 +82,33 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     return store.getSessionSecret(config.sessionSecret);
   }
 
+  // Slår sessionens profil op. Er adgangskoden skiftet, passer pv ikke længere,
+  // og sessionen er dermed ugyldig – også på de andre enheder.
+  async function currentUser(req) {
+    if (!platform) return null;
+    if (req[USER_CACHE] !== undefined) return req[USER_CACHE];
+    let user = null;
+    const token = parseCookies(req)[COOKIE_NAME];
+    if (token) {
+      const payload = verifySessionToken(await sessionSecret(), token);
+      if (payload?.uid) {
+        const found = await accounts.byId(payload.uid);
+        if (found && payload.pv === passwordVersion(found.passwordHash)) user = found;
+      }
+    }
+    req[USER_CACHE] = user;
+    return user;
+  }
+
+  // Kaster, hvis man ikke er logget ind. Bruges af alt der rører data.
+  async function requireUser(req) {
+    const user = await currentUser(req);
+    if (!user) throw new HttpError(401, 'Log ind for at fortsætte', { code: 'LOGIN_REQUIRED' });
+    return user;
+  }
+
   async function isAuthenticated(req) {
+    if (platform) return Boolean(await currentUser(req));
     if (browserMode || (await openAccessNow())) return true;
     const cookies = parseCookies(req);
     const token = cookies[COOKIE_NAME];
@@ -107,10 +143,10 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     return typeof proto === 'string' && proto.split(',')[0].trim() === 'https';
   }
 
-  async function issueSession(req, res, { remember = true } = {}) {
+  async function issueSession(req, res, { remember = true, user = null } = {}) {
     const ttlMs = remember ? SESSION_LONG_MS : SESSION_SHORT_MS;
-    const { passwordHash } = await authState();
-    const token = createSessionToken(await sessionSecret(), { ttlMs, pv: passwordVersion(passwordHash) });
+    const pv = user ? passwordVersion(user.passwordHash) : passwordVersion((await authState()).passwordHash);
+    const token = createSessionToken(await sessionSecret(), { ttlMs, pv, uid: user?.id ?? null });
     const opts = { secure: isSecure(req) };
     if (remember) opts.maxAgeSeconds = Math.floor(ttlMs / 1000);
     res.setHeader('Set-Cookie', cookieHeader(COOKIE_NAME, token, opts));
@@ -122,10 +158,22 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   // ---------- portefølje ----------
 
-  async function buildPortfolio(account = '') {
-    const data = await store.getPortfolio();
+  // Hvilken portefølje der arbejdes på. Med profiler har hver bruger sin egen;
+  // uden dem er der én fælles, som før.
+  function scope(userId = null) {
+    if (platform && userId) {
+      return { get: () => store.getUserPortfolio(userId), update: (fn) => store.updateUserPortfolio(userId, fn) };
+    }
+    return { get: () => store.getPortfolio(), update: (fn) => store.updatePortfolio(fn) };
+  }
+
+  // Porteføljen for den, kaldet gælder – egen som standard.
+  const own = async (req) => scope((await currentUser(req))?.id ?? null);
+
+  async function buildPortfolio(account = '', ps = scope()) {
+    const data = await ps.get();
     const result = await computeFrom(data, account);
-    rememberNames(data, result.quotes).catch((err) => logger.warn('Kunne ikke gemme navne:', err.message));
+    rememberNames(data, result.quotes, ps).catch((err) => logger.warn('Kunne ikke gemme navne:', err.message));
     if (onPortfolioRequest) onPortfolioRequest();
     delete result.quotes;
     return result;
@@ -168,13 +216,13 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   // Gem navn/valuta fra Yahoo på beholdningen, så tabellen kan vises når Yahoo er nede.
-  async function rememberNames(data, quotes) {
+  async function rememberNames(data, quotes, ps = scope()) {
     const changed = data.holdings.some((h) => {
       const q = quotes[h.symbol]?.quote;
       return q && (h.name !== q.name || h.currency !== q.currency);
     });
     if (!changed) return;
-    await store.updatePortfolio((draft) => {
+    await ps.update((draft) => {
       for (const h of draft.holdings) {
         const q = quotes[h.symbol]?.quote;
         if (q) {
@@ -185,8 +233,8 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     });
   }
 
-  async function buildHistory(range, data = null, account = '') {
-    if (!data) data = await store.getPortfolio();
+  async function buildHistory(range, data = null, account = '', ps = scope()) {
+    if (!data) data = await ps.get();
     const baseCurrency = data.settings.baseCurrency;
     const holdings = filterByAccount(data.holdings, account).filter((h) => Number(h.quantity) > 0);
     const histories = {};
@@ -344,10 +392,37 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     return { id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, addedAt: h.addedAt, updatedAt: h.updatedAt };
   }
 
+  // Adgangskontrollen ét sted: man ser kun en andens portefølje med en accepteret
+  // anmodning. Findes profilen ikke, svares der det samme som ved manglende adgang,
+  // så man ikke kan afprøve sig frem til hvilke profil-id'er der findes.
+  async function viewable(req, targetId) {
+    const user = await requireUser(req);
+    const target = await accounts.byId(targetId);
+    if (!target || !(await social.canView(user.id, target.id))) {
+      throw new HttpError(403, 'Du følger ikke denne profil', { code: 'NOT_FOLLOWING' });
+    }
+    return { person: publicProfile(target), ps: scope(target.id) };
+  }
+
   // ---------- API-handlere ----------
 
   const api = {
     async status(req, res) {
+      if (platform) {
+        const user = await currentUser(req);
+        const antal = await accounts.count();
+        return sendJson(res, 200, {
+          access: 'platform',
+          storage: config.storageMode || 'file',
+          authenticated: Boolean(user),
+          // Den allerførste profil oprettes uden invitationskode – der er endnu intet at beskytte.
+          firstProfile: antal === 0,
+          setupRequired: false,
+          setupTokenRequired: false,
+          usesEnvPassword: false,
+          user: publicProfile(user, { includeEmail: true }),
+        });
+      }
       const { setupRequired, usesEnvPassword } = await authState();
       const open = await openAccessNow();
       sendJson(res, 200, {
@@ -466,13 +541,151 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     },
 
     async portfolio(req, res, url) {
-      sendJson(res, 200, await buildPortfolio(parseAccountFilter(url.searchParams.get('account'))));
+      sendJson(res, 200, await buildPortfolio(parseAccountFilter(url.searchParams.get('account')), await own(req)));
     },
 
     async history(req, res, url) {
       const range = url.searchParams.get('range') || '1y';
       if (!HISTORY_RANGES.has(range)) throw new HttpError(400, 'Ugyldigt interval');
-      sendJson(res, 200, await buildHistory(range, null, parseAccountFilter(url.searchParams.get('account'))));
+      sendJson(res, 200, await buildHistory(range, null, parseAccountFilter(url.searchParams.get('account')), await own(req)));
+    },
+
+    // ---------- profiler ----------
+
+    async signup(req, res) {
+      const ip = clientIp(req, { trustProxy: config.trustProxy });
+      if (limiter.isBlocked(ip)) throw new HttpError(429, 'For mange forsøg – prøv igen senere', { retryAfter: limiter.retryAfterSeconds(ip) });
+      const body = await readJsonBody(req);
+      const user = await accounts.signup(body, { requireInvite: true });
+      limiter.reset(ip);
+      await issueSession(req, res, { remember: true, user });
+      sendJson(res, 201, { user: publicProfile(user, { includeEmail: true }) });
+    },
+
+    async platformLogin(req, res) {
+      const ip = clientIp(req, { trustProxy: config.trustProxy });
+      if (limiter.isBlocked(ip)) {
+        const wait = limiter.retryAfterSeconds(ip);
+        throw new HttpError(429, `For mange forsøg – prøv igen om ${Math.ceil(wait / 60)} min.`, { retryAfter: wait });
+      }
+      const body = await readJsonBody(req);
+      const user = await accounts.verify(body.email, body.password);
+      if (!user) {
+        limiter.recordFailure(ip);
+        // Samme svar uanset om e-mailen findes, så listen over profiler ikke kan afsøges.
+        throw new HttpError(401, 'Forkert e-mail eller adgangskode');
+      }
+      limiter.reset(ip);
+      await issueSession(req, res, { remember: body.remember !== false, user });
+      sendJson(res, 200, { user: publicProfile(user, { includeEmail: true }) });
+    },
+
+    async me(req, res) {
+      const user = await requireUser(req);
+      const mine = await social.followers(user.id);
+      sendJson(res, 200, {
+        user: publicProfile(user, { includeEmail: true }),
+        pending: mine.filter((e) => e.status === 'pending').length,
+        inviteCode: user.isOwner ? await accounts.inviteCode() : null,
+      });
+    },
+
+    async updateMe(req, res) {
+      const user = await requireUser(req);
+      const body = await readJsonBody(req);
+      const name = await accounts.rename(user.id, body.name);
+      sendJson(res, 200, { user: { ...publicProfile(user, { includeEmail: true }), name } });
+    },
+
+    async platformChangePassword(req, res) {
+      const user = await requireUser(req);
+      const body = await readJsonBody(req);
+      const newHash = await accounts.changePassword(user.id, body.currentPassword, body.newPassword);
+      // Denne browser bliver logget ind igen med det samme; de øvrige enheder falder ud.
+      await issueSession(req, res, { remember: true, user: { ...user, passwordHash: newHash } });
+      sendJson(res, 200, { ok: true });
+    },
+
+    async rotateInvite(req, res) {
+      const user = await requireUser(req);
+      if (!user.isOwner) throw new HttpError(403, 'Kun den, der oprettede platformen, kan lave en ny invitationskode');
+      sendJson(res, 200, { inviteCode: await accounts.rotateInviteCode() });
+    },
+
+    // ---------- følg andre ----------
+
+    async people(req, res, url) {
+      const user = await requireUser(req);
+      const found = await accounts.search(url.searchParams.get('q'), { exclude: user.id });
+      const withStatus = [];
+      for (const person of found) withStatus.push({ ...person, status: await social.status(user.id, person.id) });
+      sendJson(res, 200, { people: withStatus });
+    },
+
+    // Alt om hvem jeg følger, og hvem der følger mig – i ét kald, så siden kan tegnes på én gang.
+    async follows(req, res) {
+      const user = await requireUser(req);
+      const [outgoing, incoming] = await Promise.all([social.following(user.id), social.followers(user.id)]);
+      const profile = async (id) => publicProfile(await accounts.byId(id));
+      const following = [];
+      for (const e of outgoing) {
+        const person = await profile(e.targetId);
+        if (person) following.push({ ...person, status: e.status });
+      }
+      const followers = [];
+      for (const e of incoming) {
+        const person = await profile(e.followerId);
+        if (person) followers.push({ ...person, status: e.status });
+      }
+      sendJson(res, 200, { following, followers });
+    },
+
+    async requestFollow(req, res, url, params) {
+      const user = await requireUser(req);
+      const target = await accounts.byId(params.id);
+      if (!target) throw new HttpError(404, 'Profilen findes ikke');
+      const status = await social.request(user.id, target.id);
+      sendJson(res, 201, { status, person: publicProfile(target) });
+    },
+
+    async acceptFollow(req, res, url, params) {
+      const user = await requireUser(req);
+      await social.accept(params.id, user.id); // params.id er den, der bad om at følge mig
+      sendJson(res, 200, { ok: true });
+    },
+
+    // Jeg holder op med at følge en anden.
+    async unfollow(req, res, url, params) {
+      const user = await requireUser(req);
+      await social.remove(user.id, params.id);
+      sendJson(res, 200, { ok: true });
+    },
+
+    // Jeg fjerner en følger, eller afviser en anmodning.
+    async removeFollower(req, res, url, params) {
+      const user = await requireUser(req);
+      await social.remove(params.id, user.id);
+      sendJson(res, 200, { ok: true });
+    },
+
+    // ---------- en andens portefølje ----------
+
+    async personPortfolio(req, res, url, params) {
+      const { person, ps } = await viewable(req, params.id);
+      sendJson(res, 200, { person, ...(await buildPortfolio(parseAccountFilter(url.searchParams.get('account')), ps)) });
+    },
+
+    async personHistory(req, res, url, params) {
+      const { ps } = await viewable(req, params.id);
+      const range = url.searchParams.get('range') || '1y';
+      if (!HISTORY_RANGES.has(range)) throw new HttpError(400, 'Ugyldigt interval');
+      sendJson(res, 200, await buildHistory(range, null, parseAccountFilter(url.searchParams.get('account')), ps));
+    },
+
+    async personHoldings(req, res, url, params) {
+      const { person, ps } = await viewable(req, params.id);
+      const data = await ps.get();
+      sendJson(res, 200, { person, holdings: data.holdings.map(publicHolding), settings: data.settings });
     },
 
     async search(req, res, url) {
@@ -492,7 +705,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     },
 
     async listHoldings(req, res) {
-      const data = await store.getPortfolio();
+      const data = await (await own(req)).get();
       sendJson(res, 200, { holdings: data.holdings.map(publicHolding), settings: data.settings });
     },
 
@@ -503,7 +716,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const avgPrice = parseNumber(body.avgPrice, 'Købskurs', { min: 0, allowNull: true });
       const note = parseNote(body.note);
 
-      const currentData = await store.getPortfolio();
+      const currentData = await (await own(req)).get();
       const current = currentData.holdings;
       const accountId = parseAccountId(body.accountId, currentData.settings.accounts);
       const existing = current.find((h) => sameSlot(h, symbol, accountId));
@@ -532,7 +745,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         addedAt: now,
         updatedAt: now,
       };
-      await store.updatePortfolio((draft) => {
+      await (await own(req)).update((draft) => {
         if (draft.holdings.some((h) => sameSlot(h, symbol, accountId))) throw new HttpError(409, 'Aktien er allerede i porteføljen');
         draft.holdings.push(holding);
       });
@@ -542,7 +755,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     async updateHolding(req, res, url, params) {
       const body = await readJsonBody(req);
       let updated;
-      await store.updatePortfolio((draft) => {
+      await (await own(req)).update((draft) => {
         const h = findHolding(draft, params.id);
         if (body.quantity !== undefined) h.quantity = parseQuantity(body.quantity);
         if (body.avgPrice !== undefined) h.avgPrice = parseNumber(body.avgPrice, 'Købskurs', { min: 0, allowNull: true });
@@ -566,7 +779,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const quantity = parseQuantity(body.quantity);
       const price = parseNumber(body.price, 'Kurs', { min: 0, allowNull: type === 'sell' });
       let result;
-      await store.updatePortfolio((draft) => {
+      await (await own(req)).update((draft) => {
         const h = findHolding(draft, params.id);
         const oldQty = Number(h.quantity) || 0;
         if (type === 'buy') {
@@ -595,7 +808,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
     async deleteHolding(req, res, url, params) {
       let removed;
-      await store.updatePortfolio((draft) => {
+      await (await own(req)).update((draft) => {
         removed = findHolding(draft, params.id);
         draft.holdings = draft.holdings.filter((h) => h.id !== params.id);
       });
@@ -603,7 +816,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     },
 
     async getSettings(req, res) {
-      const data = await store.getPortfolio();
+      const data = await (await own(req)).get();
       sendJson(res, 200, { settings: data.settings });
     },
 
@@ -626,7 +839,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       if (body.showDecimals !== undefined) patch.showDecimals = Boolean(body.showDecimals);
       if (body.cash !== undefined) patch.cash = parseNumber(body.cash, 'Kontanter', { min: 0, allowNull: true }) ?? 0;
       if (body.accounts !== undefined) patch.accounts = parseAccounts(body.accounts);
-      const data = await store.updatePortfolio((draft) => {
+      const data = await (await own(req)).update((draft) => {
         Object.assign(draft.settings, patch);
         if (patch.accounts) {
           // Slettede depoter: beholdningerne beholdes, men står nu "uden depot".
@@ -638,7 +851,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     },
 
     async backup(req, res) {
-      const data = await store.getPortfolio();
+      const data = await (await own(req)).get();
       const stamp = new Date().toISOString().slice(0, 10);
       sendJson(res, 200, { ...data, exportedAt: new Date().toISOString() }, {
         'Content-Disposition': `attachment; filename="aktie-portfolio-${stamp}.json"`,
@@ -675,7 +888,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const baseCurrency = body.settings?.baseCurrency ? parseCurrency(body.settings.baseCurrency) : undefined;
       const cash = body.settings?.cash !== undefined ? parseNumber(body.settings.cash, 'Kontanter', { min: 0, allowNull: true }) ?? 0 : undefined;
       const settings = body.settings && typeof body.settings === 'object' ? body.settings : {};
-      const data = await store.updatePortfolio((draft) => {
+      const data = await (await own(req)).update((draft) => {
         draft.holdings = holdings;
         draft.settings.accounts = accounts;
         if (baseCurrency) draft.settings.baseCurrency = baseCurrency;
@@ -689,14 +902,44 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   // ---------- routing ----------
 
+  // Med profiler er login og adgangskode knyttet til en bruger; uden dem er der
+  // én fælles adgangskode til hele instansen.
+  const authRoutes = platform
+    ? [
+        ['POST', /^\/api\/auth\/signup$/, api.signup, { public: true }],
+        ['POST', /^\/api\/auth\/login$/, api.platformLogin, { public: true }],
+        ['POST', /^\/api\/auth\/change-password$/, api.platformChangePassword],
+      ]
+    : [
+        ['POST', /^\/api\/auth\/setup$/, api.setup, { public: true }],
+        ['POST', /^\/api\/auth\/login$/, api.login, { public: true }],
+        ['POST', /^\/api\/auth\/change-password$/, api.changePassword],
+        ['POST', /^\/api\/auth\/logout-all$/, api.logoutAll],
+      ];
+
+  const socialRoutes = platform
+    ? [
+        ['GET', /^\/api\/me$/, api.me],
+        ['PUT', /^\/api\/me$/, api.updateMe],
+        ['POST', /^\/api\/invite\/rotate$/, api.rotateInvite],
+        ['GET', /^\/api\/people$/, api.people],
+        ['GET', /^\/api\/follows$/, api.follows],
+        ['POST', /^\/api\/follows\/(?<id>[^/]+)\/accept$/, api.acceptFollow],
+        ['POST', /^\/api\/follows\/(?<id>[^/]+)$/, api.requestFollow],
+        ['DELETE', /^\/api\/follows\/(?<id>[^/]+)$/, api.unfollow],
+        ['DELETE', /^\/api\/followers\/(?<id>[^/]+)$/, api.removeFollower],
+        ['GET', /^\/api\/users\/(?<id>[^/]+)\/portfolio\/history$/, api.personHistory],
+        ['GET', /^\/api\/users\/(?<id>[^/]+)\/portfolio$/, api.personPortfolio],
+        ['GET', /^\/api\/users\/(?<id>[^/]+)\/holdings$/, api.personHoldings],
+      ]
+    : [];
+
   const routes = [
     ['GET', /^\/api\/health$/, (req, res) => sendJson(res, 200, { ok: true }), { public: true }],
     ['GET', /^\/api\/auth\/status$/, api.status, { public: true }],
-    ['POST', /^\/api\/auth\/setup$/, api.setup, { public: true }],
-    ['POST', /^\/api\/auth\/login$/, api.login, { public: true }],
+    ...authRoutes,
+    ...socialRoutes,
     ['POST', /^\/api\/auth\/logout$/, api.logout, { public: true }],
-    ['POST', /^\/api\/auth\/change-password$/, api.changePassword],
-    ['POST', /^\/api\/auth\/logout-all$/, api.logoutAll],
     ['GET', /^\/api\/portfolio$/, api.portfolio],
     ['GET', /^\/api\/portfolio\/history$/, api.history],
     ['POST', /^\/api\/resolve$/, api.resolve],
@@ -772,8 +1015,10 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   async function handlePage(req, res, url) {
     if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Metoden er ikke tilladt');
-    const { setupRequired } = await authState();
-    const open = !browserMode && (await openAccessNow());
+    // Med profiler afgør sessionen alene, om man er inde; den fælles adgangskode
+    // og opsætnings-tilstanden findes ikke i den tilstand.
+    const { setupRequired } = platform ? { setupRequired: false } : await authState();
+    const open = !platform && !browserMode && (await openAccessNow());
     const authed = open || (!setupRequired && (await isAuthenticated(req)));
 
     if (url.pathname === '/login') {
@@ -781,7 +1026,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       if (!(await serveStatic(res, VIEWS_DIR, '/login.html'))) throw new HttpError(500, 'login.html mangler');
       return;
     }
-    if (PAGE_ROUTES.has(url.pathname)) {
+    if (PAGE_ROUTES.has(url.pathname) || (platform && PERSON_PAGE.test(url.pathname))) {
       if (!authed) {
         const next = url.pathname === '/' ? '' : `?next=${encodeURIComponent(url.pathname)}`;
         return redirect(res, `/login${next}`);
@@ -804,6 +1049,9 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       if (res.headersSent) {
         res.destroy();
         return;
+      }
+      if ((err instanceof SignupError || err instanceof SocialError) && !res.headersSent) {
+        if (url.pathname.startsWith('/api/')) return sendError(res, err.status, err.message);
       }
       if (err instanceof HttpError) {
         if (err.status === 429 && err.extra?.retryAfter) res.setHeader('Retry-After', String(err.extra.retryAfter));
