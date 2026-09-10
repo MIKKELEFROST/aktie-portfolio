@@ -418,6 +418,8 @@
 
   let refreshTimer = null;
   let inflight = null;
+  // Tæller, så et langsomt svar fra en tidligere hentning ikke overskriver et nyere.
+  let portfolioSeq = 0;
 
   // Samtidige kald deles; `fresh: true` venter på det igangværende og henter derefter igen
   // (bruges efter en ændring, så svaret garanteret indeholder ændringen).
@@ -433,11 +435,13 @@
   }
 
   async function doLoadPortfolio({ silent = false } = {}) {
+    const seq = ++portfolioSeq;
     state.loading = true;
     state.lastAttempt = Date.now();
     if (!silent) setRefreshing(true);
     try {
       const data = await api('GET', `/api/portfolio${accountQuery()}`);
+      if (seq !== portfolioSeq) return; // overhalet af en nyere hentning
       state.portfolio = data;
       state.pending = null;
       state.settings = data.settings || {};
@@ -451,14 +455,17 @@
       state.failures = 0;
       state.lastFetch = Date.now();
     } catch (err) {
+      if (seq !== portfolioSeq) return;
       state.loadError = err.message;
       state.failures += 1;
       if (!silent || !state.portfolio) toast(err.message, 'error');
     } finally {
-      state.loading = false;
-      setRefreshing(false);
-      render({ silent });
-      if (state.panelSymbol) renderPanel();
+      if (seq === portfolioSeq) {
+        state.loading = false;
+        setRefreshing(false);
+        render({ silent });
+        if (state.panelSymbol) renderPanel();
+      }
     }
   }
 
@@ -607,7 +614,7 @@
   function scheduleRefresh() {
     clearInterval(refreshTimer);
     refreshTimer = setInterval(() => {
-      if (!state.autoRefresh || document.hidden) return;
+      if (!state.autoRefresh || document.hidden || state.importing) return;
       if (Date.now() - state.lastAttempt >= refreshInterval()) {
         loadPortfolio({ silent: true });
         const h = state.history[state.range];
@@ -1273,6 +1280,7 @@
           <div class="card-header"><h2>${icon('download')}Data</h2></div>
           <div class="setting-row"><div><div class="lbl">Sikkerhedskopi</div><div class="desc">Download alle beholdninger som en JSON-fil.</div></div><button class="btn btn-sm" data-action="backup">${icon('download', 'icon icon-sm')}Download</button></div>
           <div class="setting-row"><div><div class="lbl">Gendan</div><div class="desc">Erstat beholdningerne med indholdet af en sikkerhedskopi.</div></div><button class="btn btn-sm" data-action="restore">${icon('upload', 'icon icon-sm')}Vælg fil…</button></div>
+          <div class="setting-row"><div><div class="lbl">Importér fra banken</div><div class="desc">Hent din transaktionsoversigt som CSV hos banken, fx Nordnet. Appen regner antal og gennemsnitskurs ud pr. depot og foreslår symboler. Du ser det hele, før noget gemmes.</div></div><button class="btn btn-sm" data-action="import-broker">${icon('upload', 'icon icon-sm')}Vælg fil…</button></div>
           ${state.storage === 'server' && localHasData() ? `<div class="setting-row"><div><div class="lbl">Data fra denne browser</div><div class="desc">Der ligger stadig aktier gemt lokalt i denne browser fra før. Overfør dem til din konto, så de følger med på alle enheder.</div></div><button class="btn btn-sm btn-primary" data-action="import-local">Overfør</button></div>` : ''}
           <div class="setting-row"><div><div class="lbl">Hvor ligger mine data?</div><div class="desc">${state.storage === 'browser' ? 'I denne browsers lokale lager (localStorage). Rydder du browserdata, forsvinder de – så download en sikkerhedskopi.' : 'I serverens database/datamappe.'} Ingen data sendes til andre end Yahoo Finance (kun symboler).</div></div></div>
         </div>
@@ -1754,6 +1762,149 @@
     if (currentRoute() === 'overview' && positions().length) loadHistory(state.range, { force: true });
   }
 
+  // ---------- Import fra banken ----------
+
+  const imp = { rows: [], depots: [], cash: null, info: null };
+
+  async function handleImportFile(file) {
+    let parsed;
+    try {
+      parsed = window.parseBrokerCsv(window.parseBrokerCsv.decode(await file.arrayBuffer()));
+    } catch (err) {
+      return toast(`Kunne ikke læse filen: ${err.message}`, 'error');
+    }
+    if (!parsed.ok) return toast(parsed.error, 'error');
+    if (!parsed.positions.length) return toast('Fandt ingen åbne beholdninger i filen. Er alt solgt, er der intet at importere.', 'error');
+
+    toast(`Fandt ${parsed.positions.length} beholdninger. Slår symboler op…`);
+    let results = [];
+    try {
+      const res = await serverApi('POST', '/api/resolve', {
+        securities: parsed.positions.map((p) => ({ isin: p.isin, name: p.name, currency: p.currency })),
+      });
+      results = res.results || [];
+    } catch (err) {
+      return toast(`Kunne ikke slå symboler op: ${err.message}`, 'error');
+    }
+
+    await loadAllHoldings();
+    imp.cash = parsed.cash;
+    imp.info = parsed;
+    imp.depots = (parsed.depots.length ? parsed.depots : ['']).map((code) => {
+      const used = state.allHoldings.filter((h) => h.accountId).length;
+      const existing = accounts().find((a) => a.name === `Depot ${code}`);
+      return { code, name: existing ? existing.name : code ? `Depot ${code}` : 'Uden depot', used };
+    });
+    imp.rows = parsed.positions.map((p, i) => {
+      const r = results[i] || {};
+      return { ...p, resolved: r, symbol: r.symbol || '', include: Boolean(r.symbol) };
+    });
+    renderImportDialog();
+    setError('#import-error', '');
+    openDialog('#dlg-import');
+  }
+
+  function renderImportDialog() {
+    const p = imp.info;
+    $('#import-summary').innerHTML = `<span>${p.positions.length} ${p.positions.length === 1 ? 'beholdning' : 'beholdninger'} fra ${p.trades} ${p.trades === 1 ? 'handel' : 'handler'}</span>${p.closed ? `<span class="muted">${p.closed} udsolgt${p.closed === 1 ? '' : 'e'} udeladt</span>` : ''}<span class="muted">${imp.depots.length} ${imp.depots.length === 1 ? 'depot' : 'depoter'}</span>`;
+
+    $('#import-depots').innerHTML = imp.depots.map((d) => `<div class="import-depot-row"><span class="code">${esc(d.code || 'uden depotnummer')}</span><span>→</span><input class="input" data-depot-name="${esc(d.code)}" value="${esc(d.name)}" maxlength="40" aria-label="Navn på depot ${esc(d.code)}"><span class="muted small">navnet depotet får her i appen</span></div>`).join('');
+
+    $('#import-rows').innerHTML = imp.rows.map((row, i) => {
+      const r = row.resolved || {};
+      const notes = [];
+      if (!row.symbol) notes.push('Fandt ikke et symbol – skriv det selv, ellers springes den over.');
+      else if (r.currencyMismatch) notes.push(`Noteres i ${esc(r.currency)}, men du købte i ${esc(row.currency)}. Så bliver afkastet forkert.`);
+      else if (r.nameMismatch) notes.push(`Yahoo kalder ${esc(r.symbol)} for "${esc(r.symbolName || '')}". Kontrollér symbolet.`);
+      return `<tr class="${row.include ? '' : 'off'}" data-row="${i}">
+        <td><input type="checkbox" data-import-include="${i}" ${row.include ? 'checked' : ''} aria-label="Tag ${esc(row.name)} med"></td>
+        <td><div class="stock-name">${esc(row.name)}</div><div class="stock-meta">${esc(row.isin || '')}${r.matchedBy ? ` · fundet via ${esc(r.matchedBy)}` : ''}</div>${notes.map((n) => `<span class="import-note">${n}</span>`).join('')}</td>
+        <td><input class="input import-sym" data-import-symbol="${i}" value="${esc(row.symbol)}" placeholder="fx MU" spellcheck="false"></td>
+        <td class="n">${fmtQty(row.quantity)}</td>
+        <td class="n">${fmtPrice(row.avgPrice)} <span class="muted small">${esc(row.currency)}</span></td>
+        <td class="muted small">${esc(imp.depots.find((d) => d.code === row.depot)?.name || '')}</td>
+      </tr>`;
+    }).join('');
+
+    const cashRow = $('#import-cash-row');
+    if (isNum(imp.cash) && imp.cash > 0) {
+      cashRow.classList.remove('hidden');
+      $('#import-cash-label').textContent = `Sæt kontanter til ${fmtAmount(imp.cash, state.baseCurrency, { decimals: 2 })} fra filens seneste saldo`;
+    } else cashRow.classList.add('hidden');
+
+    $('#import-warnings').innerHTML = p.warnings.length ? `<div class="notice">${p.warnings.map(esc).join('<br>')}</div>` : '';
+    updateImportCount();
+  }
+
+  function updateImportCount() {
+    const n = imp.rows.filter((r) => r.include && r.symbol).length;
+    $('#import-count').textContent = `${n} af ${imp.rows.length} importeres`;
+    $('#import-submit').disabled = n === 0;
+  }
+
+  async function submitImport() {
+    setError('#import-error', '');
+    const btn = $('#import-submit');
+    btn.disabled = true;
+    state.importing = true; // sæt baggrundsopdateringen på pause imens
+    try {
+      // 1) Depoter: brug et eksisterende med samme navn, ellers opret det.
+      for (const d of imp.depots) {
+        const input = document.querySelector(`[data-depot-name="${CSS.escape(d.code)}"]`);
+        if (input) d.name = input.value.trim();
+      }
+      const missing = imp.depots.filter((d) => d.name && !accounts().some((a) => a.name.toLowerCase() === d.name.toLowerCase()));
+      if (missing.length) {
+        const data = await api('PUT', '/api/settings', { accounts: [...accounts(), ...missing.map((d) => ({ name: d.name }))] });
+        state.settings = data.settings;
+      }
+      for (const d of imp.depots) d.accountId = accounts().find((a) => a.name.toLowerCase() === (d.name || '').toLowerCase())?.id || null;
+
+      // 2) Beholdninger: findes symbolet i samme depot, opdateres antal og kurs.
+      const existing = (await api('GET', '/api/holdings')).holdings;
+      let added = 0;
+      let updated = 0;
+      const failed = [];
+      for (const row of imp.rows) {
+        const symbol = String(row.symbol || '').trim().toUpperCase();
+        if (!row.include || !symbol) continue;
+        const accountId = imp.depots.find((d) => d.code === row.depot)?.accountId || null;
+        const match = existing.find((h) => sameSlot(h, symbol, accountId));
+        try {
+          if (match) {
+            await api('PUT', `/api/holdings/${encodeURIComponent(match.id)}`, { quantity: row.quantity, avgPrice: row.avgPrice });
+            updated++;
+          } else {
+            await api('POST', '/api/holdings', { symbol, quantity: row.quantity, avgPrice: row.avgPrice, name: row.name, accountId });
+            added++;
+          }
+        } catch (err) {
+          failed.push(`${row.name}: ${err.message}`);
+        }
+      }
+
+      // 3) Kontanter fra filens seneste saldo, hvis brugeren vil.
+      if ($('#import-cash')?.checked && isNum(imp.cash)) {
+        const data = await api('PUT', '/api/settings', { cash: imp.cash });
+        state.settings = data.settings;
+      }
+
+      state.importing = false;
+      $('#dlg-import').close();
+      const parts = [];
+      if (added) parts.push(`${added} tilføjet`);
+      if (updated) parts.push(`${updated} opdateret`);
+      toast(parts.length ? `Import færdig: ${parts.join(', ')}` : 'Intet blev ændret', failed.length ? '' : 'success');
+      for (const f of failed.slice(0, 3)) toast(f, 'error');
+      await afterMutation();
+    } catch (err) {
+      setError('#import-error', err.message);
+    } finally {
+      state.importing = false;
+      updateImportCount();
+    }
+  }
+
   // ---------- Depoter ----------
 
   async function saveAccounts(list, successMessage) {
@@ -2040,6 +2191,7 @@
         state.localImport = null;
         storageSet('importDismissed', '1');
         return render();
+      case 'import-broker': return $('#import-file').click();
       case 'account-add': return addAccount();
       case 'account-delete': return deleteAccount(el.dataset.id);
       default: return;
@@ -2086,6 +2238,10 @@
     } else if (id === 'add-qty' || id === 'add-price') updateAddSummary();
     else if (id === 'edit-qty' || id === 'edit-price') updateEditSummary();
     else if (id === 'trade-qty' || id === 'trade-price') updateTradeSummary();
+    else if (e.target.dataset.importSymbol !== undefined) {
+      imp.rows[Number(e.target.dataset.importSymbol)].symbol = e.target.value.trim().toUpperCase();
+      updateImportCount();
+    }
     else if (id === 'filter') {
       state.filter = e.target.value;
       const card = $('#filter')?.closest('.card');
@@ -2099,6 +2255,13 @@
 
   document.addEventListener('change', async (e) => {
     const id = e.target.id;
+    if (e.target.dataset.importInclude !== undefined) {
+      const i = Number(e.target.dataset.importInclude);
+      imp.rows[i].include = e.target.checked;
+      e.target.closest('tr')?.classList.toggle('off', !e.target.checked);
+      updateImportCount();
+      return;
+    }
     try {
       if (id === 'set-theme') {
         state.theme = e.target.value;
@@ -2137,6 +2300,10 @@
         await renameAccount(e.target.dataset.id, e.target.value);
       } else if (id === 'add-account') {
         applyAddMode();
+      } else if (id === 'import-file') {
+        const file = e.target.files[0];
+        e.target.value = '';
+        if (file) await handleImportFile(file);
       } else if (id === 'restore-file') {
         const file = e.target.files[0];
         e.target.value = '';
@@ -2189,6 +2356,7 @@
   $('#edit-delete').addEventListener('click', () => { $('#dlg-edit').close(); deleteHolding(edit.id); });
   $('#form-trade').addEventListener('submit', (e) => { e.preventDefault(); submitTrade(); });
   $('#form-password').addEventListener('submit', (e) => { e.preventDefault(); submitPassword(); });
+  $('#form-import').addEventListener('submit', (e) => { e.preventDefault(); submitImport(); });
   $('#dlg-confirm form').addEventListener('submit', (e) => { e.preventDefault(); $('#dlg-confirm').close('ok'); });
 
   // Luk dialog ved klik på baggrunden

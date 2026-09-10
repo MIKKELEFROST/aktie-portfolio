@@ -199,6 +199,31 @@
   </form>
 </dialog>
 
+<!-- Importér fra banken -->
+<dialog id="dlg-import" class="dialog-wide">
+  <form method="dialog" id="form-import" novalidate>
+    <div class="dialog-head"><h2>Importér fra banken</h2><button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Luk"><svg class="icon"><use href="#i-x"/></svg></button></div>
+    <div class="dialog-body">
+      <div class="form-summary" id="import-summary"></div>
+      <div id="import-depots"></div>
+      <div class="table-wrap">
+        <table class="holdings import-table">
+          <thead><tr><th></th><th>Værdipapir</th><th>Symbol</th><th class="n">Antal</th><th class="n">Gns. købskurs</th><th>Depot</th></tr></thead>
+          <tbody id="import-rows"></tbody>
+        </table>
+      </div>
+      <label class="checkbox hidden" id="import-cash-row"><input type="checkbox" id="import-cash"><span id="import-cash-label"></span></label>
+      <div id="import-warnings"></div>
+      <div class="form-error" id="import-error"></div>
+    </div>
+    <div class="dialog-foot">
+      <span class="left muted small" id="import-count"></span>
+      <button type="button" class="btn" data-close>Annullér</button>
+      <button type="submit" class="btn btn-primary" id="import-submit">Importér</button>
+    </div>
+  </form>
+</dialog>
+
 <!-- Bekræft -->
 <dialog id="dlg-confirm">
   <form method="dialog">
@@ -230,7 +255,9 @@
 
 <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 <input type="file" id="restore-file" accept="application/json,.json" class="hidden">
+<input type="file" id="import-file" accept=".csv,.tsv,.txt,text/csv,text/plain" class="hidden">
 
+<script src="/import-csv.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

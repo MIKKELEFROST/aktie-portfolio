@@ -14,6 +14,7 @@ Et personligt, selv-hostet dashboard til din aktieportefølje. Du logger ind med
 - **Tilføj aktier via søgning** ("novo", "mærsk", "apple" …) – danske børser vises først. Kurs og valuta hentes automatisk.
 - **Køb til / Sælg** med automatisk vægtet gennemsnitskurs. Tilføjer du en aktie, du allerede ejer, lægges købet oveni – du skriver bare antal og kurs. Redigér og slet.
 - **Depoter**: opret fx Månedsopsparing og Pension, knyt hvert køb til et depot, og se alt samlet eller ét depot ad gangen. Samme aktie kan ligge i flere depoter.
+- **Importér fra banken**: læs din transaktionsoversigt som CSV, fx fra Nordnet eller AP Pension. Appen regner antal og gennemsnitskurs ud pr. depot, slår symboler op via ISIN eller navn, og viser det hele til godkendelse, før noget gemmes. Filen bliver i browseren; kun navn, ISIN og valuta sendes til serveren for symbol-opslaget.
 - **Flere valutaer**: DKK, USD, EUR, GBP (pence omregnes automatisk) m.fl. – alt summeres i din basisvaluta med dagens valutakurs.
 - **Kontanter**: valgfrit beløb, så "Porteføljeværdi" matcher dit depot.
 - **Live opdatering** hvert minut mens en børs er åben (pause når fanen er skjult).
@@ -117,6 +118,7 @@ server/
   index.js          start, konfiguration, cache-opvarmning, .env
   app.js            routing, auth, API
   storage.js        vælger fil- eller Redis-lager ud fra miljøet
+  resolve.js        finder Yahoo-symbol ud fra ISIN eller navn
   store-redis.js    Upstash Redis-lager (REST, compare-and-set, backups)
   views/            index.html og login.html (serveres kun efter login-tjek)
   yahoo.js          Yahoo Finance-klient med cache
@@ -127,6 +129,7 @@ server/
   http-utils.js     JSON/cookies/statiske filer
 public/             statiske filer (serveres direkte)
   app.js            dashboard-klient
+  import-csv.js     indlæser bank-eksporter i browseren
   app.css           designsystem (lys/mørk)
   login.js/.css     login og førstegangsopsætning
 test/               node:test
@@ -141,6 +144,7 @@ Alle `/api/*`-kald kræver login (cookie). Muterende kald skal sende `Content-Ty
 | `GET` | `/api/portfolio?account=` | Alle positioner med live kurser og totaler (`account` = depot-id, `none` eller tom for alle) |
 | `GET` | `/api/portfolio/history?range=1y&account=` | Porteføljens værdi over tid |
 | `POST` | `/api/compute` · `/api/compute/history` | Samme beregninger ud fra beholdninger sendt i kaldet (bruges i browser-tilstand) |
+| `POST` | `/api/resolve` | Finder Yahoo-symboler ud fra ISIN, navn og valuta (bruges ved import) |
 | `GET` | `/api/search?q=novo` | Søg efter aktier/ETF'er |
 | `GET` | `/api/quote/:symbol` | Kurs for ét symbol |
 | `GET/POST` | `/api/holdings` | Liste / tilføj |
@@ -153,7 +157,7 @@ Alle `/api/*`-kald kræver login (cookie). Muterende kald skal sende `Content-Ty
 
 ## Begrænsninger
 
-- Én bruger, én portefølje. Ingen handelslog, realiseret gevinst, udbytte eller skatteberegning.
+- Én bruger, én portefølje. Ingen handelslog, realiseret gevinst, udbytte eller skatteberegning. Importen læser handlerne, men gemmer kun den samlede beholdning pr. depot.
 - Yahoo Finance' endpoints er uofficielle og kan ændre sig eller afvise for mange kald (429). Appen viser i så fald seneste kendte kurser tydeligt markeret.
 - Ikke investeringsrådgivning.
 

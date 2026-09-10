@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { newId } from './store.js';
 import { computePortfolio, computeValueHistory, parseDanishNumber } from './portfolio-math.js';
+import { resolveSecurities } from './resolve.js';
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter, passwordVersion } from './auth.js';
 import { sendJson, sendError, readJsonBody, parseCookies, cookieHeader, serveStatic, clientIp, isLoopback, safeDecode, HttpError } from './http-utils.js';
 import { timingSafeEqual } from 'node:crypto';
@@ -337,6 +338,21 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       });
     },
 
+    // Finder Yahoo-symboler til værdipapirer fra en bank-eksport. Kun navn, ISIN og
+    // valuta sendes hertil – selve filen bliver i browseren.
+    async resolve(req, res) {
+      const body = await readJsonBody(req);
+      const list = Array.isArray(body.securities) ? body.securities : null;
+      if (!list) throw new HttpError(400, 'Forventede en liste af værdipapirer');
+      if (list.length > 60) throw new HttpError(400, 'Højst 60 værdipapirer ad gangen');
+      const input = list.map((raw) => ({
+        isin: String(raw?.isin ?? '').slice(0, 20),
+        name: String(raw?.name ?? '').slice(0, 120),
+        currency: String(raw?.currency ?? '').slice(0, 5),
+      }));
+      sendJson(res, 200, { results: await resolveSecurities(yahoo, input) });
+    },
+
     // Beregn portefølje ud fra beholdninger sendt af klienten (browser-tilstand).
     async compute(req, res) {
       const body = await readJsonBody(req);
@@ -660,6 +676,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     ['POST', /^\/api\/auth\/logout-all$/, api.logoutAll],
     ['GET', /^\/api\/portfolio$/, api.portfolio],
     ['GET', /^\/api\/portfolio\/history$/, api.history],
+    ['POST', /^\/api\/resolve$/, api.resolve],
     ['POST', /^\/api\/compute$/, api.compute],
     ['POST', /^\/api\/compute\/history$/, api.computeHistory],
     ['GET', /^\/api\/search$/, api.search],
