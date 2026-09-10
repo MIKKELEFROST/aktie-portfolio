@@ -125,7 +125,7 @@ export function newId() {
 }
 
 // Fremtidssikring: opgraderer ældre datafiler til nuværende form.
-function migrate(data, baseCurrency) {
+export function migrate(data, baseCurrency) {
   if (!data || typeof data !== 'object') return defaultPortfolio(baseCurrency);
   if (!data.settings || typeof data.settings !== 'object') data.settings = {};
   if (!data.settings.baseCurrency) data.settings.baseCurrency = baseCurrency;

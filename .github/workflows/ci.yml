@@ -16,6 +16,6 @@ jobs:
       - name: Syntax-tjek
         run: |
           set -e
-          for f in server/*.js public/*.js; do node --check "$f"; done
+          for f in server/*.js public/*.js api/*.js; do node --check "$f"; done
       - name: Tests
         run: npm test

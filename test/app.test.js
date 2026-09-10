@@ -63,7 +63,7 @@ function request(method, url, body, extraHeaders = {}) {
   if (cookie) headers.cookie = cookie;
   const mutating = method !== 'GET';
   if (mutating) headers['content-type'] = 'application/json';
-  const payload = mutating ? JSON.stringify(body ?? {}) : undefined;
+  const payload = mutating ? JSON.stringify(body === undefined ? {} : body) : undefined;
   return fetch(base + url, { method, headers, body: payload, redirect: 'manual' }).then(async (res) => {
     const setCookie = res.headers.get('set-cookie');
     if (setCookie) cookie = setCookie.split(';')[0];
@@ -77,7 +77,7 @@ function request(method, url, body, extraHeaders = {}) {
 before(async () => {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'aktie-app-'));
   const store = createStore(dataDir, { baseCurrency: 'DKK' });
-  const config = { envPassword: '', sessionSecret: '', secureCookies: false };
+  const config = { envPassword: '', sessionSecret: '', secureCookies: false, setupToken: 'test-setup-token' };
   const app = createApp({ store, yahoo: fakeYahoo, config, logger: { warn() {}, error() {} } });
   server = http.createServer(app);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -303,8 +303,13 @@ test('slet aktie', async () => {
 test('skift adgangskode og log ud overalt', async () => {
   const wrong = await request('POST', '/api/auth/change-password', { currentPassword: 'forkert', newPassword: 'nyhemmelig123' });
   assert.equal(wrong.status, 401);
+  const oldCookie = cookie;
   const ok = await request('POST', '/api/auth/change-password', { currentPassword: 'hemmelig123', newPassword: 'nyhemmelig123' });
   assert.equal(ok.status, 200);
+  assert.notEqual(cookie, oldCookie, 'denne browser får en ny session');
+  assert.equal((await request('GET', '/api/portfolio')).status, 200, 'og forbliver logget ind');
+  const stolen = await fetch(base + '/api/portfolio', { headers: { cookie: oldCookie } });
+  assert.equal(stolen.status, 401, 'gamle sessioner er ugyldige efter kodeskift');
 
   const all = await request('POST', '/api/auth/logout-all');
   assert.equal(all.status, 200);
@@ -313,7 +318,39 @@ test('skift adgangskode og log ud overalt', async () => {
   assert.equal(login.status, 200);
 });
 
+test('opsætningsnøgle kræves fra fremmede maskiner, ikke fra localhost', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'aktie-setup-'));
+  const store2 = createStore(dir);
+  const app2 = createApp({ store: store2, yahoo: fakeYahoo, config: { envPassword: '', sessionSecret: '', setupToken: 'abc123', trustProxy: false }, logger: { warn() {}, error() {} } });
+  // Lad forbindelsen se ud som om den kommer udefra
+  const srv2 = http.createServer((req, res) => {
+    Object.defineProperty(req.socket, 'remoteAddress', { value: '203.0.113.9', configurable: true });
+    app2(req, res);
+  });
+  await new Promise((r) => srv2.listen(0, '127.0.0.1', r));
+  const b2 = `http://127.0.0.1:${srv2.address().port}`;
+  const post = (body) => fetch(b2 + '/api/auth/setup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const status = await (await fetch(b2 + '/api/auth/status')).json();
+  assert.equal(status.setupTokenRequired, true);
+  assert.equal((await post({ password: 'hemmelig123' })).status, 403, 'uden nøgle');
+  assert.equal((await post({ password: 'hemmelig123', setupToken: 'forkert' })).status, 403, 'forkert nøgle');
+  assert.equal((await post({ password: 'hemmelig123', setupToken: 'abc123' })).status, 201, 'rigtig nøgle');
+  srv2.close();
+});
+
+test('cookies med løst %-tegn vælter ikke forespørgslen', async () => {
+  const res = await fetch(base + '/api/auth/status', { headers: { cookie: `theme=100%; ${cookie}` } });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).authenticated, true);
+});
+
 test('sikkerhedsheadere og ukendte ruter', async () => {
+  const { serveStatic } = await import('../server/http-utils.js');
+  const fakeRes = { writeHead() {}, end() {} };
+  assert.equal(await serveStatic(fakeRes, path.resolve('public'), '/../package.json'), false, 'ingen sti-traversering');
+  assert.equal(await serveStatic(fakeRes, path.resolve('public'), '/%2e%2e/package.json'), false);
+  assert.equal(await serveStatic(fakeRes, path.resolve('public'), '/%E0%A4%A'), false, 'ugyldig encoding giver 404, ikke 500');
+  assert.equal((await request('POST', '/api/holdings', null)).status, 400, 'JSON null afvises');
   const res = await request('GET', '/api/portfolio');
   assert.equal(res.headers.get('x-frame-options'), 'DENY');
   assert.match(res.headers.get('content-security-policy'), /default-src 'self'/);
@@ -323,10 +360,15 @@ test('sikkerhedsheadere og ukendte ruter', async () => {
   assert.equal((await request('GET', '/findes-ikke')).status, 404);
 });
 
-test('login-bremse efter mange fejl – X-Forwarded-For omgår den ikke', async () => {
+test('login-bremse: 8 forsøg tilladt, 9. afvises – X-Forwarded-For omgår den ikke', async () => {
   await request('POST', '/api/auth/logout');
   let last;
-  for (let i = 0; i < 9; i++) last = await request('POST', '/api/auth/login', { password: 'forkert' }, { 'x-forwarded-for': `10.0.0.${i}` });
+  for (let i = 0; i < 8; i++) {
+    last = await request('POST', '/api/auth/login', { password: 'forkert' }, { 'x-forwarded-for': `10.0.0.${i}` });
+    assert.equal(last.status, 401, `forsøg ${i + 1}`);
+  }
+  last = await request('POST', '/api/auth/login', { password: 'forkert' });
   assert.equal(last.status, 429);
-  assert.ok(last.headers.get('retry-after'));
+  const retry = Number(last.headers.get('retry-after'));
+  assert.ok(retry > 0 && retry <= 15 * 60);
 });

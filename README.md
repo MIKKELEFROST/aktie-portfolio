@@ -20,7 +20,7 @@ Et personligt, selv-hostet dashboard til din aktieportefølje. Du logger ind med
 - **Login** med adgangskode, "husk mig", brute-force-bremse, skift adgangskode og "log ud overalt".
 - **Mørkt tema**, mobilvenligt layout (bundmenu + kort), "skjul beløb"-knap til toget, dansk talformat.
 - **Sikkerhedskopi**: download/gendan som JSON. Serveren gemmer desuden de 5 seneste versioner automatisk.
-- **Ingen afhængigheder**: kun Node.js. Ingen database, ingen build-step, intet framework.
+- **Ingen afhængigheder**: kun Node.js. Intet build-step, intet framework. Data i en JSON-fil – eller i Upstash Redis på Vercel.
 
 ## Kom i gang
 
@@ -44,6 +44,21 @@ docker compose up -d
 
 Dashboardet kører på port 3000, og dine data ligger i Docker-volumen `aktie-data` (så de overlever genstart og opdateringer). Opsætningsnøglen ses med `docker compose logs`. Bruger du en bind-mount i stedet for volumen, skal mappen kunne skrives af uid 1000.
 
+### Vercel (gratis hosting fra GitHub)
+
+Appen kan køre som én serverless-funktion på [Vercel](https://vercel.com) med data i Upstash Redis:
+
+1. **Importér repoet** i Vercel: *Add New → Project → Import* `aktie-portfolio`. Framework: *Other*. Deploy (siden viser en fejl indtil trin 2 og 3 er klaret).
+2. **Database**: I projektet → *Storage → Create Database → Upstash Redis* (gratis tier). Vercel sætter selv `KV_REST_API_URL`/`KV_REST_API_TOKEN`.
+3. **Miljøvariabler** under *Settings → Environment Variables*:
+   - `DASHBOARD_PASSWORD` – din adgangskode (påkrævet; Vercel har ingen terminal at læse en opsætningsnøgle fra).
+   - `SESSION_SECRET` – en lang tilfældig streng (valgfri, men anbefalet; fx `openssl rand -hex 32`).
+4. **Redeploy** (*Deployments → ⋯ → Redeploy*). Åbn projektets URL og log ind.
+
+Hvert push til `main` deployer automatisk. Bemærk: på Vercel er der ingen baggrunds-opvarmning af kurser, så første visning efter en pause tager 1–2 sekunder. Yahoo kan desuden afvise flere kald fra cloud-IP'er end fra en hjemme-PC; appen viser i så fald seneste kendte kurser tydeligt markeret.
+
+Sådan vælges lageret: findes `KV_REST_API_URL`/`KV_REST_API_TOKEN` (eller `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN`), bruges Redis – ellers JSON-filen i `DATA_DIR`. Det gælder også lokalt og i Docker.
+
 ## Konfiguration
 
 Alle indstillinger er valgfrie miljøvariabler. Læg dem i en `.env`-fil i projektmappen (indlæses automatisk af `npm start`), sæt dem i din shell, eller under `environment:` i `docker-compose.yml`. Se `.env.example`.
@@ -62,6 +77,7 @@ Alle indstillinger er valgfrie miljøvariabler. Læg dem i en `.env`-fil i proje
 | `SECURE_COOKIES` | `0` | Tving `Secure`-flag på cookies (sættes automatisk bag proxy med `TRUST_PROXY=1` og HTTPS) |
 | `WARM_CACHE` | `1` | Genhent kurser i baggrunden mens en børs er åben, så siden loader øjeblikkeligt |
 | `YAHOO_MOCK` | `0` | `1` = brug indbyggede testkurser i stedet for Yahoo (til udvikling) |
+| `KV_REST_API_URL` + `KV_REST_API_TOKEN` | *(tom)* | Upstash Redis (sættes automatisk af Vercel). Når de findes, gemmes data i Redis i stedet for `DATA_DIR` |
 
 ## Sådan virker det
 
@@ -88,20 +104,24 @@ YAHOO_MOCK=1 npm run dev    # server med genstart ved ændringer og falske kurse
 ```
 
 ```
+api/index.js        Vercel-indgang (serverless)
+vercel.json         rewrites + funktionsopsætning til Vercel
 server/
-  index.js          start, konfiguration, cache-opvarmning
+  index.js          start, konfiguration, cache-opvarmning, .env
   app.js            routing, auth, API
+  storage.js        vælger fil- eller Redis-lager ud fra miljøet
+  store-redis.js    Upstash Redis-lager (REST, compare-and-set, backups)
+  views/            index.html og login.html (serveres kun efter login-tjek)
   yahoo.js          Yahoo Finance-klient med cache
   yahoo-mock.js     falske kurser til udvikling/test
   portfolio-math.js beregninger (rene funktioner)
   store.js          JSON-lager med atomiske skrivninger og backups
   auth.js           scrypt + HMAC-sessioner + login-bremse
   http-utils.js     JSON/cookies/statiske filer
-public/
-  index.html        app-shell (sidebar, dialoger)
+public/             statiske filer (serveres direkte)
   app.js            dashboard-klient
   app.css           designsystem (lys/mørk)
-  login.html/.js    login og førstegangsopsætning
+  login.js/.css     login og førstegangsopsætning
 test/               node:test
 ```
 

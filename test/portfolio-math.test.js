@@ -177,3 +177,33 @@ test('parseDanishNumber: danske og engelske formater', async () => {
   assert.ok(Number.isNaN(parseDanishNumber('1e5')));
   assert.ok(Number.isNaN(parseDanishNumber('1,234,567')));
 });
+
+test('computePortfolio: afkast tæller kun positioner med kendt købskurs', () => {
+  const result = computePortfolio({
+    baseCurrency: 'DKK',
+    holdings: [
+      { id: 'a', symbol: 'A', quantity: 10, avgPrice: 800 },
+      { id: 'b', symbol: 'B', quantity: 10, avgPrice: null },
+    ],
+    quotes: { A: quote('A', 'DKK', 1000, 0), B: quote('B', 'DKK', 500, 0) },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  assert.equal(result.totals.valueBase, 15000);
+  assert.equal(result.totals.costBase, 8000);
+  assert.equal(result.totals.gainBase, 2000, 'B uden købskurs må ikke tælle som ren gevinst');
+  assert.equal(result.totals.gainPercent, 25);
+  assert.equal(result.totals.incomplete, true);
+});
+
+test('computeValueHistory: rækkefølge af beholdninger påvirker ikke resultatet', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const histories = {
+    A: { currency: 'DKK', points: [{ t: day(2), close: 10 }, { t: day(3), close: 11 }] },
+    B: { currency: 'DKK', points: [{ t: day(1), close: 5 }, { t: day(3), close: 6 }] },
+  };
+  const fx = { DKK: { ok: true, rate: 1 } };
+  const ab = computeValueHistory({ holdings: [{ symbol: 'A', quantity: 1 }, { symbol: 'B', quantity: 1 }], histories, fxRates: fx });
+  const ba = computeValueHistory({ holdings: [{ symbol: 'B', quantity: 1 }, { symbol: 'A', quantity: 1 }], histories, fxRates: fx });
+  assert.deepEqual(ab, ba);
+  assert.deepEqual(ab, [{ date: '2026-01-02', value: 15 }, { date: '2026-01-03', value: 17 }]);
+});

@@ -53,6 +53,11 @@
     return `${prefix}${abs} %`;
   }
 
+  // Til input-felter: fuld præcision, uden tusindtalspunkter (parseInput læser komma som decimal)
+  function fmtRaw(n) {
+    return isNum(n) ? nf({ minimumFractionDigits: 0, maximumFractionDigits: 6, useGrouping: false }).format(n) : '';
+  }
+
   function fmtQty(n) {
     if (!isNum(n)) return '–';
     return nf({ minimumFractionDigits: 0, maximumFractionDigits: 4 }).format(n);
@@ -88,8 +93,10 @@
     const s = String(str ?? '').trim().replace(/\s/g, '');
     if (!s) return null;
     let norm = s;
+    if (s.includes(',') && s.includes('.') && s.lastIndexOf('.') > s.lastIndexOf(',')) return NaN; // "1,234.56"
     if (s.includes(',')) norm = s.replace(/\./g, '').replace(',', '.');
     else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) norm = s.replace(/\./g, '');
+    if (!/^-?(\d+\.?\d*|\.\d+)$/.test(norm)) return NaN;
     const n = Number(norm);
     return Number.isFinite(n) ? n : NaN;
   }
@@ -258,6 +265,7 @@
 
   // 60 s mens en børs er åben, 5 min når alle er lukket; fordobles ved fejl (maks 10 min).
   function refreshInterval() {
+    if (!state.portfolio) return 30_000; // intet vist endnu: prøv igen hurtigt
     const open = state.portfolio?.totals?.anyMarketOpen;
     let ms = open ? REFRESH_MS : 5 * 60_000;
     if (state.failures) ms = Math.min(10 * 60_000, ms * 2 ** state.failures);
@@ -305,6 +313,7 @@
   function navigate(path) {
     if (!(path in ROUTES)) path = '/';
     if (location.pathname !== path) history.pushState({}, '', path);
+    closeMenu();
     closePanel();
     render();
     window.scrollTo({ top: 0 });
@@ -329,7 +338,8 @@
       else a.removeAttribute('aria-current');
     });
     // Afbryd ikke brugeren midt i et felt ved en stille baggrundsopdatering.
-    if (silent && ['filter', 'set-name', 'set-cash'].includes(document.activeElement?.id)) {
+    const active = document.activeElement;
+    if (silent && active && active !== document.body && $('#page')?.contains(active)) {
       renderSidebarStatus();
       return;
     }
@@ -340,7 +350,13 @@
     if (route === 'overview') afterRenderOverview();
     renderSidebarStatus();
     document.body.classList.toggle('private', state.privacy);
-    $$('[data-action="privacy"] use').forEach((u) => u.setAttribute('href', state.privacy ? '#i-eye-off' : '#i-eye'));
+    $$('[data-action="privacy"]').forEach((b) => {
+      const label = state.privacy ? 'Vis beløb' : 'Skjul beløb';
+      b.title = label;
+      b.setAttribute('aria-label', label);
+      b.setAttribute('aria-pressed', String(state.privacy));
+      b.querySelector('use')?.setAttribute('href', state.privacy ? '#i-eye-off' : '#i-eye');
+    });
   }
 
   function renderSidebarStatus() {
@@ -348,7 +364,7 @@
     if (!el) return;
     const p = state.portfolio;
     if (!p) {
-      el.textContent = 'Henter kurser…';
+      el.textContent = state.loadError ? 'Kunne ikke hente kurser' : 'Henter kurser…';
       return;
     }
     const chip = freshness();
@@ -374,7 +390,7 @@
   // Én samlet friskheds-status: { cls: 'open'|'closed'|'warn'|'error', text }
   function freshness() {
     const p = state.portfolio;
-    if (!p) return { cls: 'closed', text: 'Henter kurser…' };
+    if (!p) return state.loadError ? { cls: 'error', text: 'Kunne ikke hente kurser' } : { cls: 'closed', text: 'Henter kurser…' };
     const pos = p.positions;
     const t = p.totals;
     if (pos.length && t.errorCount === pos.length) return { cls: 'error', text: 'Ingen forbindelse til Yahoo Finance' };
@@ -439,13 +455,16 @@
 
   function updatedSub() {
     const p = state.portfolio;
-    if (!p) return '<span>Henter kurser…</span>';
+    if (!p) return state.loadError ? '<span class="status-pill error" role="status"><span class="dot"></span>Kunne ikke hente kurser</span>' : '<span>Henter kurser…</span>';
     return `<span>Opdateret kl. ${esc(fmtTime(p.updatedAt))}</span>${marketPill()}`;
   }
 
   function banners() {
     const p = state.portfolio;
     const out = [];
+    if (state.loadError && !p) {
+      out.push(`<div class="banner error">${icon('warn')}<div><b>Kunne ikke hente kurser.</b> ${esc(state.loadError)}. <a href="#" data-action="refresh">Prøv igen</a></div></div>`);
+    }
     if (state.loadError && p) {
       out.push(`<div class="banner error">${icon('warn')}<div><b>Kunne ikke opdatere kurserne.</b> ${esc(state.loadError)}. Viser tal fra kl. ${esc(fmtTime(p.updatedAt))}. <a href="#" data-action="refresh">Prøv igen</a></div></div>`);
     }
@@ -767,7 +786,7 @@
     const th = cols.map((c) => {
       const sorted = state.sort.key === c.key;
       const ariaSort = sorted ? (state.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none';
-      return `<th class="${c.n ? 'n' : ''}${sorted ? ' sorted' : ''}" data-sort="${c.key}" aria-sort="${ariaSort}" ${c.title ? `title="${esc(c.title)}"` : ''}>${c.label}<span class="sort-ind">${sorted ? (state.sort.dir === 'asc' ? '▲' : '▼') : ''}</span></th>`;
+      return `<th class="${c.n ? 'n' : ''}${sorted ? ' sorted' : ''}" data-sort="${c.key}" aria-sort="${ariaSort}" tabindex="0" role="columnheader button" ${c.title ? `title="${esc(c.title)}"` : ''}>${c.label}<span class="sort-ind">${sorted ? (state.sort.dir === 'asc' ? '▲' : '▼') : ''}</span></th>`;
     }).join('') + (compact ? '' : '<th class="n"><span class="sr-only">Handlinger</span></th>');
 
     const sk = '<span class="skeleton">00.000</span>';
@@ -796,7 +815,7 @@
       cells.push(`<td class="n"><div class="cell-2"><span class="amount ${signClass(p.gainBase)}">${fmtAmount(p.gainBase, state.baseCurrency, { sign: true })}</span><span class="sub ${signClass(p.gainPercent)}">${fmtPct(p.gainPercent)}</span></div></td>`);
       cells.push(`<td class="n">${isNum(p.weight) ? `${fmtPct(p.weight, { sign: false })}<span class="weight-bar"><i style="width:${clamp(p.weight, 0, 100).toFixed(1)}%"></i></span>` : '–'}</td>`);
       if (!compact) cells.push(`<td class="n"><div class="row-actions"><button class="btn btn-ghost btn-icon" data-action="menu" data-id="${esc(p.id)}" title="Handlinger" aria-label="Handlinger for ${esc(p.name)}">${icon('more')}</button></div></td>`);
-      return `<tr data-action="open" data-symbol="${esc(p.symbol)}" class="${hasPrice ? '' : 'error-row'}">${cells.join('')}</tr>`;
+      return `<tr data-action="open" data-symbol="${esc(p.symbol)}" class="${hasPrice ? '' : 'error-row'}" tabindex="0" aria-label="Vis detaljer for ${esc(p.name || p.symbol)}">${cells.join('')}</tr>`;
     }).join('');
 
     const foot = t && !pendingOnly ? `<tfoot><tr>
@@ -810,7 +829,7 @@
 
     const cards = rows.map((p) => pendingOnly
       ? `<div class="hcard"><div class="l1">${esc(p.name || p.symbol)}</div><div class="r1">${sk}</div><div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk.</div><div class="r2">${sk}</div></div>`
-      : `<div class="hcard" data-action="open" data-symbol="${esc(p.symbol)}">
+      : `<div class="hcard" data-action="open" data-symbol="${esc(p.symbol)}" tabindex="0" role="button">
       <div class="l1">${p.status !== 'ok' ? '<span class="warn-dot"></span>' : ''}${esc(p.name || p.symbol)}</div>
       <div class="r1 amount">${fmtAmount(p.valueBase)}</div>
       <div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk. · ${isNum(p.price) ? `${fmtPrice(p.price)} ${esc(p.currency || '')}` : 'ingen kurs'}</div>
@@ -837,7 +856,7 @@
         </div>
         ${holdingsTable({ compact: false })}
       </div>
-      <p class="footer-note">Tryk på en aktie for detaljer. Brug ⋯-menuen til at købe til, sælge, redigere eller slette.</p>`}`;
+      <p class="footer-note">Tryk på en aktie for detaljer – her kan du købe til, sælge, redigere eller slette.</p>`}`;
   }
 
   // ---------- Indstillinger ----------
@@ -851,23 +870,23 @@
       <div class="settings-grid">
         <div class="card">
           <div class="card-header"><h2>${icon('lock')}Konto</h2></div>
-          <div class="setting-row"><div><div class="lbl">Dit navn</div><div class="desc">Bruges i hilsenen på forsiden.</div></div><input class="input" id="set-name" style="max-width:180px" value="${esc(s.displayName || '')}" placeholder="F.eks. Mikkel" maxlength="40"></div>
+          <div class="setting-row"><div><div class="lbl">Dit navn</div><div class="desc">Bruges i hilsenen på forsiden.</div></div><input class="input" id="set-name" style="max-width:180px" value="${esc(s.displayName || '')}" placeholder="F.eks. Mikkel" maxlength="40" aria-label="Dit navn"></div>
           <div class="setting-row"><div><div class="lbl">Adgangskode</div><div class="desc">${usesEnvPassword ? 'Styres af DASHBOARD_PASSWORD på serveren.' : 'Skift adgangskoden til dashboardet.'}</div></div><button class="btn btn-sm" data-action="change-password" ${usesEnvPassword ? 'disabled' : ''}>Skift adgangskode</button></div>
           <div class="setting-row"><div><div class="lbl">Log ud på alle enheder</div><div class="desc">Ugyldiggør alle aktive logins, også dette.</div></div><button class="btn btn-sm" data-action="logout-all">Log ud overalt</button></div>
         </div>
 
         <div class="card">
           <div class="card-header"><h2>${icon('eye')}Visning</h2></div>
-          <div class="setting-row"><div><div class="lbl">Tema</div><div class="desc">Lys, mørk eller følg systemet.</div></div><select class="select-inline" id="set-theme">${opt('system', 'Følg systemet', state.theme)}${opt('light', 'Lys', state.theme)}${opt('dark', 'Mørk', state.theme)}</select></div>
-          <div class="setting-row"><div><div class="lbl">Basisvaluta</div><div class="desc">Alle totaler omregnes til denne valuta.</div></div><select class="select-inline" id="set-currency">${BASE_CURRENCIES.map((c) => opt(c, c, state.baseCurrency)).join('')}</select></div>
-          <div class="setting-row"><div><div class="lbl">Kontanter</div><div class="desc">Uinvesterede penge i depotet. Lægges til porteføljeværdien.</div></div><div class="input-group" style="max-width:180px"><input class="input n" id="set-cash" inputmode="decimal" value="${s.cash ? fmtNum(s.cash, 0, 2) : ''}" placeholder="0"><span class="addon">${esc(state.baseCurrency)}</span></div></div>
-          <div class="setting-row"><div><div class="lbl">Vis ører på beløb</div><div class="desc">Vis to decimaler på alle beløb i basisvalutaen.</div></div><label class="switch"><input type="checkbox" id="set-decimals" ${s.showDecimals ? 'checked' : ''}><span class="track"></span></label></div>
-          <div class="setting-row"><div><div class="lbl">Skjul beløb</div><div class="desc">Slører beløb, når andre kigger med. Procenter vises stadig.</div></div><label class="switch"><input type="checkbox" id="set-privacy" ${state.privacy ? 'checked' : ''}><span class="track"></span></label></div>
+          <div class="setting-row"><div><div class="lbl">Tema</div><div class="desc">Lys, mørk eller følg systemet.</div></div><select class="select-inline" id="set-theme" aria-label="Tema">${opt('system', 'Følg systemet', state.theme)}${opt('light', 'Lys', state.theme)}${opt('dark', 'Mørk', state.theme)}</select></div>
+          <div class="setting-row"><div><div class="lbl">Basisvaluta</div><div class="desc">Alle totaler omregnes til denne valuta.</div></div><select class="select-inline" id="set-currency" aria-label="Basisvaluta">${BASE_CURRENCIES.map((c) => opt(c, c, state.baseCurrency)).join('')}</select></div>
+          <div class="setting-row"><div><div class="lbl">Kontanter</div><div class="desc">Uinvesterede penge i depotet. Lægges til porteføljeværdien.</div></div><div class="input-group" style="max-width:180px"><input class="input n" id="set-cash" inputmode="decimal" value="${s.cash ? fmtRaw(s.cash) : ''}" placeholder="0" aria-label="Kontanter"><span class="addon">${esc(state.baseCurrency)}</span></div></div>
+          <div class="setting-row"><div><div class="lbl">Vis ører på beløb</div><div class="desc">Vis to decimaler på alle beløb i basisvalutaen.</div></div><label class="switch"><input type="checkbox" id="set-decimals" ${s.showDecimals ? 'checked' : ''} aria-label="Vis ører på beløb"><span class="track"></span></label></div>
+          <div class="setting-row"><div><div class="lbl">Skjul beløb</div><div class="desc">Slører beløb, når andre kigger med. Procenter vises stadig.</div></div><label class="switch"><input type="checkbox" id="set-privacy" ${state.privacy ? 'checked' : ''} aria-label="Skjul beløb"><span class="track"></span></label></div>
         </div>
 
         <div class="card">
           <div class="card-header"><h2>${icon('refresh')}Kurser</h2></div>
-          <div class="setting-row"><div><div class="lbl">Opdatér automatisk</div><div class="desc">Henter nye kurser hvert minut, mens siden er åben.</div></div><label class="switch"><input type="checkbox" id="set-autorefresh" ${state.autoRefresh ? 'checked' : ''}><span class="track"></span></label></div>
+          <div class="setting-row"><div><div class="lbl">Opdatér automatisk</div><div class="desc">Henter nye kurser hvert minut, mens siden er åben.</div></div><label class="switch"><input type="checkbox" id="set-autorefresh" ${state.autoRefresh ? 'checked' : ''} aria-label="Opdatér automatisk"><span class="track"></span></label></div>
           <div class="setting-row"><div><div class="lbl">Seneste hentning</div><div class="desc">${state.portfolio ? `${esc(fmtDateTime(state.portfolio.updatedAt))} · ${state.portfolio.totals.okCount} af ${state.portfolio.totals.positionCount} kurser hentet · ${Object.keys(state.portfolio.fxRates || {}).filter((c) => c !== state.baseCurrency).length} valutakurser` : '–'}</div></div><button class="btn btn-sm" data-action="refresh">Hent nu</button></div>
           <div class="setting-row"><div><div class="lbl">Hvor tit?</div><div class="desc">Hvert minut mens en børs er åben, hvert 5. minut når alle er lukket, og aldrig mens fanen er skjult.</div></div></div>
           <div class="setting-row"><div><div class="lbl">Kilde</div><div class="desc">Yahoo Finance. Kurser kan være op til 15 min. forsinkede og er ikke rådgivning.</div></div></div>
@@ -889,14 +908,19 @@
   function openPanel(symbol) {
     state.panelSymbol = symbol;
     renderPanel();
-    $('#panel').classList.add('show');
+    const panel = $('#panel');
+    panel.inert = false;
+    panel.classList.add('show');
     $('#panel-backdrop').classList.add('show');
+    setTimeout(() => $('#panel [data-action="close-panel"]')?.focus(), 50);
   }
 
   function closePanel() {
     if (!state.panelSymbol) return;
     state.panelSymbol = null;
-    $('#panel').classList.remove('show');
+    const panel = $('#panel');
+    panel.classList.remove('show');
+    panel.inert = true;
     $('#panel-backdrop').classList.remove('show');
   }
 
@@ -1001,7 +1025,7 @@
 
   // ---------- Tilføj ----------
 
-  const add = { selected: null, results: [], active: -1, timer: null, seq: 0, quote: null };
+  const add = { selected: null, results: [], active: -1, timer: null, seq: 0, quote: null, lastQuery: '' };
 
   function openAdd(query = '') {
     add.selected = null;
@@ -1009,7 +1033,11 @@
     add.active = -1;
     add.quote = null;
     $('#add-search').value = query;
+    add.lastQuery = query;
     $('#add-results').innerHTML = '';
+    $('#add-price').placeholder = '0,00';
+    $('#add-notice').innerHTML = '';
+    $('#add-deviation').innerHTML = '';
     if (query) runSearch(query);
     $('#add-qty').value = '';
     $('#add-price').value = '';
@@ -1164,8 +1192,8 @@
     if (!p) return;
     edit.id = id;
     $('#dlg-edit-title').textContent = `Redigér ${p.name || p.symbol}`;
-    $('#edit-qty').value = fmtQty(p.quantity);
-    $('#edit-price').value = isNum(p.avgPrice) ? fmtPrice(p.avgPrice) : '';
+    $('#edit-qty').value = fmtRaw(p.quantity);
+    $('#edit-price').value = fmtRaw(p.avgPrice);
     $('#edit-price-addon').textContent = p.currency || '';
     $('#edit-note').value = p.note || '';
     setError('#edit-error', '');
@@ -1213,7 +1241,7 @@
     trade.id = id;
     trade.type = type;
     $('#trade-qty').value = '';
-    $('#trade-price').value = isNum(p.price) ? fmtPrice(p.price) : '';
+    $('#trade-price').value = fmtRaw(p.price);
     $('#trade-price-addon').textContent = p.currency || '';
     setError('#trade-error', '');
     applyTradeType();
@@ -1382,6 +1410,7 @@
     if (!p) return;
     const menu = document.createElement('div');
     menu.className = 'menu';
+    menu.dataset.id = id;
     menu.innerHTML = `
       <button data-action="open" data-symbol="${esc(p.symbol)}">${icon('info', 'icon icon-sm')}Vis detaljer</button>
       <button data-action="trade" data-type="buy" data-id="${esc(id)}">${icon('cart', 'icon icon-sm')}Køb til</button>
@@ -1458,7 +1487,7 @@
       e.preventDefault();
       const p = positions().find((x) => x.id === trade.id);
       if (p) {
-        $('#trade-qty').value = fmtQty(p.quantity);
+        $('#trade-qty').value = fmtRaw(p.quantity);
         updateTradeSummary();
       }
       return;
@@ -1487,7 +1516,7 @@
       case 'close-panel': return closePanel();
       case 'menu':
         e.stopPropagation();
-        return state.menu ? closeMenu() : openMenu(el, el.dataset.id);
+        return state.menu && state.menu.dataset.id === el.dataset.id ? closeMenu() : openMenu(el, el.dataset.id);
       case 'edit':
         e.stopPropagation();
         return openEdit(el.dataset.id);
@@ -1524,6 +1553,11 @@
   $('#panel-backdrop').addEventListener('click', closePanel);
 
   document.addEventListener('keydown', (e) => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('th[data-sort], tr[data-action="open"], .hcard[data-action="open"], .movers li[data-action="open"]')) {
+      e.preventDefault();
+      e.target.click();
+      return;
+    }
     if (e.key === 'Escape') {
       if (state.menu) return closeMenu();
       if (state.panelSymbol && !document.querySelector('dialog[open]')) return closePanel();
@@ -1545,6 +1579,12 @@
     if (id === 'add-search') {
       clearTimeout(add.timer);
       const q = e.target.value.trim();
+      if (q !== add.lastQuery) {
+        add.results = [];
+        add.active = -1;
+        add.lastQuery = q;
+        $('#add-results').innerHTML = ''; // gamle resultater må ikke kunne vælges ved en fejl
+      }
       add.timer = setTimeout(() => runSearch(q), 250);
     } else if (id === 'add-qty' || id === 'add-price') updateAddSummary();
     else if (id === 'edit-qty' || id === 'edit-price') updateEditSummary();
@@ -1570,9 +1610,10 @@
       } else if (id === 'set-currency') {
         const data = await api('PUT', '/api/settings', { baseCurrency: e.target.value });
         state.settings = data.settings;
+        state.baseCurrency = data.settings.baseCurrency;
         toast(`Basisvaluta ændret til ${data.settings.baseCurrency}`, 'success');
         state.history = {};
-        await loadPortfolio();
+        await loadPortfolio({ fresh: true });
       } else if (id === 'set-decimals') {
         const data = await api('PUT', '/api/settings', { showDecimals: e.target.checked });
         state.settings = data.settings;
@@ -1594,7 +1635,7 @@
         const data = await api('PUT', '/api/settings', { cash: n ?? 0 });
         state.settings = data.settings;
         toast('Kontanter gemt', 'success');
-        await loadPortfolio({ silent: true });
+        await loadPortfolio({ silent: true, fresh: true });
       } else if (id === 'restore-file') {
         const file = e.target.files[0];
         e.target.value = '';
@@ -1651,8 +1692,11 @@
 
   // Luk dialog ved klik på baggrunden
   $$('dialog').forEach((dlg) => {
+    let downOnBackdrop = false;
+    dlg.addEventListener('pointerdown', (e) => { downOnBackdrop = e.target === dlg; });
     dlg.addEventListener('click', (e) => {
-      if (e.target === dlg) dlg.close();
+      if (e.target === dlg && downOnBackdrop) dlg.close();
+      downOnBackdrop = false;
     });
   });
 

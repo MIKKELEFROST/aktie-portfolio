@@ -12,6 +12,7 @@ import { YahooError } from './yahoo.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+const VIEWS_DIR = path.join(__dirname, 'views'); // HTML-sider ligger uden for public/, så de altid går gennem login-kontrollen
 
 const COOKIE_NAME = 'aktie_session';
 const SESSION_LONG_MS = 30 * 24 * 60 * 60 * 1000; // "Husk mig": 30 dage
@@ -58,7 +59,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   // Opsætningsnøgle: kræves for at oprette den første adgangskode, medmindre man sidder
   // på selve maskinen (localhost). Forhindrer at en fremmed "kaprer" en ny, åben instans.
   function setupTokenRequired(req) {
-    return Boolean(config.setupToken) && !isLoopback(req);
+    return Boolean(config.setupToken) && (config.alwaysRequireSetupToken || !isLoopback(req));
   }
 
   function checkSetupToken(req, body) {
@@ -580,7 +581,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
     if (url.pathname === '/login') {
       if (authed) return redirect(res, '/');
-      if (!(await serveStatic(res, PUBLIC_DIR, '/login.html'))) throw new HttpError(500, 'login.html mangler');
+      if (!(await serveStatic(res, VIEWS_DIR, '/login.html'))) throw new HttpError(500, 'login.html mangler');
       return;
     }
     if (PAGE_ROUTES.has(url.pathname)) {
@@ -588,7 +589,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         const next = url.pathname === '/' ? '' : `?next=${encodeURIComponent(url.pathname)}`;
         return redirect(res, `/login${next}`);
       }
-      if (!(await serveStatic(res, PUBLIC_DIR, '/index.html'))) throw new HttpError(500, 'index.html mangler');
+      if (!(await serveStatic(res, VIEWS_DIR, '/index.html'))) throw new HttpError(500, 'index.html mangler');
       return;
     }
     if (url.pathname === '/index.html' || url.pathname === '/login.html') return redirect(res, '/');

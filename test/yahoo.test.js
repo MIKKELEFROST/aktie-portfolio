@@ -76,3 +76,9 @@ test('transliterate: danske bogstaver', () => {
   assert.equal(transliterate('Mærsk Ørsted Ålborg'), 'Maersk Orsted Aalborg');
   assert.equal(transliterate('novo'), 'novo');
 });
+
+test('weekStart: ugentlige bars lægges på mandag uanset børs', async () => {
+  const { weekStart } = await import('../server/yahoo.js');
+  assert.equal(weekStart(Date.parse('2026-09-06T22:00:00Z')), Date.parse('2026-09-07T00:00:00Z'), 'europæisk søndags-bar');
+  assert.equal(weekStart(Date.parse('2026-09-07T13:30:00Z')), Date.parse('2026-09-07T00:00:00Z'), 'amerikansk mandags-bar');
+});

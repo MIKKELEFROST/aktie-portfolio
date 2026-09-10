@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync, promises as fs, constants as fsConstants } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createApp } from './app.js';
-import { createStore } from './store.js';
+import { createStoreFromConfig, redisConfigFromEnv } from './storage.js';
 import { createYahooClient } from './yahoo.js';
 import { createMockYahooClient } from './yahoo-mock.js';
 
@@ -87,14 +87,17 @@ export function startCacheWarmer({ store, yahoo, config, logger = console }) {
 }
 
 export async function startServer(config = loadConfig()) {
-  try {
-    await fs.mkdir(config.dataDir, { recursive: true });
-    await fs.access(config.dataDir, fsConstants.W_OK);
-  } catch (err) {
-    console.error(`DATA_DIR ${config.dataDir} kan ikke bruges (${err.code || err.message}). Tjek stien og rettigheder (i Docker: mappen skal kunne skrives af uid 1000).`);
-    process.exit(1);
+  const usesRedis = Boolean(redisConfigFromEnv());
+  if (!usesRedis) {
+    try {
+      await fs.mkdir(config.dataDir, { recursive: true });
+      await fs.access(config.dataDir, fsConstants.W_OK);
+    } catch (err) {
+      console.error(`DATA_DIR ${config.dataDir} kan ikke bruges (${err.code || err.message}). Tjek stien og rettigheder (i Docker: mappen skal kunne skrives af uid 1000).`);
+      process.exit(1);
+    }
   }
-  const store = createStore(config.dataDir, { baseCurrency: config.baseCurrency });
+  const store = createStoreFromConfig(config);
   const yahoo = config.mockYahoo ? createMockYahooClient() : createYahooClient({ quoteTtlMs: config.quoteTtlMs });
   const warmer = config.warmCache && !config.mockYahoo ? startCacheWarmer({ store, yahoo, config }) : null;
   const app = createApp({ store, yahoo, config, onPortfolioRequest: warmer ? () => warmer.touch() : null });
@@ -102,7 +105,7 @@ export async function startServer(config = loadConfig()) {
   server.listen(config.port, config.host, () => {
     const shownHost = config.host === '0.0.0.0' ? 'localhost' : config.host;
     console.log(`Aktie-portfolio kører på http://${shownHost}:${config.port}`);
-    console.log(`Data gemmes i ${config.dataDir}`);
+    console.log(usesRedis ? 'Data gemmes i Redis (Upstash)' : `Data gemmes i ${config.dataDir}`);
     if (config.mockYahoo) console.log('YAHOO_MOCK=1: bruger falske kurser (ingen kald til Yahoo Finance).');
     if (!config.envPassword) {
       store.getAuth().then((auth) => {

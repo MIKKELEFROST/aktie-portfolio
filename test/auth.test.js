@@ -11,6 +11,14 @@ test('adgangskode: hash og verificér', async () => {
   assert.equal(await verifyPassword('hemmelig123', null), false);
 });
 
+test('session-token: bundet til adgangskode-version', async () => {
+  const { passwordVersion } = await import('../server/auth.js');
+  const token = createSessionToken('s', { pv: passwordVersion('hash-a') });
+  assert.ok(verifySessionToken('s', token, { pv: passwordVersion('hash-a') }));
+  assert.equal(verifySessionToken('s', token, { pv: passwordVersion('hash-b') }), null, 'ny adgangskode → gammelt token ugyldigt');
+  assert.ok(verifySessionToken('s', token), 'uden pv-krav accepteres tokenet stadig');
+});
+
 test('session-token: gyldigt, udløbet, manipuleret', () => {
   const secret = 'test-secret';
   const now = 1_700_000_000_000;
