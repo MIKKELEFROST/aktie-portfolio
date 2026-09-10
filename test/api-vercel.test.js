@@ -32,7 +32,7 @@ let sag = 0;
 
 // Modulet læser miljøet ved indlæsning, så hvert tilfælde får sin egen kopi.
 async function start(env, fetchImpl) {
-  const DB = ['SUPABASE_URL', 'SUPABASE_KEY', 'KV_REST_API_URL', 'KV_REST_API_TOKEN', 'DASHBOARD_PASSWORD', 'PUBLIC_ACCESS'];
+  const DB = ['SUPABASE_URL', 'SUPABASE_KEY', 'KV_REST_API_URL', 'KV_REST_API_TOKEN', 'DASHBOARD_PASSWORD', 'PUBLIC_ACCESS', 'PLATFORM'];
   const gemt = Object.fromEntries(DB.map((k) => [k, process.env[k]]));
   const rigtigFetch = globalThis.fetch;
   for (const k of DB) delete process.env[k];
@@ -84,35 +84,34 @@ test('vercel uden database: browser-tilstand, siden svarer', async () => {
   }
 });
 
-test('vercel med database og uden adgangskode: åben adgang, delt portefølje', async () => {
+test('vercel med database: platform med profiler, intet uden login', async () => {
   const app = await start({ SUPABASE_URL: 'https://p.supabase.co', SUPABASE_KEY: 'sb_publishable_x' }, fakeDatabase());
   try {
     const status = await app.call('GET', '/api/auth/status');
     assert.equal(status.json.storage, 'supabase');
-    assert.equal(status.json.access, 'open');
-    assert.equal(status.json.authenticated, true);
+    assert.equal(status.json.access, 'platform');
+    assert.equal(status.json.authenticated, false);
+    assert.equal(status.json.firstProfile, true, 'den første profil kræver ingen invitationskode');
 
+    // Uden login er der ingen data og ingen forside.
+    assert.equal((await app.call('GET', '/api/portfolio')).status, 401);
+    assert.equal((await app.call('GET', '/')).headers.get('location'), '/login');
+    assert.equal((await app.call('GET', '/login')).status, 200, 'log ind / tilmeld vises');
+
+    const oprettet = await app.call('POST', '/api/auth/signup', { email: 'mig@eksempel.dk', password: 'min-lange-kode', name: 'Mig' });
+    assert.equal(oprettet.status, 201);
+    assert.equal(oprettet.json.user.name, 'Mig');
+    assert.equal((await app.call('GET', '/api/auth/status')).json.authenticated, true);
+    assert.equal((await app.call('GET', '/api/portfolio')).status, 200);
     assert.equal((await app.call('GET', '/')).status, 200);
-    const login = await app.call('GET', '/login');
-    assert.equal(login.status, 302, 'der er intet login at gå til');
-    assert.equal(login.headers.get('location'), '/');
-
-    // Uden cookie – altså som en helt anden browser.
-    const tilføj = await app.call('POST', '/api/holdings', { symbol: 'NOVO-B.CO', quantity: 10, avgPrice: 200 });
-    assert.equal(tilføj.status, 201);
-    const læst = await app.call('GET', '/api/holdings');
-    assert.equal(læst.json.holdings.length, 1);
-    assert.equal(læst.json.holdings[0].symbol, 'NOVO-B.CO');
-
-    assert.equal((await app.call('POST', '/api/auth/login', { password: 'x' })).status, 404);
   } finally {
     await app.close();
   }
 });
 
-test('vercel med database og adgangskode: login kræves stadig', async () => {
+test('vercel med PLATFORM=0 og adgangskode: ét dashboard med ét login', async () => {
   const app = await start(
-    { SUPABASE_URL: 'https://p.supabase.co', SUPABASE_KEY: 'sb_publishable_x', DASHBOARD_PASSWORD: 'hemmelig-kode-1' },
+    { SUPABASE_URL: 'https://p.supabase.co', SUPABASE_KEY: 'sb_publishable_x', DASHBOARD_PASSWORD: 'hemmelig-kode-1', PLATFORM: '0' },
     fakeDatabase(),
   );
   try {

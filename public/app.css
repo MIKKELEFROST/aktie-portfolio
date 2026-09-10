@@ -631,3 +631,25 @@ dialog { max-height: calc(100dvh - 24px); overflow-y: auto; }
 @media (max-width: 767px) {
   .page-actions .btn-icon { display: none; } /* findes allerede i topbaren */
 }
+
+/* ---------- Platform: profiler og følgere ---------- */
+.only-platform { display: none !important; }
+body.platform .only-platform { display: flex !important; }
+
+.person-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.person-row:first-of-type { border-top: 0; }
+.avatar {
+  flex: none; width: 36px; height: 36px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 13px; font-weight: 700;
+  background: var(--accent-soft, rgba(37, 99, 235, 0.12)); color: var(--accent, #2563eb);
+}
+.person-name { flex: 1 1 140px; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.person-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.invite-box { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.invite-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px; font-weight: 700;
+  letter-spacing: 0.06em; padding: 6px 10px; border-radius: 8px;
+  background: var(--surface-2, rgba(148, 163, 184, 0.14)); user-select: all;
+}
+body.viewing-person [data-action="add"] { display: none !important; }

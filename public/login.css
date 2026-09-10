@@ -11,3 +11,12 @@
 .login-loading { text-align: center; padding: 10px 0; }
 .addon-btn { cursor: pointer; }
 .addon-btn:hover { color: var(--text); }
+
+/* Faneblade mellem "Log ind" og "Opret profil" på platformen. */
+.auth-tabs { display: flex; gap: 4px; margin-bottom: 22px; background: var(--surface-2, rgba(148, 163, 184, 0.12)); padding: 4px; border-radius: 10px; }
+.auth-tab {
+  flex: 1; padding: 9px 12px; border: 0; border-radius: 7px; cursor: pointer;
+  font: inherit; font-size: 14px; font-weight: 600; color: var(--muted); background: transparent;
+}
+.auth-tab:hover { color: var(--text); }
+.auth-tab.is-active { background: var(--card, #fff); color: var(--text); box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12); }

@@ -70,9 +70,37 @@ export function createSupabaseStore({ url, key, prefix = 'aktie', fetchImpl = gl
   const PORTFOLIO = `${prefix}:portfolio`;
   const AUTH = `${prefix}:auth`;
   const defaultAuth = () => ({ passwordHash: null, sessionSecret: null });
+  const userKey = (userId) => `${prefix}:portfolio:${userId}`;
+  const docKey = (name) => `${prefix}:${name}`;
 
   return {
     kind: 'supabase',
+
+    async getUserPortfolio(userId, baseCurrency = 'DKK') {
+      const { value } = await read(userKey(userId));
+      return migrate(value ?? defaultPortfolio(baseCurrency), baseCurrency);
+    },
+
+    updateUserPortfolio(userId, fn, baseCurrency = 'DKK') {
+      return update(userKey(userId), () => defaultPortfolio(baseCurrency), async (draft) => {
+        const migrated = migrate(draft, baseCurrency);
+        const result = await fn(migrated);
+        return result === undefined ? migrated : result;
+      }, { keepBackups: backups });
+    },
+
+    async deleteUserPortfolio(userId, baseCurrency = 'DKK') {
+      await update(userKey(userId), () => defaultPortfolio(baseCurrency), () => defaultPortfolio(baseCurrency));
+    },
+
+    async getDoc(name, defaults) {
+      const { value } = await read(docKey(name));
+      return value ?? defaults();
+    },
+
+    updateDoc(name, defaults, fn) {
+      return update(docKey(name), defaults, fn, { keepBackups: 3 });
+    },
 
     async getPortfolio(baseCurrency = 'DKK') {
       const { value } = await read(PORTFOLIO);

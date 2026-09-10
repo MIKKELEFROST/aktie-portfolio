@@ -34,8 +34,9 @@ export function passwordVersion(passwordHash) {
   return createHash('sha256').update(String(passwordHash || '')).digest('hex').slice(0, 16);
 }
 
-export function createSessionToken(secret, { ttlMs = 30 * 24 * 60 * 60 * 1000, now = Date.now(), pv = '' } = {}) {
-  const payload = JSON.stringify({ iat: now, exp: now + ttlMs, nonce: randomBytes(8).toString('hex'), pv });
+export function createSessionToken(secret, { ttlMs = 30 * 24 * 60 * 60 * 1000, now = Date.now(), pv = '', uid = null } = {}) {
+  // uid er med, når der er flere brugere: så peger sessionen på én bestemt profil.
+  const payload = JSON.stringify({ iat: now, exp: now + ttlMs, nonce: randomBytes(8).toString('hex'), pv, ...(uid ? { uid } : {}) });
   const body = b64url(payload);
   const sig = createHmac('sha256', secret).update(body).digest('base64url');
   return `${body}.${sig}`;
