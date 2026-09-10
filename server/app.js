@@ -31,6 +31,7 @@ const HISTORY_RANGES = new Set(['5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '5
 const HOLDABLE_TYPES = new Set(['EQUITY', 'ETF', 'MUTUALFUND']);
 const MAX_HOLDINGS = 200;
 const MAX_ACCOUNTS = 20;
+const MAX_WATCHLIST = 100;
 const TYPE_NAMES = { INDEX: 'et indeks', CRYPTOCURRENCY: 'en kryptovaluta', CURRENCY: 'en valuta', FUTURE: 'en future', OPTION: 'en option' };
 
 export function createApp({ store, yahoo, config, logger = console, onPortfolioRequest = null }) {
@@ -403,6 +404,39 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     return { id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, addedAt: h.addedAt, updatedAt: h.updatedAt };
   }
 
+  // Henter kurser til ønskelisten og regner afstanden til ønskekursen.
+  async function withQuotes(list) {
+    const items = Array.isArray(list) ? list : [];
+    const symbols = items.map((w) => w.symbol);
+    const quotes = symbols.length ? await yahoo.getQuotes(symbols) : {};
+    return {
+      items: items.map((w) => {
+        const entry = quotes[w.symbol];
+        const q = entry?.ok ? entry.quote : null;
+        const price = q?.price ?? null;
+        // Negativ = kursen er over din ønskekurs, positiv = der er så langt ned.
+        const toTarget = price != null && w.target ? ((price - w.target) / w.target) * 100 : null;
+        return {
+          symbol: w.symbol,
+          name: q?.name || w.name || w.symbol,
+          currency: q?.currency || w.currency || null,
+          exchange: q?.exchange ?? null,
+          price,
+          previousClose: q?.previousClose ?? null,
+          changePercent: q?.changePercent ?? null,
+          marketOpen: q?.marketOpen ?? null,
+          target: w.target ?? null,
+          toTarget: toTarget === null ? null : Math.round(toTarget * 100) / 100,
+          atTarget: price != null && w.target ? price <= w.target : false,
+          note: w.note || '',
+          addedAt: w.addedAt,
+          stale: Boolean(entry?.stale),
+          error: entry?.ok ? null : entry?.error?.message || null,
+        };
+      }),
+    };
+  }
+
   // Adgangskontrollen ét sted: man ser kun en andens portefølje med en accepteret
   // anmodning. Findes profilen ikke, svares der det samme som ved manglende adgang,
   // så man ikke kan afprøve sig frem til hvilke profil-id'er der findes.
@@ -559,6 +593,67 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const range = url.searchParams.get('range') || '1y';
       if (!HISTORY_RANGES.has(range)) throw new HttpError(400, 'Ugyldigt interval');
       sendJson(res, 200, await buildHistory(range, null, parseAccountFilter(url.searchParams.get('account')), await own(req)));
+    },
+
+    // ---------- ønskeliste ----------
+
+    // Aktier man holder øje med uden at eje dem. Har man sat en ønskekurs,
+    // regnes afstanden ned til den, så man kan se hvor tæt man er.
+    async watchlist(req, res) {
+      const data = await (await own(req)).get();
+      sendJson(res, 200, await withQuotes(data.watchlist));
+    },
+
+    async addWatch(req, res) {
+      const body = await readJsonBody(req);
+      const symbol = parseSymbol(body.symbol);
+      const target = parseNumber(body.target, 'Ønskekurs', { min: 0, allowNull: true });
+      const note = parseNote(body.note);
+      const quote = (await yahoo.getQuotes([symbol]))[symbol];
+      if (!quote?.ok) throw new HttpError(quote?.error?.code === 'NOT_FOUND' ? 404 : 502, quote?.error?.message || 'Kunne ikke hente kursen', { code: quote?.error?.code });
+
+      let tilføjet;
+      const data = await (await own(req)).update((draft) => {
+        if (!Array.isArray(draft.watchlist)) draft.watchlist = [];
+        if (draft.watchlist.some((w) => w.symbol === symbol)) throw new HttpError(409, 'Den er allerede på din ønskeliste');
+        if (draft.watchlist.length >= MAX_WATCHLIST) throw new HttpError(409, `Der er plads til højst ${MAX_WATCHLIST} på ønskelisten`);
+        tilføjet = {
+          symbol,
+          name: quote.quote.name || symbol,
+          currency: quote.quote.currency || null,
+          target,
+          note,
+          addedAt: new Date().toISOString(),
+        };
+        draft.watchlist.push(tilføjet);
+      });
+      sendJson(res, 201, { item: tilføjet, count: data.watchlist.length });
+    },
+
+    async updateWatch(req, res, url, params) {
+      const symbol = parseSymbol(params.symbol);
+      const body = await readJsonBody(req);
+      let opdateret;
+      await (await own(req)).update((draft) => {
+        const w = (draft.watchlist || []).find((x) => x.symbol === symbol);
+        if (!w) throw new HttpError(404, 'Den står ikke på din ønskeliste');
+        if (body.target !== undefined) w.target = parseNumber(body.target, 'Ønskekurs', { min: 0, allowNull: true });
+        if (body.note !== undefined) w.note = parseNote(body.note);
+        opdateret = w;
+      });
+      sendJson(res, 200, { item: opdateret });
+    },
+
+    async removeWatch(req, res, url, params) {
+      const symbol = parseSymbol(params.symbol);
+      let fandtes = false;
+      await (await own(req)).update((draft) => {
+        const før = (draft.watchlist || []).length;
+        draft.watchlist = (draft.watchlist || []).filter((w) => w.symbol !== symbol);
+        fandtes = draft.watchlist.length < før;
+      });
+      if (!fandtes) throw new HttpError(404, 'Den står ikke på din ønskeliste');
+      sendJson(res, 200, { ok: true });
     },
 
     // ---------- profiler ----------
@@ -899,8 +994,18 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const baseCurrency = body.settings?.baseCurrency ? parseCurrency(body.settings.baseCurrency) : undefined;
       const cash = body.settings?.cash !== undefined ? parseNumber(body.settings.cash, 'Kontanter', { min: 0, allowNull: true }) ?? 0 : undefined;
       const settings = body.settings && typeof body.settings === 'object' ? body.settings : {};
+      // Ønskelisten er med i sikkerhedskopien; er den ikke i filen, ryddes den.
+      const watchlist = (Array.isArray(body.watchlist) ? body.watchlist : []).slice(0, MAX_WATCHLIST).map((raw) => ({
+        symbol: parseSymbol(raw?.symbol),
+        name: String(raw?.name || raw?.symbol || '').slice(0, 120),
+        currency: raw?.currency ? parseCurrency(raw.currency) : null,
+        target: parseNumber(raw?.target, 'Ønskekurs', { min: 0, allowNull: true }),
+        note: parseNote(raw?.note),
+        addedAt: typeof raw?.addedAt === 'string' && raw.addedAt.length <= 40 && !Number.isNaN(Date.parse(raw.addedAt)) ? raw.addedAt : now,
+      }));
       const data = await (await own(req)).update((draft) => {
         draft.holdings = holdings;
+        draft.watchlist = watchlist;
         draft.settings.accounts = accounts;
         if (baseCurrency) draft.settings.baseCurrency = baseCurrency;
         if (cash !== undefined) draft.settings.cash = cash;
@@ -963,6 +1068,10 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     ['PUT', /^\/api\/holdings\/(?<id>[^/]+)$/, api.updateHolding],
     ['POST', /^\/api\/holdings\/(?<id>[^/]+)\/trade$/, api.trade],
     ['DELETE', /^\/api\/holdings\/(?<id>[^/]+)$/, api.deleteHolding],
+    ['GET', /^\/api\/watchlist$/, api.watchlist],
+    ['POST', /^\/api\/watchlist$/, api.addWatch],
+    ['PUT', /^\/api\/watchlist\/(?<symbol>[^/]+)$/, api.updateWatch],
+    ['DELETE', /^\/api\/watchlist\/(?<symbol>[^/]+)$/, api.removeWatch],
     ['GET', /^\/api\/settings$/, api.getSettings],
     ['PUT', /^\/api\/settings$/, api.updateSettings],
     ['GET', /^\/api\/backup$/, api.backup],
@@ -985,7 +1094,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   // I browser-tilstand findes intet lager på serveren – disse ruter giver ingen mening.
-  const STORE_ROUTES = /^\/api\/(portfolio|holdings|settings|backup|restore|auth\/(setup|login|change-password|logout-all))(\/|$)/;
+  const STORE_ROUTES = /^\/api\/(portfolio|holdings|settings|watchlist|backup|restore|auth\/(setup|login|change-password|logout-all))(\/|$)/;
   // Ved åben adgang findes der intet login at bruge – men /api/auth/setup skal være åben,
   // for det er dén vej, man lukker siden med en adgangskode.
   const AUTH_ROUTES_WHEN_OPEN = /^\/api\/auth\/(login|change-password|logout-all|logout)$/;
