@@ -253,6 +253,22 @@
   </form>
 </dialog>
 
+<dialog id="dlg-setup">
+  <form method="dialog" id="form-setup-pw" novalidate>
+    <div class="dialog-head"><h2>Opret adgangskode</h2><button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Luk"><svg class="icon"><use href="#i-x"/></svg></button></div>
+    <div class="dialog-body">
+      <p class="dialog-intro">Din side er lige nu åben: alle der kender adressen, kan se og ændre din portefølje. Opretter du en adgangskode, skal der logges ind – på alle enheder, også denne.</p>
+      <div class="field"><label for="setup-new">Adgangskode</label><input class="input" id="setup-new" type="password" autocomplete="new-password"><span class="help">Mindst 8 tegn. En sætning er nem at huske og svær at gætte.</span></div>
+      <div class="field"><label for="setup-repeat">Gentag adgangskode</label><input class="input" id="setup-repeat" type="password" autocomplete="new-password"></div>
+      <div class="form-error" id="setup-error"></div>
+    </div>
+    <div class="dialog-foot">
+      <button type="button" class="btn" data-close>Annullér</button>
+      <button type="submit" class="btn btn-primary">Opret og luk siden</button>
+    </div>
+  </form>
+</dialog>
+
 <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 <input type="file" id="restore-file" accept="application/json,.json" class="hidden">
 <input type="file" id="import-file" accept=".csv,.tsv,.txt,text/csv,text/plain" class="hidden">

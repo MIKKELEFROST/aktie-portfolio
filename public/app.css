@@ -399,6 +399,7 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 .input-group .input { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
 .input-group .addon { display: flex; align-items: center; padding: 0 11px; border: 1px solid var(--border-strong); border-left: none; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; background: var(--surface-2); color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.dialog-intro { margin: 0 0 16px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .form-error { color: var(--neg); font-size: 13px; margin: -6px 0 12px; min-height: 0; }
 .form-error:empty { display: none; }
 .form-summary { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; margin-bottom: 14px; display: flex; justify-content: space-between; gap: 10px; }
