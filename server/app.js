@@ -36,7 +36,21 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   const browserMode = config.storageMode === 'browser';
   // Åben adgang: ingen login. Alle der kender adressen ser og redigerer den samme
   // portefølje. Kræver et lager på serveren, ellers er der intet at dele.
-  const openAccess = Boolean(config.publicAccess) && !browserMode && Boolean(store);
+  // Den gælder kun, så længe der ikke er nogen adgangskode: opretter man én, er siden
+  // lukket fra det øjeblik – også for de øvrige serverless-instanser.
+  const openAccessAllowed = Boolean(config.publicAccess) && !browserMode && Boolean(store);
+  const OPEN_CHECK_TTL = 10_000;
+  let passwordExists = false;
+  let openCheckedAt = 0;
+
+  async function openAccessNow() {
+    if (!openAccessAllowed || config.envPassword || passwordExists) return false;
+    if (Date.now() - openCheckedAt < OPEN_CHECK_TTL) return true;
+    // En adgangskode kan være oprettet fra en anden instans; slås op med jævne mellemrum.
+    if ((await store.getAuth()).passwordHash) passwordExists = true;
+    openCheckedAt = Date.now();
+    return !passwordExists;
+  }
   const apiLimiter = createLoginLimiter({ limit: 240, windowMs: 60_000 });
   let envPasswordHash = null;
 
@@ -47,7 +61,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   async function authState() {
-    if (browserMode || openAccess) return { usesEnvPassword: false, passwordHash: null, setupRequired: false };
+    if (browserMode) return { usesEnvPassword: false, passwordHash: null, setupRequired: false };
     const auth = await store.getAuth();
     const usesEnvPassword = Boolean(config.envPassword);
     const passwordHash = usesEnvPassword ? await getEnvPasswordHash() : auth.passwordHash;
@@ -59,7 +73,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   async function isAuthenticated(req) {
-    if (browserMode || openAccess) return true;
+    if (browserMode || (await openAccessNow())) return true;
     const cookies = parseCookies(req);
     const token = cookies[COOKIE_NAME];
     if (!token) return false;
@@ -69,12 +83,15 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   // Opsætningsnøgle: kræves for at oprette den første adgangskode, medmindre man sidder
   // på selve maskinen (localhost). Forhindrer at en fremmed "kaprer" en ny, åben instans.
-  function setupTokenRequired(req) {
+  // Ved åben adgang er der intet at kapre – alt er allerede synligt for enhver med adressen –
+  // og at oprette en adgangskode gør kun siden mere lukket. Så kræves nøglen ikke.
+  function setupTokenRequired(req, open = false) {
+    if (open) return false;
     return Boolean(config.setupToken) && (config.alwaysRequireSetupToken || !isLoopback(req));
   }
 
-  function checkSetupToken(req, body) {
-    if (!setupTokenRequired(req)) return;
+  function checkSetupToken(req, body, open = false) {
+    if (!setupTokenRequired(req, open)) return;
     const given = Buffer.from(String(body.setupToken ?? ''));
     const expected = Buffer.from(String(config.setupToken));
     if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
@@ -332,13 +349,14 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   const api = {
     async status(req, res) {
       const { setupRequired, usesEnvPassword } = await authState();
+      const open = await openAccessNow();
       sendJson(res, 200, {
         setupRequired,
-        setupTokenRequired: setupRequired && setupTokenRequired(req),
+        setupTokenRequired: setupRequired && setupTokenRequired(req, open),
         usesEnvPassword,
-        authenticated: !setupRequired && (await isAuthenticated(req)),
+        authenticated: open || (!setupRequired && (await isAuthenticated(req))),
         storage: config.storageMode || 'file',
-        access: browserMode ? 'browser' : openAccess ? 'open' : 'login',
+        access: browserMode ? 'browser' : open ? 'open' : 'login',
       });
     },
 
@@ -381,7 +399,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const ip = clientIp(req, { trustProxy: config.trustProxy });
       if (limiter.isBlocked(ip)) throw new HttpError(429, 'For mange forsøg – prøv igen senere', { retryAfter: limiter.retryAfterSeconds(ip) });
       const body = await readJsonBody(req);
-      checkSetupToken(req, body);
+      checkSetupToken(req, body, await openAccessNow());
       const password = String(body.password ?? '');
       if (password.length < MIN_PASSWORD_LENGTH) throw new HttpError(400, `Adgangskoden skal være mindst ${MIN_PASSWORD_LENGTH} tegn`);
       if (body.confirm !== undefined && String(body.confirm) !== password) throw new HttpError(400, 'De to adgangskoder er ikke ens');
@@ -391,6 +409,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         draft.passwordHash = passwordHash;
         draft.createdAt = new Date().toISOString();
       });
+      passwordExists = true; // siden er lukket fra nu af – også hvis den var åben
       await issueSession(req, res, { remember: true });
       sendJson(res, 201, { ok: true });
     },
@@ -713,17 +732,20 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   // I browser-tilstand findes intet lager på serveren – disse ruter giver ingen mening.
   const STORE_ROUTES = /^\/api\/(portfolio|holdings|settings|backup|restore|auth\/(setup|login|change-password|logout-all))(\/|$)/;
-  const AUTH_ROUTES = /^\/api\/auth\/(setup|login|change-password|logout-all|logout)$/;
+  // Ved åben adgang findes der intet login at bruge – men /api/auth/setup skal være åben,
+  // for det er dén vej, man lukker siden med en adgangskode.
+  const AUTH_ROUTES_WHEN_OPEN = /^\/api\/auth\/(login|change-password|logout-all|logout)$/;
 
   async function handleApi(req, res, url) {
     const method = req.method === 'HEAD' ? 'GET' : req.method;
-    if (browserMode || openAccess) {
+    const open = !browserMode && (await openAccessNow());
+    if (browserMode || open) {
       // Uden login beskytter en kald-grænse pr. IP mod misbrug.
       const ip = clientIp(req, { trustProxy: config.trustProxy });
       apiLimiter.recordFailure(ip);
       if (apiLimiter.isBlocked(ip)) throw new HttpError(429, 'For mange kald – prøv igen om lidt', { retryAfter: apiLimiter.retryAfterSeconds(ip) });
       if (browserMode && STORE_ROUTES.test(url.pathname)) throw new HttpError(404, 'Ikke tilgængelig i browser-tilstand (ingen database på serveren)', { code: 'BROWSER_MODE' });
-      if (openAccess && AUTH_ROUTES.test(url.pathname)) throw new HttpError(404, 'Login er slået fra (åben adgang)', { code: 'OPEN_ACCESS' });
+      if (open && AUTH_ROUTES_WHEN_OPEN.test(url.pathname)) throw new HttpError(404, 'Login er slået fra (åben adgang)', { code: 'OPEN_ACCESS' });
     }
     for (const [m, pattern, handler, opts = {}] of routes) {
       const match = url.pathname.match(pattern);
@@ -751,10 +773,11 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   async function handlePage(req, res, url) {
     if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Metoden er ikke tilladt');
     const { setupRequired } = await authState();
-    const authed = !setupRequired && (await isAuthenticated(req));
+    const open = !browserMode && (await openAccessNow());
+    const authed = open || (!setupRequired && (await isAuthenticated(req)));
 
     if (url.pathname === '/login') {
-      if (authed || browserMode || openAccess) return redirect(res, '/');
+      if (authed || browserMode) return redirect(res, '/');
       if (!(await serveStatic(res, VIEWS_DIR, '/login.html'))) throw new HttpError(500, 'login.html mangler');
       return;
     }

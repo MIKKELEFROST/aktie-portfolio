@@ -148,6 +148,7 @@
     usesEnvPassword: false,
     storage: 'server', // 'server' (database eller fil) eller 'browser' (localStorage)
     access: 'login', // 'login' = adgangskode kræves | 'open' = åben adgang for alle med adressen | 'browser'
+    canSetPassword: false, // åben adgang uden adgangskode: siden kan lukkes herfra
     account: storageGet('account', 'all'), // 'all' | 'none' | depot-id
     localImport: null, // data fundet i browserens lager, som kan overføres til kontoen
     allHoldings: [], // alle beholdninger uanset depot-filter (til tilføj/køb til og "Uden depot"-chip)
@@ -826,6 +827,9 @@
       const n = state.localImport.holdings.length;
       out.push(`<div class="banner info">${icon('upload')}<div><b>${n} ${n === 1 ? 'aktie' : 'aktier'} ligger gemt i denne browser.</b> Overfør dem til din konto, så de følger med på alle dine enheder. <span class="banner-actions"><button class="btn btn-sm btn-primary" data-action="import-local">Overfør</button> <button class="btn btn-sm" data-action="import-dismiss">Ikke nu</button></span></div></div>`);
     }
+    if (state.canSetPassword && !storageGet('open-dismissed', '')) {
+      out.push(`<div class="banner info">${icon('lock')}<div><b>Siden er åben for alle, der kender adressen.</b> Opret en adgangskode, hvis kun du skal kunne se og ændre din portefølje. <span class="banner-actions"><button class="btn btn-sm btn-primary" data-action="setup-password">Opret adgangskode</button> <button class="btn btn-sm" data-action="open-dismiss">Ikke nu</button></span></div></div>`);
+    }
     if (state.loadError && !p) {
       out.push(`<div class="banner error">${icon('warn')}<div><b>Kunne ikke hente kurser.</b> ${esc(state.loadError)}. <a href="#" data-action="refresh">Prøv igen</a></div></div>`);
     }
@@ -1250,7 +1254,7 @@
         <div class="card">
           <div class="card-header"><h2>${icon('lock')}Konto</h2></div>
           <div class="setting-row"><div><div class="lbl">Dit navn</div><div class="desc">Bruges i hilsenen på forsiden.</div></div><input class="input" id="set-name" style="max-width:180px" value="${esc(s.displayName || '')}" placeholder="F.eks. Mikkel" maxlength="40" aria-label="Dit navn"></div>
-          ${state.storage === 'browser' ? `<div class="setting-row"><div><div class="lbl">Browser-tilstand – intet login</div><div class="desc">Serveren har ingen database, så dine aktier og indstillinger gemmes kun i denne browser (de sendes til serveren for at få kurser, men gemmes ikke der). Tag jævnligt en sikkerhedskopi under Data. Vil du have, at porteføljen følger med til alle dine enheder, så tilslut en database – se README.</div></div></div>` : state.access === 'open' ? `<div class="setting-row"><div><div class="lbl">Åben adgang – intet login</div><div class="desc">Porteføljen ligger i databasen og vises, så snart siden åbnes – på alle dine enheder og i alle browsere. Det betyder også, at alle der kender adressen, kan se og ændre den. Vil du hellere have login, så sæt <code>DASHBOARD_PASSWORD</code> i Vercel-projektet – se README.</div></div></div>` : `
+          ${state.storage === 'browser' ? `<div class="setting-row"><div><div class="lbl">Browser-tilstand – intet login</div><div class="desc">Serveren har ingen database, så dine aktier og indstillinger gemmes kun i denne browser (de sendes til serveren for at få kurser, men gemmes ikke der). Tag jævnligt en sikkerhedskopi under Data. Vil du have, at porteføljen følger med til alle dine enheder, så tilslut en database – se README.</div></div></div>` : state.access === 'open' ? `<div class="setting-row"><div><div class="lbl">Åben adgang – intet login</div><div class="desc">Porteføljen ligger i databasen og vises, så snart siden åbnes – på alle dine enheder og i alle browsere. Det betyder også, at alle der kender adressen, kan se og ændre den.</div></div><button class="btn btn-sm btn-primary" data-action="setup-password">Opret adgangskode</button></div>` : `
           <div class="setting-row"><div><div class="lbl">Adgangskode</div><div class="desc">${usesEnvPassword ? 'Styres af DASHBOARD_PASSWORD på serveren.' : 'Skift adgangskoden til dashboardet.'}</div></div><button class="btn btn-sm" data-action="change-password" ${usesEnvPassword ? 'disabled' : ''}>Skift adgangskode</button></div>
           <div class="setting-row"><div><div class="lbl">Log ud på alle enheder</div><div class="desc">Ugyldiggør alle aktive logins, også dette.</div></div><button class="btn btn-sm" data-action="logout-all">Log ud overalt</button></div>`}
         </div>
@@ -1958,6 +1962,24 @@
 
   // ---------- Adgangskode ----------
 
+  // Første adgangskode på en åben side. Bagefter kræver alt login – også denne browser,
+  // men opsætningen logger én ind med det samme, så der skal ikke tastes igen.
+  async function submitSetup() {
+    setError('#setup-error', '');
+    const next = $('#setup-new').value;
+    const repeat = $('#setup-repeat').value;
+    if (next.length < 8) return setError('#setup-error', 'Adgangskoden skal være mindst 8 tegn.');
+    if (next !== repeat) return setError('#setup-error', 'De to adgangskoder er ikke ens.');
+    try {
+      await api('POST', '/api/auth/setup', { password: next, confirm: repeat });
+      $('#dlg-setup').close();
+      toast('Adgangskoden er oprettet – siden kræver nu login', 'success');
+      setTimeout(() => location.reload(), 900);
+    } catch (err) {
+      setError('#setup-error', err.message);
+    }
+  }
+
   async function submitPassword() {
     setError('#pw-error', '');
     const current = $('#pw-current').value;
@@ -2168,6 +2190,16 @@
       case 'delete':
         e.stopPropagation();
         return deleteHolding(el.dataset.id);
+      case 'setup-password':
+        setError('#setup-error', '');
+        $('#form-setup-pw').reset();
+        $('#dlg-setup').showModal();
+        setTimeout(() => $('#setup-new').focus(), 50);
+        break;
+      case 'open-dismiss':
+        storageSet('open-dismissed', '1');
+        render();
+        break;
       case 'change-password':
         $('#form-password').reset();
         setError('#pw-error', '');
@@ -2359,6 +2391,7 @@
   $('#edit-delete').addEventListener('click', () => { $('#dlg-edit').close(); deleteHolding(edit.id); });
   $('#form-trade').addEventListener('submit', (e) => { e.preventDefault(); submitTrade(); });
   $('#form-password').addEventListener('submit', (e) => { e.preventDefault(); submitPassword(); });
+  $('#form-setup-pw').addEventListener('submit', (e) => { e.preventDefault(); submitSetup(); });
   $('#form-import').addEventListener('submit', (e) => { e.preventDefault(); submitImport(); });
   $('#dlg-confirm form').addEventListener('submit', (e) => { e.preventDefault(); $('#dlg-confirm').close('ok'); });
 
@@ -2393,6 +2426,7 @@
       state.usesEnvPassword = status.usesEnvPassword;
       state.storage = status.storage === 'browser' ? 'browser' : 'server';
       state.access = status.access || (state.storage === 'browser' ? 'browser' : 'login');
+      state.canSetPassword = state.access === 'open' && status.setupRequired === true;
       document.body.classList.toggle('browser-mode', state.storage === 'browser');
       document.body.classList.toggle('open-access', state.access === 'open');
       // Ved åben adgang findes der intet login at sende brugeren til.

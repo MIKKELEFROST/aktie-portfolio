@@ -57,9 +57,13 @@ Appen kan køre som én serverless-funktion på [Vercel](https://vercel.com):
    - **Supabase** (Postgres): opret et projekt på [supabase.com](https://supabase.com), kør SQL'en i [`docs/database.md`](docs/database.md), og sæt `SUPABASE_URL` og `SUPABASE_KEY` under *Settings → Environment Variables*.
 3. **Redeploy** (*Deployments → ⋯ → Redeploy*), og åbn projektets URL.
 
-Med en database og ingen `DASHBOARD_PASSWORD` er siden **åben**: porteføljen vises, så snart adressen åbnes – på alle enheder og i alle browsere, uden login. Det er også prisen: alle der kender adressen, kan se og ændre den. Vil du have login i stedet, så sæt:
+Med en database og ingen adgangskode er siden **åben**: porteføljen vises, så snart adressen åbnes – på alle enheder og i alle browsere, uden login. Det er også prisen: alle der kender adressen, kan se og ændre den.
 
-- `DASHBOARD_PASSWORD` – din adgangskode, mindst 8 tegn. Kræves, fordi hver serverless-instans er sin egen proces og derfor ikke kan dele en midlertidig opsætningsnøgle.
+Vil du have login, kan du **oprette adgangskoden direkte i dashboardet**: der står et felt øverst på forsiden (og en knap under *Indstillinger → Konto*). Fra det øjeblik kræver siden login overalt – også i den browser, du sad i, men du bliver logget ind med det samme, så du ikke skal taste igen. Der er ingen opsætningsnøgle at finde frem: så længe siden er åben, er der ikke noget skjult at beskytte, og det at sætte en adgangskode kan kun lukke den mere.
+
+Alternativt kan du sætte det som miljøvariabler i stedet:
+
+- `DASHBOARD_PASSWORD` – fast adgangskode. Så er siden aldrig åben, heller ikke det første øjeblik efter en deploy.
 - `SESSION_SECRET` – en lang tilfældig streng, fx fra `openssl rand -hex 32`. Valgfri, men uden den logges du ud, når databasen nulstilles.
 
 Har du allerede brugt siden i browser-tilstand, spørger den, om dine hidtidige aktier skal overføres til databasen. Depoter matches på navn, og aktier der allerede findes i samme depot springes over, så en gentagelse ikke dublerer noget. En kopi bliver liggende i browseren som sikkerhedsnet.
