@@ -38,6 +38,7 @@ export function computePosition(holding, quoteResult, fxResult) {
     quantity,
     avgPrice,
     note: holding.note || '',
+    accountId: holding.accountId ?? null,
     addedAt: holding.addedAt || null,
     updatedAt: holding.updatedAt || null,
   };

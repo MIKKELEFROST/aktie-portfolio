@@ -253,7 +253,9 @@ body.private .amount { filter: blur(7px); user-select: none; transition: filter 
 .grid { display: grid; gap: 16px; }
 .grid-kpi { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 16px; }
 .grid-2 { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); margin-bottom: 16px; }
-.stack { display: flex; flex-direction: column; gap: 16px; }
+.grid > * { min-width: 0; }
+.stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.stack > * { min-width: 0; }
 
 /* KPI */
 .kpi { padding: 16px 20px; }
@@ -342,7 +344,7 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 
 .alloc-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--border); margin: 6px 0 12px; }
 .alloc-bar span { display: block; height: 100%; min-width: 2px; }
-.alloc-legend { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; font-size: 12px; }
+.alloc-legend { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 14px; font-size: 12px; }
 .alloc-legend li { display: flex; align-items: center; gap: 7px; list-style: none; min-width: 0; }
 .alloc-legend ul, ul.alloc-legend { margin: 0; padding: 0; }
 .alloc-legend .swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
@@ -352,12 +354,12 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 
 /* ---------- bevægelser ---------- */
 
-.movers { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.movers { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
 .movers h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-bottom: 8px; }
 .movers ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .movers li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
 .movers li:hover { background: var(--surface-2); }
-.movers .sym { font-weight: 600; }
+.movers .sym { font-weight: 600; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .movers .nm { font-size: 11px; color: var(--muted); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .movers .mover-l { min-width: 0; flex: 1; }
 .movers .cell-2 { flex: none; white-space: nowrap; }
@@ -367,7 +369,7 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 .range-pills { display: flex; gap: 2px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 2px; }
 .range-pills button { border: none; background: transparent; padding: 3px 9px; border-radius: 6px; font-size: 12px; font-weight: 500; color: var(--muted); }
 .range-pills button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
-.chart-box { position: relative; height: 240px; }
+.chart-box { position: relative; height: 240px; min-width: 0; }
 .chart-box svg { width: 100%; height: 100%; display: block; overflow: visible; }
 .chart-box .chart-msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; text-align: center; padding: 20px; }
 .chart-tip {
@@ -503,8 +505,8 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 
 @media (max-width: 1100px) {
   .grid-kpi { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .grid-2 { grid-template-columns: 1fr; }
-  .settings-grid { grid-template-columns: 1fr; }
+  .grid-2 { grid-template-columns: minmax(0, 1fr); }
+  .settings-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* Tablet: sidebar kun med ikoner */
@@ -559,8 +561,8 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
   .hcard .r2 { text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; }
   .hcard-total { display: flex; justify-content: space-between; padding: 12px 0 4px; font-weight: 600; border-top: 2px solid var(--border-strong); }
 
-  .movers { grid-template-columns: 1fr; }
-  .alloc-legend { grid-template-columns: 1fr; }
+  .movers { grid-template-columns: minmax(0, 1fr); }
+  .alloc-legend { grid-template-columns: minmax(0, 1fr); }
   .panel { width: 100vw; top: auto; max-height: 90vh; border-left: none; border-top: 1px solid var(--border); border-radius: 16px 16px 0 0; transform: translateY(100%); }
   .panel.show { transform: translateY(0); }
   .toasts { left: 14px; right: 14px; bottom: calc(var(--tabbar-h) + 12px); }
@@ -578,6 +580,13 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 /* ---------- tilføjelser ---------- */
 .stale, td.stale, td.stale .sub, .stale .pos, .stale .neg { color: var(--muted) !important; }
 body.browser-mode .only-server { display: none !important; }
+.account-bar { display: flex; gap: 8px; flex-wrap: wrap; margin: -6px 0 18px; }
+.chip-btn.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.chip-account { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
+.notice.info { background: var(--accent-soft); border-color: transparent; }
+.account-row { gap: 10px; }
+.account-row .input { max-width: 260px; }
+select.input { appearance: auto; }
 table.holdings tbody tr:focus-visible, .hcard:focus-visible, .movers li:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 table.holdings th:focus-visible { outline-offset: -2px; }
 .status-pill.warn .dot { background: var(--warn); }

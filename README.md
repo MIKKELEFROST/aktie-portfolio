@@ -12,7 +12,8 @@ Et personligt, selv-hostet dashboard til din aktieportefølje. Du logger ind med
 - **Fordeling** pr. aktie og pr. valuta samt **dagens største bevægelser**.
 - **Detaljepanel** pr. aktie: dagens interval, 52-ugers interval, din position, valutakurs.
 - **Tilføj aktier via søgning** ("novo", "mærsk", "apple" …) – danske børser vises først. Kurs og valuta hentes automatisk.
-- **Køb til / Sælg** med automatisk vægtet gennemsnitskurs. Redigér og slet.
+- **Køb til / Sælg** med automatisk vægtet gennemsnitskurs. Tilføjer du en aktie, du allerede ejer, lægges købet oveni – du skriver bare antal og kurs. Redigér og slet.
+- **Depoter**: opret fx Månedsopsparing og Pension, knyt hvert køb til et depot, og se alt samlet eller ét depot ad gangen. Samme aktie kan ligge i flere depoter.
 - **Flere valutaer**: DKK, USD, EUR, GBP (pence omregnes automatisk) m.fl. – alt summeres i din basisvaluta med dagens valutakurs.
 - **Kontanter**: valgfrit beløb, så "Porteføljeværdi" matcher dit depot.
 - **Live opdatering** hvert minut mens en børs er åben (pause når fanen er skjult).
@@ -134,14 +135,15 @@ Alle `/api/*`-kald kræver login (cookie). Muterende kald skal sende `Content-Ty
 
 | Metode | Sti | |
 |---|---|---|
-| `GET` | `/api/portfolio` | Alle positioner med live kurser og totaler |
-| `GET` | `/api/portfolio/history?range=1y` | Porteføljens værdi over tid |
+| `GET` | `/api/portfolio?account=` | Alle positioner med live kurser og totaler (`account` = depot-id, `none` eller tom for alle) |
+| `GET` | `/api/portfolio/history?range=1y&account=` | Porteføljens værdi over tid |
+| `POST` | `/api/compute` · `/api/compute/history` | Samme beregninger ud fra beholdninger sendt i kaldet (bruges i browser-tilstand) |
 | `GET` | `/api/search?q=novo` | Søg efter aktier/ETF'er |
 | `GET` | `/api/quote/:symbol` | Kurs for ét symbol |
 | `GET/POST` | `/api/holdings` | Liste / tilføj |
 | `PUT/DELETE` | `/api/holdings/:id` | Redigér / slet |
 | `POST` | `/api/holdings/:id/trade` | `{ type: "buy"\|"sell", quantity, price }` |
-| `GET/PUT` | `/api/settings` | Basisvaluta, navn, kontanter, decimaler |
+| `GET/PUT` | `/api/settings` | Basisvaluta, navn, kontanter, decimaler, depoter (`accounts`) |
 | `GET` | `/api/backup` · `POST /api/restore` | Sikkerhedskopi |
 | `GET` | `/api/health` | Sundhedstjek (kræver ikke login) |
 | `POST` | `/api/auth/setup` · `login` · `logout` · `change-password` · `logout-all` | Auth |

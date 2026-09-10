@@ -147,7 +147,14 @@
     lastManual: 0,
     usesEnvPassword: false,
     storage: 'server', // 'server' (fil/redis med login) eller 'browser' (localStorage, intet login)
+    account: storageGet('account', 'all'), // 'all' | 'none' | depot-id
+    allHoldings: [], // alle beholdninger uanset depot-filter (til tilføj/køb til og "Uden depot"-chip)
   };
+
+  const accounts = () => (Array.isArray(state.settings.accounts) ? state.settings.accounts : []);
+  const accountName = (id) => (id ? accounts().find((a) => a.id === id)?.name || null : null);
+  const accountQuery = () => (state.account !== 'all' ? `?account=${encodeURIComponent(state.account)}` : '');
+  const sameSlot = (h, symbol, accountId) => h.symbol === symbol && (h.accountId ?? null) === (accountId ?? null);
 
   // ======================================================================
   // API
@@ -200,10 +207,34 @@
       const raw = localStorage.getItem(LOCAL_KEY);
       if (raw) {
         const d = JSON.parse(raw);
-        if (d && Array.isArray(d.holdings)) return { version: 1, settings: { baseCurrency: 'DKK', ...(d.settings || {}) }, holdings: d.holdings };
+        if (d && Array.isArray(d.holdings)) {
+          const settings = { baseCurrency: 'DKK', accounts: [], ...(d.settings || {}) };
+          if (!Array.isArray(settings.accounts)) settings.accounts = [];
+          for (const h of d.holdings) if (h.accountId === undefined) h.accountId = null;
+          return { version: 1, settings, holdings: d.holdings };
+        }
       }
     } catch {}
-    return { version: 1, settings: { baseCurrency: 'DKK' }, holdings: [] };
+    return { version: 1, settings: { baseCurrency: 'DKK', accounts: [] }, holdings: [] };
+  }
+
+  function localAccountId(value, list) {
+    if (value === null || value === undefined || value === '') return null;
+    if (!list.some((a) => a.id === String(value))) throw localErr(400, 'Ukendt depot – opret det først under Indstillinger');
+    return String(value);
+  }
+
+  function localAccounts(list) {
+    if (!Array.isArray(list)) throw localErr(400, 'Depoter skal være en liste');
+    if (list.length > 20) throw localErr(400, 'Højst 20 depoter');
+    const names = new Set();
+    return list.map((raw, i) => {
+      const name = String(raw?.name ?? '').trim().slice(0, 40);
+      if (!name) throw localErr(400, `Depot nr. ${i + 1} mangler et navn`);
+      if (names.has(name.toLowerCase())) throw localErr(400, `Depotet "${name}" findes flere gange`);
+      names.add(name.toLowerCase());
+      return { id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newLocalId(), name };
+    });
   }
 
   function localSave(data) {
@@ -216,7 +247,7 @@
 
   const localErr = (status, message, extra = {}) => Object.assign(new Error(message), { status, data: extra });
   const round6 = (n) => Math.round(n * 1e6) / 1e6;
-  const pubHolding = (h) => ({ id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', addedAt: h.addedAt || null, updatedAt: h.updatedAt || null });
+  const pubHolding = (h) => ({ id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, addedAt: h.addedAt || null, updatedAt: h.updatedAt || null });
   const newLocalId = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
 
   function localQty(value) {
@@ -243,8 +274,9 @@
 
     if (p === '/api/auth/status') return { authenticated: true, setupRequired: false, setupTokenRequired: false, usesEnvPassword: false, storage: 'browser' };
     if (p.startsWith('/api/auth/')) return { ok: true };
-    if (p === '/api/portfolio' && method === 'GET') return serverApi('POST', '/api/compute', { holdings: data.holdings, settings: data.settings });
-    if (p === '/api/portfolio/history') return serverApi('POST', '/api/compute/history', { holdings: data.holdings, settings: data.settings, range: url.searchParams.get('range') || '1y' });
+    const account = url.searchParams.get('account') || '';
+    if (p === '/api/portfolio' && method === 'GET') return serverApi('POST', '/api/compute', { holdings: data.holdings, settings: data.settings, account });
+    if (p === '/api/portfolio/history') return serverApi('POST', '/api/compute/history', { holdings: data.holdings, settings: data.settings, range: url.searchParams.get('range') || '1y', account });
     if (p === '/api/holdings' && method === 'GET') return { holdings: data.holdings.map(pubHolding), settings: data.settings };
 
     if (p === '/api/holdings' && method === 'POST') {
@@ -252,8 +284,9 @@
       if (!/^[A-Z0-9^][A-Z0-9.\-=^]{0,24}$/.test(symbol)) throw localErr(400, 'Ugyldigt symbol');
       const quantity = localQty(body.quantity);
       const avgPrice = localPrice(body.avgPrice);
-      const existing = data.holdings.find((h) => h.symbol === symbol);
-      if (existing) throw localErr(409, `${existing.name || symbol} er allerede i porteføljen`, { id: existing.id });
+      const accountId = localAccountId(body.accountId, data.settings.accounts);
+      const existing = data.holdings.find((h) => sameSlot(h, symbol, accountId));
+      if (existing) throw localErr(409, `${existing.name || symbol} er allerede i ${accountId ? 'depotet' : 'porteføljen'} – brug "Køb til"`, { id: existing.id });
       if (data.holdings.length >= 100) throw localErr(409, 'Porteføljen kan højst indeholde 100 aktier i browser-tilstand');
       let quote = null;
       let warning = null;
@@ -264,7 +297,7 @@
         warning = `Kunne ikke hente kurs lige nu (${err.message}). Aktien er tilføjet alligevel.`;
       }
       if (quote?.type && !HOLDABLE.includes(quote.type)) throw localErr(400, "Kun aktier, ETF'er og fonde kan tilføjes");
-      const holding = { id: newLocalId(), symbol, name: quote ? quote.name : String(body.name || symbol).slice(0, 120), currency: quote ? quote.currency : null, quantity, avgPrice, note: String(body.note || '').trim().slice(0, 200), addedAt: now, updatedAt: now };
+      const holding = { id: newLocalId(), symbol, name: quote ? quote.name : String(body.name || symbol).slice(0, 120), currency: quote ? quote.currency : null, quantity, avgPrice, note: String(body.note || '').trim().slice(0, 200), accountId, addedAt: now, updatedAt: now };
       data.holdings.push(holding);
       localSave(data);
       return { holding: pubHolding(holding), warning };
@@ -302,6 +335,11 @@
         if (body.quantity !== undefined) h.quantity = localQty(body.quantity);
         if (body.avgPrice !== undefined) h.avgPrice = localPrice(body.avgPrice);
         if (body.note !== undefined) h.note = String(body.note ?? '').trim().slice(0, 200);
+        if (body.accountId !== undefined) {
+          const accountId = localAccountId(body.accountId, data.settings.accounts);
+          if (data.holdings.some((x) => x !== h && sameSlot(x, h.symbol, accountId))) throw localErr(409, `${h.name || h.symbol} findes allerede i det depot – brug "Køb til" dér i stedet`);
+          h.accountId = accountId;
+        }
         h.updatedAt = now;
         localSave(data);
         return { holding: pubHolding(h) };
@@ -323,6 +361,11 @@
       if (body.displayName !== undefined) data.settings.displayName = String(body.displayName ?? '').trim().slice(0, 40);
       if (body.showDecimals !== undefined) data.settings.showDecimals = Boolean(body.showDecimals);
       if (body.cash !== undefined) data.settings.cash = body.cash == null ? 0 : localPrice(body.cash) ?? 0;
+      if (body.accounts !== undefined) {
+        data.settings.accounts = localAccounts(body.accounts);
+        const ids = new Set(data.settings.accounts.map((a) => a.id));
+        for (const h of data.holdings) if (h.accountId && !ids.has(h.accountId)) h.accountId = null;
+      }
       localSave(data);
       return { settings: data.settings };
     }
@@ -331,15 +374,19 @@
       if (!Array.isArray(body.holdings)) throw localErr(400, 'Filen indeholder ingen "holdings"-liste');
       if (body.holdings.length > 100) throw localErr(400, 'Højst 100 aktier kan gendannes i browser-tilstand');
       const seen = new Set();
+      const restoredAccounts = body.settings && Array.isArray(body.settings.accounts) ? localAccounts(body.settings.accounts) : [];
       const holdings = body.holdings.map((raw, i) => {
         if (!raw || typeof raw !== 'object') throw localErr(400, `Ugyldig post (linje ${i + 1})`);
         const symbol = String(raw.symbol || '').trim().toUpperCase();
         if (!/^[A-Z0-9^][A-Z0-9.\-=^]{0,24}$/.test(symbol)) throw localErr(400, `Ugyldigt symbol (linje ${i + 1})`);
-        if (seen.has(symbol)) throw localErr(400, `Symbolet ${symbol} optræder flere gange (linje ${i + 1})`);
-        seen.add(symbol);
-        return { id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newLocalId(), symbol, name: String(raw.name || symbol).slice(0, 120), currency: raw.currency ? String(raw.currency).toUpperCase().slice(0, 3) : null, quantity: localQty(raw.quantity), avgPrice: localPrice(raw.avgPrice), note: String(raw.note || '').trim().slice(0, 200), addedAt: typeof raw.addedAt === 'string' ? raw.addedAt : now, updatedAt: now };
+        const accountId = localAccountId(raw.accountId, restoredAccounts);
+        const slot = `${symbol}@${accountId ?? ''}`;
+        if (seen.has(slot)) throw localErr(400, `Symbolet ${symbol} optræder flere gange i samme depot (linje ${i + 1})`);
+        seen.add(slot);
+        return { id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newLocalId(), symbol, accountId, name: String(raw.name || symbol).slice(0, 120), currency: raw.currency ? String(raw.currency).toUpperCase().slice(0, 3) : null, quantity: localQty(raw.quantity), avgPrice: localPrice(raw.avgPrice), note: String(raw.note || '').trim().slice(0, 200), addedAt: typeof raw.addedAt === 'string' ? raw.addedAt : now, updatedAt: now };
       });
       data.holdings = holdings;
+      data.settings.accounts = restoredAccounts;
       if (body.settings && typeof body.settings === 'object') {
         const s = body.settings;
         if (s.baseCurrency && /^[A-Za-z]{3}$/.test(String(s.baseCurrency))) data.settings.baseCurrency = String(s.baseCurrency).toUpperCase();
@@ -378,10 +425,15 @@
     state.lastAttempt = Date.now();
     if (!silent) setRefreshing(true);
     try {
-      const data = await api('GET', '/api/portfolio');
+      const data = await api('GET', `/api/portfolio${accountQuery()}`);
       state.portfolio = data;
       state.pending = null;
       state.settings = data.settings || {};
+      // Et valgt depot, der ikke findes længere (slettet fra en anden enhed) → tilbage til "Alle".
+      if (state.account !== 'all' && state.account !== 'none' && !accounts().some((a) => a.id === state.account)) {
+        setAccount('all', { reload: true });
+        return;
+      }
       state.baseCurrency = data.baseCurrency;
       state.loadError = null;
       state.failures = 0;
@@ -399,15 +451,30 @@
   }
 
   async function afterMutation() {
-    await loadPortfolio({ silent: true, fresh: true });
+    await Promise.all([loadPortfolio({ silent: true, fresh: true }), loadAllHoldings()]);
     invalidateHistory();
+  }
+
+  async function loadAllHoldings() {
+    try {
+      const data = await api('GET', '/api/holdings');
+      state.allHoldings = data.holdings || [];
+    } catch {}
+  }
+
+  function setAccount(id, { reload = true } = {}) {
+    state.account = id;
+    storageSet('account', id);
+    state.history = {};
+    render();
+    if (reload) loadPortfolio({ fresh: true });
   }
 
   const historyReq = {};
 
   // Ændrer beholdningen sig (også fra en anden enhed), skal grafen beregnes igen.
   function historyKey() {
-    return `${state.baseCurrency}|${positions().map((p) => `${p.symbol}:${p.quantity}`).sort().join(',')}`;
+    return `${state.baseCurrency}|${state.account}|${positions().map((p) => `${p.symbol}:${p.quantity}`).sort().join(',')}`;
   }
 
   async function loadHistory(range, { force = false } = {}) {
@@ -419,7 +486,7 @@
     let result;
     try {
       const key = historyKey();
-      result = await api('GET', `/api/portfolio/history?range=${encodeURIComponent(range)}`);
+      result = await api('GET', `/api/portfolio/history?range=${encodeURIComponent(range)}${state.account !== 'all' ? `&account=${encodeURIComponent(state.account)}` : ''}`);
       result.fetchedAt = Date.now();
       result.key = key;
     } catch (err) {
@@ -618,6 +685,20 @@
     </div>`;
   }
 
+  // Chips til at vælge depot (vises kun når der findes depoter).
+  function accountBar() {
+    const list = accounts();
+    if (!list.length) return '';
+    const hasUnassigned = state.allHoldings.some((h) => !h.accountId);
+    const chip = (id, label) => `<button type="button" class="chip-btn${state.account === id ? ' active' : ''}" data-account="${esc(id)}" aria-pressed="${state.account === id}">${esc(label)}</button>`;
+    return `<div class="account-bar" role="group" aria-label="Depot">${chip('all', 'Alle depoter')}${list.map((a) => chip(a.id, a.name)).join('')}${hasUnassigned || state.account === 'none' ? chip('none', 'Uden depot') : ''}</div>`;
+  }
+
+  function currentAccountLabel() {
+    if (state.account === 'none') return 'Uden depot';
+    return accountName(state.account) || '';
+  }
+
   function headerActions({ add = true } = {}) {
     return `
       <button class="btn btn-ghost btn-icon" data-action="privacy" title="${state.privacy ? 'Vis beløb' : 'Skjul beløb'}" aria-label="${state.privacy ? 'Vis beløb' : 'Skjul beløb'}" aria-pressed="${state.privacy}">${icon(state.privacy ? 'eye-off' : 'eye')}</button>
@@ -677,7 +758,7 @@
       const excl = (n, what) => (n ? `<span class="muted">· ekskl. ${n} ${n === 1 ? 'aktie' : 'aktier'} ${what}</span>` : '');
       const lastTrade = p.positions.map((x) => x.marketTime).filter(Boolean).sort().at(-1);
       kpis = [
-        kpi('Porteføljeværdi', `<span class="amount">${fmtAmount(t.totalValueBase ?? t.valueBase)}</span>`,
+        kpi(state.account === 'all' ? 'Porteføljeværdi' : `Værdi · ${esc(currentAccountLabel())}`, `<span class="amount">${fmtAmount(t.totalValueBase ?? t.valueBase)}</span>`,
           `<span>${t.positionCount} ${t.positionCount === 1 ? 'aktie' : 'aktier'}${t.cashBase ? ` · heraf kontanter <span class="amount">${fmtAmount(t.cashBase)}</span>` : ''}</span>${excl(noQuote, 'uden kurs')}`,
           'kpi-hero', 'Antal × kurs for alle aktier, omregnet til basisvalutaen med dagens valutakurs' + (t.cashBase ? ', plus kontanter' : '')),
         kpi(todayLabel, `<span class="amount ${signClass(t.dayChangeBase)}">${fmtAmount(t.dayChangeBase, state.baseCurrency, { sign: true })}</span>`,
@@ -692,6 +773,7 @@
     const empty = p ? p.positions.length === 0 : state.pending ? state.pending.length === 0 : false;
     return `
       ${pageHeader(greeting(), updatedSub(), headerActions())}
+      ${accountBar()}
       ${banners()}
       <div class="grid grid-kpi">${kpis}</div>
       ${empty ? emptyState() : `
@@ -805,7 +887,7 @@
       ? `<line x1="${padL}" x2="${W - padR}" y1="${y(invested).toFixed(1)}" y2="${y(invested).toFixed(1)}" stroke="var(--chart-invested)" stroke-width="1.5" stroke-dasharray="5 4"/>`
       : '';
     const last = points[points.length - 1];
-    box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" width="${W}" height="${H}">
+    box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
       <defs><linearGradient id="chart-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--chart-line)" stop-opacity="0.22"/><stop offset="1" stop-color="var(--chart-line)" stop-opacity="0"/></linearGradient></defs>
       ${gridLines.join('')}
       <path d="${area}" fill="url(#chart-grad)"/>
@@ -858,8 +940,21 @@
 
   // ---------- Fordeling ----------
 
+  // Samme aktie i flere depoter lægges sammen i fordeling og dagens bevægelser.
+  function groupedBySymbol() {
+    const groups = new Map();
+    for (const p of positions()) {
+      const g = groups.get(p.symbol) || { symbol: p.symbol, name: p.name || p.symbol, currency: p.currency, weight: null, valueBase: null, dayChangeBase: null, dayChangePercent: p.dayChangePercent };
+      if (isNum(p.weight)) g.weight = (g.weight || 0) + p.weight;
+      if (isNum(p.valueBase)) g.valueBase = (g.valueBase || 0) + p.valueBase;
+      if (isNum(p.dayChangeBase)) g.dayChangeBase = (g.dayChangeBase || 0) + p.dayChangeBase;
+      groups.set(p.symbol, g);
+    }
+    return [...groups.values()];
+  }
+
   function allocationCardInner() {
-    const pos = positions().filter((p) => isNum(p.weight)).sort((a, b) => b.weight - a.weight);
+    const pos = groupedBySymbol().filter((p) => isNum(p.weight)).sort((a, b) => b.weight - a.weight);
     if (!pos.length) return `<div class="card-header"><h2>Fordeling</h2></div><p class="muted">Ingen kurser endnu.</p>`;
     const top = pos.slice(0, 6);
     const rest = pos.slice(6);
@@ -880,12 +975,12 @@
   // ---------- Dagens bevægelser ----------
 
   function moversCardInner() {
-    const pos = positions().filter((p) => isNum(p.dayChangePercent));
+    const pos = groupedBySymbol().filter((p) => isNum(p.dayChangePercent));
     if (pos.length < 2) return `<div class="card-header"><h2>Dagens bevægelser</h2></div><p class="muted">Tilføj flere aktier for at se dagens største bevægelser.</p>`;
     const sorted = [...pos].sort((a, b) => b.dayChangePercent - a.dayChangePercent);
     const up = sorted.filter((p) => p.dayChangePercent > 0).slice(0, 3);
     const down = sorted.filter((p) => p.dayChangePercent < 0).reverse().slice(0, 3);
-    const li = (p) => `<li data-action="open" data-symbol="${esc(p.symbol)}"><span class="mover-l"><span class="sym">${esc(p.symbol)}</span><span class="nm">${esc(p.name || p.symbol)}</span></span><span class="cell-2"><span class="${signClass(p.dayChangePercent)}">${fmtPct(p.dayChangePercent)}</span><span class="sub amount">${fmtAmount(p.dayChangeBase, state.baseCurrency, { sign: true })}</span></span></li>`;
+    const li = (p) => `<li data-action="open" data-symbol="${esc(p.symbol)}" title="${esc(p.name || p.symbol)}"><span class="mover-l"><span class="sym">${esc(p.name || p.symbol)}</span><span class="nm">${esc(p.symbol)}</span></span><span class="cell-2"><span class="${signClass(p.dayChangePercent)}">${fmtPct(p.dayChangePercent)}</span><span class="sub amount">${fmtAmount(p.dayChangeBase, state.baseCurrency, { sign: true })}</span></span></li>`;
     return `<div class="card-header"><h2>Dagens bevægelser</h2></div>
       <div class="movers">
         <div><h3>Stiger mest</h3>${up.length ? `<ul>${up.map(li).join('')}</ul>` : '<p class="muted small">Ingen stigninger i dag.</p>'}</div>
@@ -935,7 +1030,7 @@
     return `<div class="stock-cell">
       <span class="stock-avatar">${esc(initials(p.symbol))}</span>
       <div><div class="stock-name">${warn}${esc(p.name || p.symbol)}</div>
-      <div class="stock-meta">${esc(p.symbol)}${p.currency ? ` <span class="chip">${esc(p.currency)}</span>` : ''}${dot}${p.exchange ? ` <span>${esc(p.exchange)}</span>` : ''}</div></div>
+      <div class="stock-meta">${esc(p.symbol)}${p.currency ? ` <span class="chip">${esc(p.currency)}</span>` : ''}${dot}${p.exchange ? ` <span>${esc(p.exchange)}</span>` : ''}${p.accountName && state.account === 'all' ? ` <span class="chip chip-account">${esc(p.accountName)}</span>` : ''}</div></div>
     </div>`;
   }
 
@@ -1008,7 +1103,7 @@
       : `<div class="hcard" data-action="open" data-symbol="${esc(p.symbol)}" tabindex="0" role="button">
       <div class="l1">${p.status !== 'ok' ? '<span class="warn-dot"></span>' : ''}${esc(p.name || p.symbol)}</div>
       <div class="r1 amount">${fmtAmount(p.valueBase)}</div>
-      <div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk. · ${isNum(p.price) ? `${fmtPrice(p.price)} ${esc(p.currency || '')}` : 'ingen kurs'}</div>
+      <div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk. · ${isNum(p.price) ? `${fmtPrice(p.price)} ${esc(p.currency || '')}` : 'ingen kurs'}${p.accountName && state.account === 'all' ? ` · ${esc(p.accountName)}` : ''}</div>
       <div class="r2"><span class="${p.status === 'stale' ? 'stale' : signClass(p.dayChangePercent)}">${arrow(p.dayChangePercent)}${fmtPct(p.dayChangePercent)}</span> <span class="muted">·</span> <span class="muted small">Afkast</span> <span class="${signClass(p.gainPercent)}">${fmtPct(p.gainPercent)}</span></div>
     </div>`).join('');
     const cardTotal = t && !pendingOnly ? `<div class="hcard-total"><span>I alt</span><span class="amount">${fmtAmount(t.valueBase)}</span></div>` : '';
@@ -1023,6 +1118,7 @@
     const empty = p ? p.positions.length === 0 : state.pending ? state.pending.length === 0 : false;
     return `
       ${pageHeader('Beholdninger', updatedSub(), headerActions())}
+      ${accountBar()}
       ${banners()}
       ${empty ? emptyState() : `
       <div class="card">
@@ -1059,6 +1155,13 @@
           <div class="setting-row"><div><div class="lbl">Kontanter</div><div class="desc">Uinvesterede penge i depotet. Lægges til porteføljeværdien.</div></div><div class="input-group" style="max-width:180px"><input class="input n" id="set-cash" inputmode="decimal" value="${s.cash ? fmtRaw(s.cash) : ''}" placeholder="0" aria-label="Kontanter"><span class="addon">${esc(state.baseCurrency)}</span></div></div>
           <div class="setting-row"><div><div class="lbl">Vis ører på beløb</div><div class="desc">Vis to decimaler på alle beløb i basisvalutaen.</div></div><label class="switch"><input type="checkbox" id="set-decimals" ${s.showDecimals ? 'checked' : ''} aria-label="Vis ører på beløb"><span class="track"></span></label></div>
           <div class="setting-row"><div><div class="lbl">Skjul beløb</div><div class="desc">Slører beløb, når andre kigger med. Procenter vises stadig.</div></div><label class="switch"><input type="checkbox" id="set-privacy" ${state.privacy ? 'checked' : ''} aria-label="Skjul beløb"><span class="track"></span></label></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>${icon('briefcase')}Depoter</h2><span class="hint">Fx Månedsopsparing, Pension</span></div>
+          <p class="muted small" style="margin-bottom:10px">Knyt dine køb til et depot og se dem samlet eller hver for sig. Samme aktie kan ligge i flere depoter.</p>
+          ${accounts().length ? accounts().map((a) => `<div class="setting-row account-row" data-id="${esc(a.id)}"><input class="input account-name" value="${esc(a.name)}" maxlength="40" aria-label="Depotnavn" data-id="${esc(a.id)}"><span class="muted small">${state.allHoldings.filter((h) => h.accountId === a.id).length} aktier</span><button class="btn btn-sm btn-ghost" data-action="account-delete" data-id="${esc(a.id)}" aria-label="Slet ${esc(a.name)}">${icon('trash', 'icon icon-sm')}</button></div>`).join('') : '<p class="muted small">Ingen depoter endnu.</p>'}
+          <div class="setting-row"><div class="input-group" style="flex:1"><input class="input" id="account-new" placeholder="Nyt depot, fx Pension" maxlength="40" aria-label="Nyt depot"><button class="addon addon-btn" data-action="account-add" type="button">Tilføj</button></div></div>
         </div>
 
         <div class="card">
@@ -1123,7 +1226,7 @@
       <div class="panel-head">
         <div>
           <h2>${esc(p.name || p.symbol)}</h2>
-          <div class="stock-meta">${esc(p.symbol)}${p.exchange ? ` · ${esc(p.exchange)}` : ''}${cur ? ` <span class="chip">${esc(cur)}</span>` : ''}${p.marketOpen === true ? ' <span class="market-dot open"></span> Åben' : p.marketOpen === false ? ' <span class="market-dot"></span> Lukket' : ''}</div>
+          <div class="stock-meta">${esc(p.symbol)}${p.exchange ? ` · ${esc(p.exchange)}` : ''}${cur ? ` <span class="chip">${esc(cur)}</span>` : ''}${p.marketOpen === true ? ' <span class="market-dot open"></span> Åben' : p.marketOpen === false ? ' <span class="market-dot"></span> Lukket' : ''}${accounts().length ? ` <span class="chip chip-account">${esc(p.accountName || 'Uden depot')}</span>` : ''}</div>
         </div>
         <button class="btn btn-ghost btn-icon" data-action="close-panel" aria-label="Luk">${icon('x')}</button>
       </div>
@@ -1202,19 +1305,36 @@
 
   // ---------- Tilføj ----------
 
-  const add = { selected: null, results: [], active: -1, timer: null, seq: 0, quote: null, lastQuery: '' };
+  const add = { selected: null, results: [], active: -1, timer: null, seq: 0, quote: null, lastQuery: '', existing: null };
+
+  // Udfylder et depot-<select> med de kendte depoter + "Uden depot".
+  function fillAccountSelect(sel, value) {
+    const list = accounts();
+    sel.innerHTML = `<option value="">Uden depot</option>${list.map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('')}`;
+    sel.value = value && list.some((a) => a.id === value) ? value : '';
+    sel.closest('.field')?.classList.toggle('hidden', list.length === 0);
+  }
+
+  function defaultAccountForAdd() {
+    if (state.account !== 'all' && state.account !== 'none') return state.account;
+    if (state.account === 'none') return '';
+    return storageGet('lastAccount', '');
+  }
 
   function openAdd(query = '') {
     add.selected = null;
     add.results = [];
     add.active = -1;
     add.quote = null;
+    add.existing = null;
     $('#add-search').value = query;
     add.lastQuery = query;
     $('#add-results').innerHTML = '';
     $('#add-price').placeholder = '0,00';
     $('#add-notice').innerHTML = '';
     $('#add-deviation').innerHTML = '';
+    fillAccountSelect($('#add-account'), defaultAccountForAdd());
+    loadAllHoldings();
     if (query) runSearch(query);
     $('#add-qty').value = '';
     $('#add-price').value = '';
@@ -1276,22 +1396,33 @@
     }
   }
 
+  // Ejer du allerede aktien i det valgte depot, bliver dialogen til "Køb til": det du skriver lægges oveni.
+  function applyAddMode() {
+    if (!add.selected) return;
+    const accountId = $('#add-account').value || null;
+    add.existing = state.allHoldings.find((h) => sameSlot(h, add.selected.symbol, accountId)) || null;
+    const buy = Boolean(add.existing);
+    $('#add-mode-notice').innerHTML = buy
+      ? `<div class="notice info">Du ejer allerede <b>${fmtQty(add.existing.quantity)} stk.</b>${accountId ? ` i ${esc(accountName(accountId) || 'depotet')}` : ''}${isNum(add.existing.avgPrice) ? ` til gns. <b>${fmtPrice(add.existing.avgPrice)} ${esc(add.existing.currency || '')}</b>` : ''}. Det du skriver her lægges oveni, og gennemsnitskursen regnes ud for dig.</div>`
+      : '';
+    $('#add-qty-label').textContent = buy ? 'Antal købt' : 'Antal';
+    $('#add-price-label').textContent = buy ? 'Købskurs for dette køb' : 'Gns. købskurs';
+    $('#add-price-help').textContent = buy ? 'Kursen du købte til denne gang.' : 'Valgfri. Uden købskurs vises værdi, men ikke afkast.';
+    $('#add-note').closest('.field').classList.toggle('hidden', buy);
+    $('#add-submit').textContent = buy ? 'Læg til beholdning' : 'Tilføj';
+    updateAddSummary();
+  }
+
   async function selectStock(result) {
     add.selected = result;
     add.quote = null;
-    const existing = positions().find((p) => p.symbol === result.symbol);
-    if (existing) {
-      $('#dlg-add').close();
-      toast(`${result.name} er allerede i porteføljen – redigér den i stedet.`);
-      openEdit(existing.id);
-      return;
-    }
+    add.existing = null;
     $('#add-selected').innerHTML = `<span class="stock-avatar">${esc(initials(result.symbol))}</span><span><span class="name">${esc(result.name)}</span><br><span class="meta">${esc(result.symbol)}${result.exchange ? ` · ${esc(result.exchange)}` : ''}</span></span><span class="meta" id="add-quote-info">Henter kurs…</span>`;
     $('#add-price-addon').textContent = result.currency || '';
     $('#add-notice').innerHTML = '';
     $('#add-submit').disabled = false;
     showAddStep('form');
-    updateAddSummary();
+    applyAddMode();
     setTimeout(() => $('#add-qty').focus(), 30);
     try {
       const data = await api('GET', `/api/quote/${encodeURIComponent(result.symbol)}`);
@@ -1328,6 +1459,14 @@
     const cur = add.quote?.currency || add.selected?.currency || '';
     const el = $('#add-summary');
     const parts = [];
+    if (add.existing && isNum(qty) && qty > 0) {
+      const oldQty = add.existing.quantity;
+      const newQty = oldQty + qty;
+      const newAvg = isNum(add.existing.avgPrice) && isNum(price) ? (oldQty * add.existing.avgPrice + qty * price) / newQty : null;
+      el.innerHTML = `<span>Ny beholdning: <b>${fmtQty(newQty)} stk.</b></span><span>${isNum(newAvg) ? `Ny gns. købskurs: <b>${fmtPrice(newAvg)} ${esc(cur)}</b>` : !isNum(add.existing.avgPrice) ? '<span class="muted">Gns. købskurs er ukendt for det du ejer – ret den under Redigér</span>' : 'Skriv købskursen for at se ny gns. købskurs'}</span>`;
+      $('#add-deviation').innerHTML = '';
+      return;
+    }
     if (isNum(qty) && qty > 0) parts.push(`<span>${fmtQty(qty)} stk.</span>`);
     if (isNum(price) && price >= 0 && isNum(qty) && qty > 0) parts.push(`<span>Investeret: <b>${fmtPrice(qty * price)} ${esc(cur)}</b></span>`);
     if (isNum(qty) && qty > 0 && add.quote && isNum(add.quote.price)) parts.push(`<span>Værdi nu: <b>${fmtPrice(qty * add.quote.price)} ${esc(cur)}</b></span>`);
@@ -1345,12 +1484,22 @@
     const price = parseInput($('#add-price').value);
     if (!isNum(qty) || qty <= 0) return setError('#add-error', 'Antal skal være større end 0.');
     if ($('#add-price').value.trim() && (!isNum(price) || price < 0)) return setError('#add-error', 'Købskursen skal være et tal.');
+    const accountId = $('#add-account').value || null;
     const btn = $('#add-submit');
     btn.disabled = true;
     try {
-      const data = await api('POST', '/api/holdings', { symbol: add.selected.symbol, quantity: qty, avgPrice: price ?? null, note: $('#add-note').value, name: add.selected.name });
+      if (accountId) storageSet('lastAccount', accountId);
+      if (add.existing) {
+        if (!isNum(price) || price < 0) return setError('#add-error', 'Skriv kursen, du købte til – så regnes den nye gennemsnitskurs ud.');
+        const data = await api('POST', `/api/holdings/${encodeURIComponent(add.existing.id)}/trade`, { type: 'buy', quantity: qty, price });
+        $('#dlg-add').close();
+        toast(`Købte ${fmtQty(qty)} stk. ${data.holding.name} – du har nu ${fmtQty(data.holding.quantity)} stk.`, 'success');
+        await afterMutation();
+        return;
+      }
+      const data = await api('POST', '/api/holdings', { symbol: add.selected.symbol, quantity: qty, avgPrice: price ?? null, note: $('#add-note').value, name: add.selected.name, accountId });
       $('#dlg-add').close();
-      toast(`${data.holding.name} er tilføjet`, 'success');
+      toast(`${data.holding.name} er tilføjet${accountId ? ` i ${accountName(accountId)}` : ''}`, 'success');
       if (data.warning) toast(data.warning);
       await afterMutation();
     } catch (err) {
@@ -1373,6 +1522,7 @@
     $('#edit-price').value = fmtRaw(p.avgPrice);
     $('#edit-price-addon').textContent = p.currency || '';
     $('#edit-note').value = p.note || '';
+    fillAccountSelect($('#edit-account'), p.accountId || '');
     setError('#edit-error', '');
     updateEditSummary();
     openDialog('#dlg-edit');
@@ -1399,7 +1549,9 @@
     if (!isNum(qty) || qty <= 0) return setError('#edit-error', 'Antal skal være større end 0.');
     if (priceRaw && (!isNum(price) || price < 0)) return setError('#edit-error', 'Købskursen skal være et tal.');
     try {
-      await api('PUT', `/api/holdings/${encodeURIComponent(edit.id)}`, { quantity: qty, avgPrice: priceRaw ? price : null, note: $('#edit-note').value });
+      const body = { quantity: qty, avgPrice: priceRaw ? price : null, note: $('#edit-note').value };
+      if (accounts().length) body.accountId = $('#edit-account').value || null;
+      await api('PUT', `/api/holdings/${encodeURIComponent(edit.id)}`, body);
       $('#dlg-edit').close();
       toast('Gemt', 'success');
       await afterMutation();
@@ -1502,6 +1654,54 @@
     const keep = state.history[state.range];
     state.history = keep && !keep.error ? { [state.range]: keep } : {};
     if (currentRoute() === 'overview' && positions().length) loadHistory(state.range, { force: true });
+  }
+
+  // ---------- Depoter ----------
+
+  async function saveAccounts(list, successMessage) {
+    const data = await api('PUT', '/api/settings', { accounts: list });
+    state.settings = data.settings;
+    if (successMessage) toast(successMessage, 'success');
+    await Promise.all([loadPortfolio({ silent: true, fresh: true }), loadAllHoldings()]);
+    render();
+  }
+
+  async function addAccount() {
+    const input = $('#account-new');
+    const name = input.value.trim();
+    if (!name) return input.focus();
+    try {
+      await saveAccounts([...accounts(), { name }], `Depotet "${name}" er oprettet`);
+      $('#account-new')?.focus();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  async function renameAccount(id, name) {
+    const trimmed = name.trim();
+    const current = accounts().find((a) => a.id === id);
+    if (!current || !trimmed || trimmed === current.name) return render();
+    try {
+      await saveAccounts(accounts().map((a) => (a.id === id ? { ...a, name: trimmed } : a)), 'Depotet er omdøbt');
+    } catch (err) {
+      toast(err.message, 'error');
+      render();
+    }
+  }
+
+  async function deleteAccount(id) {
+    const a = accounts().find((x) => x.id === id);
+    if (!a) return;
+    const count = state.allHoldings.filter((h) => h.accountId === id).length;
+    const ok = await confirmDialog({ title: `Slet depotet ${a.name}?`, text: count ? `${count} ${count === 1 ? 'aktie' : 'aktier'} i depotet slettes ikke – de kommer til at stå "uden depot".` : 'Depotet er tomt.', okLabel: 'Slet depot' });
+    if (!ok) return;
+    try {
+      if (state.account === id) setAccount('all', { reload: false });
+      await saveAccounts(accounts().filter((x) => x.id !== id), `Depotet "${a.name}" er slettet`);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
   }
 
   // ---------- Adgangskode ----------
@@ -1651,6 +1851,11 @@
       loadHistory(state.range);
       return;
     }
+    const accountChip = e.target.closest('[data-account]');
+    if (accountChip) {
+      setAccount(accountChip.dataset.account);
+      return;
+    }
     const tradeType = e.target.closest('[data-trade-type]');
     if (tradeType) {
       trade.type = tradeType.dataset.tradeType;
@@ -1730,6 +1935,8 @@
         return;
       case 'backup': return downloadBackup();
       case 'restore': return $('#restore-file').click();
+      case 'account-add': return addAccount();
+      case 'account-delete': return deleteAccount(el.dataset.id);
       default: return;
     }
   });
@@ -1821,6 +2028,10 @@
         state.settings = data.settings;
         toast('Kontanter gemt', 'success');
         await loadPortfolio({ silent: true, fresh: true });
+      } else if (e.target.classList.contains('account-name')) {
+        await renameAccount(e.target.dataset.id, e.target.value);
+      } else if (id === 'add-account') {
+        applyAddMode();
       } else if (id === 'restore-file') {
         const file = e.target.files[0];
         e.target.value = '';
@@ -1918,7 +2129,8 @@
         render();
       })
       .catch(() => {});
-    await Promise.all([quick, loadPortfolio()]);
+    await Promise.all([quick, loadPortfolio(), loadAllHoldings()]);
+    render();
     scheduleRefresh();
   }
 

@@ -102,15 +102,20 @@
       <div id="add-step-form" class="hidden">
         <div class="selected-stock" id="add-selected"></div>
         <div id="add-notice"></div>
+        <div class="field hidden">
+          <label for="add-account">Depot</label>
+          <select class="input" id="add-account"></select>
+        </div>
+        <div id="add-mode-notice"></div>
         <div class="field-row">
           <div class="field">
-            <label for="add-qty">Antal</label>
+            <label for="add-qty" id="add-qty-label">Antal</label>
             <input class="input n" id="add-qty" inputmode="decimal" placeholder="0" autocomplete="off">
           </div>
           <div class="field">
-            <label for="add-price">Gns. købskurs <span class="muted" id="add-price-cur"></span></label>
+            <label for="add-price"><span id="add-price-label">Gns. købskurs</span> <span class="muted" id="add-price-cur"></span></label>
             <div class="input-group"><input class="input n" id="add-price" inputmode="decimal" placeholder="0,00" autocomplete="off"><span class="addon" id="add-price-addon">DKK</span></div>
-            <span class="help">Valgfri. Uden købskurs vises værdi, men ikke afkast.</span>
+            <span class="help" id="add-price-help">Valgfri. Uden købskurs vises værdi, men ikke afkast.</span>
           </div>
         </div>
         <div class="field">
@@ -144,6 +149,10 @@
           <label for="edit-price">Gns. købskurs</label>
           <div class="input-group"><input class="input n" id="edit-price" inputmode="decimal" placeholder="–" autocomplete="off"><span class="addon" id="edit-price-addon">DKK</span></div>
         </div>
+      </div>
+      <div class="field hidden">
+        <label for="edit-account">Depot</label>
+        <select class="input" id="edit-account"></select>
       </div>
       <div class="field">
         <label for="edit-note">Note</label>

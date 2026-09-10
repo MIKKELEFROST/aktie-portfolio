@@ -25,6 +25,7 @@ const PAGE_ROUTES = new Set(['/', '/beholdninger', '/indstillinger']);
 const HISTORY_RANGES = new Set(['5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '5y', 'max']);
 const HOLDABLE_TYPES = new Set(['EQUITY', 'ETF', 'MUTUALFUND']);
 const MAX_HOLDINGS = 200;
+const MAX_ACCOUNTS = 20;
 const TYPE_NAMES = { INDEX: 'et indeks', CRYPTOCURRENCY: 'en kryptovaluta', CURRENCY: 'en valuta', FUTURE: 'en future', OPTION: 'en option' };
 
 export function createApp({ store, yahoo, config, logger = console, onPortfolioRequest = null }) {
@@ -100,9 +101,9 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   // ---------- portefølje ----------
 
-  async function buildPortfolio() {
+  async function buildPortfolio(account = '') {
     const data = await store.getPortfolio();
-    const result = await computeFrom(data);
+    const result = await computeFrom(data, account);
     rememberNames(data, result.quotes).catch((err) => logger.warn('Kunne ikke gemme navne:', err.message));
     if (onPortfolioRequest) onPortfolioRequest();
     delete result.quotes;
@@ -111,16 +112,28 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   // Beregner porteføljen ud fra givne beholdninger/indstillinger (bruges både af det gemte
   // lager og af browser-tilstanden, hvor klienten sender sine beholdninger med).
-  async function computeFrom(data) {
+  // Depot-filter: '' = alle, 'none' = uden depot, ellers depot-id.
+  function filterByAccount(holdings, account) {
+    if (!account) return holdings;
+    if (account === 'none') return holdings.filter((h) => !h.accountId);
+    return holdings.filter((h) => h.accountId === account);
+  }
+
+  async function computeFrom(data, account = '') {
     const baseCurrency = data.settings.baseCurrency;
-    const symbols = data.holdings.map((h) => h.symbol);
+    const accounts = data.settings.accounts || [];
+    const holdings = filterByAccount(data.holdings, account);
+    const symbols = holdings.map((h) => h.symbol);
     const quotes = symbols.length ? await yahoo.getQuotes(symbols) : {};
     const currencies = Object.values(quotes)
       .filter((q) => q.ok && q.quote?.currency)
       .map((q) => q.quote.currency);
     const fxRates = currencies.length ? await yahoo.getFxRates(currencies, baseCurrency) : {};
-    const result = computePortfolio({ holdings: data.holdings, quotes, fxRates, baseCurrency });
-    const cashBase = Number(data.settings.cash) > 0 ? Number(data.settings.cash) : 0;
+    const result = computePortfolio({ holdings, quotes, fxRates, baseCurrency });
+    const nameOf = new Map(accounts.map((a) => [a.id, a.name]));
+    for (const p of result.positions) p.accountName = p.accountId ? nameOf.get(p.accountId) || null : null;
+    // Kontanter hører til hele porteføljen, ikke et enkelt depot.
+    const cashBase = !account && Number(data.settings.cash) > 0 ? Number(data.settings.cash) : 0;
     result.totals.cashBase = cashBase;
     result.totals.totalValueBase = result.totals.valueBase + cashBase;
     return {
@@ -128,6 +141,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       quotes,
       fxRates,
       settings: data.settings,
+      account: account || '',
       updatedAt: new Date().toISOString(),
     };
   }
@@ -150,10 +164,10 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     });
   }
 
-  async function buildHistory(range, data = null) {
+  async function buildHistory(range, data = null, account = '') {
     if (!data) data = await store.getPortfolio();
     const baseCurrency = data.settings.baseCurrency;
-    const holdings = data.holdings.filter((h) => Number(h.quantity) > 0);
+    const holdings = filterByAccount(data.holdings, account).filter((h) => Number(h.quantity) > 0);
     const histories = {};
     const missing = [];
     await Promise.all(
@@ -228,16 +242,19 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   // Beholdninger sendt fra klienten (browser-tilstand): valideres som ved gendan, uden at gemmes.
-  function parseHoldingsList(list, { max = 100 } = {}) {
+  function parseHoldingsList(list, { max = 100, accounts = [] } = {}) {
     if (!Array.isArray(list)) throw new HttpError(400, 'Forventede en liste af beholdninger');
     if (list.length > max) throw new HttpError(400, `Højst ${max} aktier ad gangen`);
     const seen = new Set();
     return list.map((raw, i) => {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new HttpError(400, `Ugyldig post (linje ${i + 1})`);
       const symbol = parseSymbol(raw.symbol);
-      if (seen.has(symbol)) throw new HttpError(400, `Symbolet ${symbol} optræder flere gange`);
-      seen.add(symbol);
+      const accountId = parseAccountId(raw.accountId, accounts);
+      const slot = `${symbol}@${accountId ?? ''}`;
+      if (seen.has(slot)) throw new HttpError(400, `Symbolet ${symbol} optræder flere gange i samme depot`);
+      seen.add(slot);
       return {
+        accountId,
         id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newId(),
         symbol,
         name: String(raw.name || symbol).slice(0, 120),
@@ -258,8 +275,43 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       cash: s.cash !== undefined ? parseNumber(s.cash, 'Kontanter', { min: 0, allowNull: true }) ?? 0 : 0,
       displayName: String(s.displayName ?? '').trim().slice(0, 40),
       showDecimals: Boolean(s.showDecimals),
+      accounts: s.accounts !== undefined ? parseAccounts(s.accounts) : [],
     };
   }
+
+  function parseAccountFilter(value) {
+    const v = String(value ?? '').trim();
+    if (!v) return '';
+    if (v === 'none') return 'none';
+    if (!/^[\w-]{1,64}$/.test(v)) throw new HttpError(400, 'Ugyldigt depot-filter');
+    return v;
+  }
+
+  function parseAccounts(list) {
+    if (!Array.isArray(list)) throw new HttpError(400, 'Depoter skal være en liste');
+    if (list.length > MAX_ACCOUNTS) throw new HttpError(400, `Højst ${MAX_ACCOUNTS} depoter`);
+    const names = new Set();
+    const ids = new Set();
+    return list.map((raw, i) => {
+      if (!raw || typeof raw !== 'object') throw new HttpError(400, `Ugyldigt depot (nr. ${i + 1})`);
+      const name = String(raw.name ?? '').trim().slice(0, 40);
+      if (!name) throw new HttpError(400, `Depot nr. ${i + 1} mangler et navn`);
+      if (names.has(name.toLowerCase())) throw new HttpError(400, `Depotet "${name}" findes flere gange`);
+      names.add(name.toLowerCase());
+      const id = typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) && !ids.has(raw.id) ? raw.id : newId();
+      ids.add(id);
+      return { id, name };
+    });
+  }
+
+  function parseAccountId(value, accounts) {
+    if (value === null || value === undefined || value === '') return null;
+    const id = String(value);
+    if (!(accounts || []).some((a) => a.id === id)) throw new HttpError(400, 'Ukendt depot – opret det først under Indstillinger');
+    return id;
+  }
+
+  const sameSlot = (h, symbol, accountId) => h.symbol === symbol && (h.accountId ?? null) === (accountId ?? null);
 
   function findHolding(data, id) {
     const h = data.holdings.find((x) => x.id === id);
@@ -268,7 +320,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   function publicHolding(h) {
-    return { id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', addedAt: h.addedAt, updatedAt: h.updatedAt };
+    return { id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, addedAt: h.addedAt, updatedAt: h.updatedAt };
   }
 
   // ---------- API-handlere ----------
@@ -288,8 +340,9 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     // Beregn portefølje ud fra beholdninger sendt af klienten (browser-tilstand).
     async compute(req, res) {
       const body = await readJsonBody(req);
-      const data = { holdings: parseHoldingsList(body.holdings), settings: parseSettingsInput(body.settings) };
-      const result = await computeFrom(data);
+      const settings = parseSettingsInput(body.settings);
+      const data = { holdings: parseHoldingsList(body.holdings, { accounts: settings.accounts }), settings };
+      const result = await computeFrom(data, parseAccountFilter(body.account));
       delete result.quotes;
       sendJson(res, 200, result);
     },
@@ -297,8 +350,9 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     async computeHistory(req, res) {
       const body = await readJsonBody(req);
       const range = typeof body.range === 'string' && HISTORY_RANGES.has(body.range) ? body.range : '1y';
-      const data = { holdings: parseHoldingsList(body.holdings), settings: parseSettingsInput(body.settings) };
-      sendJson(res, 200, await buildHistory(range, data));
+      const settings = parseSettingsInput(body.settings);
+      const data = { holdings: parseHoldingsList(body.holdings, { accounts: settings.accounts }), settings };
+      sendJson(res, 200, await buildHistory(range, data, parseAccountFilter(body.account)));
     },
 
     async setup(req, res) {
@@ -372,14 +426,14 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       sendJson(res, 200, { ok: true });
     },
 
-    async portfolio(req, res) {
-      sendJson(res, 200, await buildPortfolio());
+    async portfolio(req, res, url) {
+      sendJson(res, 200, await buildPortfolio(parseAccountFilter(url.searchParams.get('account'))));
     },
 
     async history(req, res, url) {
       const range = url.searchParams.get('range') || '1y';
       if (!HISTORY_RANGES.has(range)) throw new HttpError(400, 'Ugyldigt interval');
-      sendJson(res, 200, await buildHistory(range));
+      sendJson(res, 200, await buildHistory(range, null, parseAccountFilter(url.searchParams.get('account'))));
     },
 
     async search(req, res, url) {
@@ -410,9 +464,11 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const avgPrice = parseNumber(body.avgPrice, 'Købskurs', { min: 0, allowNull: true });
       const note = parseNote(body.note);
 
-      const current = (await store.getPortfolio()).holdings;
-      const existing = current.find((h) => h.symbol === symbol);
-      if (existing) throw new HttpError(409, `${existing.name || symbol} er allerede i porteføljen`, { id: existing.id });
+      const currentData = await store.getPortfolio();
+      const current = currentData.holdings;
+      const accountId = parseAccountId(body.accountId, currentData.settings.accounts);
+      const existing = current.find((h) => sameSlot(h, symbol, accountId));
+      if (existing) throw new HttpError(409, `${existing.name || symbol} er allerede i ${accountId ? 'depotet' : 'porteføljen'} – brug "Køb til"`, { id: existing.id });
       if (current.length >= MAX_HOLDINGS) throw new HttpError(409, `Porteføljen kan højst indeholde ${MAX_HOLDINGS} aktier`);
 
       const quotes = await yahoo.getQuotes([symbol]);
@@ -433,11 +489,12 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         quantity,
         avgPrice,
         note,
+        accountId,
         addedAt: now,
         updatedAt: now,
       };
       await store.updatePortfolio((draft) => {
-        if (draft.holdings.some((h) => h.symbol === symbol)) throw new HttpError(409, 'Aktien er allerede i porteføljen');
+        if (draft.holdings.some((h) => sameSlot(h, symbol, accountId))) throw new HttpError(409, 'Aktien er allerede i porteføljen');
         draft.holdings.push(holding);
       });
       sendJson(res, 201, { holding: publicHolding(holding), warning });
@@ -451,6 +508,11 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         if (body.quantity !== undefined) h.quantity = parseQuantity(body.quantity);
         if (body.avgPrice !== undefined) h.avgPrice = parseNumber(body.avgPrice, 'Købskurs', { min: 0, allowNull: true });
         if (body.note !== undefined) h.note = parseNote(body.note);
+        if (body.accountId !== undefined) {
+          const accountId = parseAccountId(body.accountId, draft.settings.accounts);
+          if (draft.holdings.some((x) => x.id !== h.id && sameSlot(x, h.symbol, accountId))) throw new HttpError(409, `${h.name || h.symbol} findes allerede i det depot – brug "Køb til" dér i stedet`);
+          h.accountId = accountId;
+        }
         h.updatedAt = new Date().toISOString();
         updated = h;
       });
@@ -524,8 +586,14 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       if (body.displayName !== undefined) patch.displayName = String(body.displayName ?? '').trim().slice(0, 40);
       if (body.showDecimals !== undefined) patch.showDecimals = Boolean(body.showDecimals);
       if (body.cash !== undefined) patch.cash = parseNumber(body.cash, 'Kontanter', { min: 0, allowNull: true }) ?? 0;
+      if (body.accounts !== undefined) patch.accounts = parseAccounts(body.accounts);
       const data = await store.updatePortfolio((draft) => {
         Object.assign(draft.settings, patch);
+        if (patch.accounts) {
+          // Slettede depoter: beholdningerne beholdes, men står nu "uden depot".
+          const ids = new Set(patch.accounts.map((a) => a.id));
+          for (const h of draft.holdings) if (h.accountId && !ids.has(h.accountId)) h.accountId = null;
+        }
       });
       sendJson(res, 200, { settings: data.settings });
     },
@@ -544,14 +612,18 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       if (body.holdings.length > MAX_HOLDINGS) throw new HttpError(400, `Højst ${MAX_HOLDINGS} aktier kan gendannes`);
       const now = new Date().toISOString();
       const seen = new Set();
+      const accounts = body.settings && Array.isArray(body.settings.accounts) ? parseAccounts(body.settings.accounts) : [];
       const holdings = body.holdings.map((raw, i) => {
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new HttpError(400, `Ugyldig post (linje ${i + 1})`);
         const symbol = parseSymbol(raw.symbol);
-        if (seen.has(symbol)) throw new HttpError(400, `Symbolet ${symbol} optræder flere gange (linje ${i + 1})`);
-        seen.add(symbol);
+        const accountId = parseAccountId(raw.accountId, accounts);
+        const slot = `${symbol}@${accountId ?? ''}`;
+        if (seen.has(slot)) throw new HttpError(400, `Symbolet ${symbol} optræder flere gange i samme depot (linje ${i + 1})`);
+        seen.add(slot);
         return {
           id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newId(),
           symbol,
+          accountId,
           name: String(raw.name || symbol).slice(0, 120),
           currency: raw.currency ? parseCurrency(raw.currency) : null,
           quantity: parseQuantity(raw.quantity),
@@ -566,6 +638,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const settings = body.settings && typeof body.settings === 'object' ? body.settings : {};
       const data = await store.updatePortfolio((draft) => {
         draft.holdings = holdings;
+        draft.settings.accounts = accounts;
         if (baseCurrency) draft.settings.baseCurrency = baseCurrency;
         if (cash !== undefined) draft.settings.cash = cash;
         if (settings.displayName !== undefined) draft.settings.displayName = String(settings.displayName ?? '').trim().slice(0, 40);
