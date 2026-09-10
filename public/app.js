@@ -1055,7 +1055,8 @@
       const v = min + ((max - min) * i) / steps;
       const yy = y(v).toFixed(1);
       gridLines.push(`<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="var(--chart-grid)" stroke-width="1"/>`);
-      if (i > 0 && i < steps) gridLines.push(`<text x="${W - padR}" y="${yy - 3}" text-anchor="end" font-size="10" fill="var(--muted)" class="amount">${esc(fmtCompact(v))}</text>`);
+      // Tallet får en kant i baggrundsfarven, så det kan læses oven på kurven.
+      if (i > 0 && i < steps) gridLines.push(`<text x="${W - padR}" y="${yy - 3}" text-anchor="end" font-size="10" fill="var(--muted)" stroke="var(--surface)" stroke-width="3" paint-order="stroke" class="amount">${esc(fmtCompact(v))}</text>`);
     }
     const labelCount = W < 480 ? 3 : 5;
     const xLabels = [];
@@ -1288,11 +1289,15 @@
 
     const cards = rows.map((p) => pendingOnly
       ? `<div class="hcard"><div class="l1">${esc(p.name || p.symbol)}</div><div class="r1">${sk}</div><div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk.</div><div class="r2">${sk}</div></div>`
+      // Tre linjer i stedet for to: så er der plads til både valuta og depot,
+      // uden at noget klippes af på en smal skærm.
       : `<div class="hcard"${readonly ? '' : ` data-action="open" data-symbol="${esc(p.symbol)}" tabindex="0" role="button"`}>
       <div class="l1">${p.status !== 'ok' ? '<span class="warn-dot"></span>' : ''}${esc(p.name || p.symbol)}</div>
       <div class="r1 amount">${fmtAmount(p.valueBase)}</div>
-      <div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk. · ${isNum(p.price) ? `${fmtPrice(p.price)} ${esc(p.currency || '')}` : 'ingen kurs'}${p.accountName && state.account === 'all' ? ` · ${esc(p.accountName)}` : ''}</div>
-      <div class="r2"><span class="${p.status === 'stale' ? 'stale' : signClass(p.dayChangePercent)}">${arrow(p.dayChangePercent)}${fmtPct(p.dayChangePercent)}</span> <span class="muted">·</span> <span class="muted small">Afkast</span> <span class="${signClass(p.gainPercent)}">${fmtPct(p.gainPercent)}</span></div>
+      <div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk.${p.accountName && state.account === 'all' ? ` · ${esc(p.accountName)}` : ''}</div>
+      <div class="r2"><span class="${p.status === 'stale' ? 'stale' : signClass(p.dayChangePercent)}">${arrow(p.dayChangePercent)}${fmtPct(p.dayChangePercent)}</span></div>
+      <div class="l3">${isNum(p.price) ? `${fmtPrice(p.price)} ${esc(p.currency || '')}` : 'ingen kurs'}</div>
+      <div class="r3"><span class="muted">afkast</span> <span class="${signClass(p.gainPercent)}">${fmtPct(p.gainPercent)}</span></div>
     </div>`).join('');
     const cardTotal = t && !pendingOnly ? `<div class="hcard-total"><span>I alt</span><span class="amount">${fmtAmount(t.valueBase)}</span></div>` : '';
 
@@ -1758,6 +1763,21 @@
   }
 
   // Ejer du allerede aktien i det valgte depot, bliver dialogen til "Køb til": det du skriver lægges oveni.
+  // Sætter fokus i et felt kort efter en dialog åbner – men kun hvis brugeren ikke
+  // allerede selv er i gang et andet sted. Ellers kan tastning nå at lande i det
+  // forkerte felt, når fokus rykkes bagefter.
+  function focusSoon(selector, ms = 30) {
+    setTimeout(() => {
+      const el = $(selector);
+      if (!el) return;
+      const aktiv = document.activeElement;
+      const iGang = aktiv && aktiv !== document.body && aktiv !== el
+        && (aktiv.tagName === 'INPUT' || aktiv.tagName === 'SELECT' || aktiv.tagName === 'TEXTAREA');
+      if (iGang) return;
+      el.focus();
+    }, ms);
+  }
+
   function applyAddMode() {
     if (!add.selected) return;
     const accountId = $('#add-account').value || null;
@@ -1784,7 +1804,7 @@
     $('#add-submit').disabled = false;
     showAddStep('form');
     applyAddMode();
-    setTimeout(() => $('#add-qty').focus(), 30);
+    focusSoon('#add-qty', 30);
     try {
       const data = await api('GET', `/api/quote/${encodeURIComponent(result.symbol)}`);
       if (add.selected !== result) return;
@@ -1936,7 +1956,7 @@
     setError('#trade-error', '');
     applyTradeType();
     openDialog('#dlg-trade');
-    setTimeout(() => $('#trade-qty').focus(), 30);
+    focusSoon('#trade-qty', 30);
   }
 
   function applyTradeType() {
@@ -2472,7 +2492,7 @@
         setError('#setup-error', '');
         $('#form-setup-pw').reset();
         $('#dlg-setup').showModal();
-        setTimeout(() => $('#setup-new').focus(), 50);
+        focusSoon('#setup-new', 50);
         break;
       case 'open-dismiss':
         storageSet('open-dismissed', '1');
@@ -2482,7 +2502,7 @@
         $('#form-password').reset();
         setError('#pw-error', '');
         openDialog('#dlg-password');
-        setTimeout(() => $('#pw-current').focus(), 30);
+        focusSoon('#pw-current', 30);
         return;
       case 'logout-all':
         confirmDialog({ title: 'Log ud på alle enheder?', text: 'Alle aktive logins ugyldiggøres – også dette. Du skal logge ind igen.', okLabel: 'Log ud overalt' }).then(async (ok) => {

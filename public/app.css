@@ -124,7 +124,7 @@ a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
-h1 { font-size: 22px; }
+h1 { font-size: clamp(20px, 5.2vw, 22px); }
 h2 { font-size: 15px; }
 h3 { font-size: 14px; }
 p { margin: 0; }
@@ -154,13 +154,14 @@ body.private .amount { filter: blur(7px); user-select: none; transition: filter 
 
 .app { display: flex; min-height: 100vh; }
 
+/* Mobil er udgangspunktet: sidebjælken findes først, når der er plads til den. */
 .sidebar {
+  display: none;
   position: fixed;
   inset: 0 auto 0 0;
   width: var(--sidebar-w);
   background: var(--sidebar-bg);
   color: var(--sidebar-text);
-  display: flex;
   flex-direction: column;
   padding: 20px 14px;
   gap: 8px;
@@ -200,15 +201,55 @@ body.private .amount { filter: blur(7px); user-select: none; transition: filter 
 .sidebar-footer .nav a { font-size: 13px; }
 .sidebar-status { padding: 6px 10px; font-size: 11px; color: var(--sidebar-text); opacity: 0.75; line-height: 1.4; }
 
-.main { flex: 1; margin-left: var(--sidebar-w); min-width: 0; }
-.content { max-width: 1280px; margin: 0 auto; padding: 28px 28px 80px; }
+.main { flex: 1; margin-left: 0; min-width: 0; }
+.content {
+  max-width: 1280px; margin: 0 auto;
+  /* Sidepolstring følger skærmen og respekterer hak/afrundede hjørner. */
+  padding: 14px max(14px, env(safe-area-inset-left)) calc(var(--tabbar-h) + 28px) max(14px, env(safe-area-inset-right));
+}
 
-.topbar { display: none; }
-.tabbar { display: none; }
+/* Toplinje og fanebjælke: telefonens navigation. */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  position: sticky; top: 0; z-index: 20; height: var(--topbar-h);
+  background: var(--sidebar-bg); color: var(--sidebar-text-strong);
+  padding: 0 max(12px, env(safe-area-inset-left)) 0 max(12px, env(safe-area-inset-right));
+}
+.topbar .brand { border: none; padding: 0; margin: 0; }
+.topbar .btn-ghost { color: var(--sidebar-text); }
+
+.tabbar {
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+  min-height: var(--tabbar-h);
+  background: var(--surface); border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.tabbar a, .tabbar button {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  min-height: var(--tabbar-h); padding: 6px 2px;
+  font-size: 10px; line-height: 1.1; text-align: center;
+  color: var(--muted); border: none; background: transparent;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+.tabbar a.active { color: var(--accent); }
+.tabbar a.active svg { transform: translateY(-1px); }
+.tabbar .tab-add .icon {
+  width: 38px; height: 38px; padding: 9px; border-radius: 50%;
+  background: var(--accent); color: #fff; margin-top: -16px;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.4);
+}
+/* Korte navne på de smalleste skærme, så intet knækker. */
+.tab-short { display: none; }
+@media (max-width: 400px) {
+  .tab-long { display: none; }
+  .tab-short { display: inline; }
+}
 
 /* ---------- sidehoved ---------- */
 
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
 .page-header .sub { color: var(--muted); font-size: 13px; margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .page-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
@@ -244,15 +285,18 @@ body.private .amount { filter: blur(7px); user-select: none; transition: filter 
 
 .card {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 18px 20px; min-width: 0;
+  padding: 14px 16px; min-width: 0;
 }
+@media (min-width: 768px) { .card { padding: 18px 20px; } }
 .card-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .card-header h2 { display: flex; align-items: center; gap: 8px; }
 .card-header .hint { font-size: 12px; color: var(--muted); }
 
-.grid { display: grid; gap: 16px; }
-.grid-kpi { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 16px; }
-.grid-2 { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); margin-bottom: 16px; }
+.grid { display: grid; gap: 12px; }
+/* Nøgletal: det vigtigste fylder hele bredden på en telefon, resten deles to og to. */
+.grid-kpi { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 12px; }
+.grid-kpi .kpi-hero { grid-column: 1 / -1; }
+.grid-2 { grid-template-columns: minmax(0, 1fr); margin-bottom: 12px; }
 .grid > * { min-width: 0; }
 .stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .stack > * { min-width: 0; }
@@ -260,8 +304,8 @@ body.private .amount { filter: blur(7px); user-select: none; transition: filter 
 /* KPI */
 .kpi { padding: 16px 20px; }
 .kpi-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }
-.kpi-value { font-size: 26px; font-weight: 600; margin-top: 6px; letter-spacing: -0.02em; line-height: 1.2; }
-.kpi-hero .kpi-value { font-size: 32px; }
+.kpi-value { font-size: clamp(19px, 5vw, 26px); font-weight: 600; margin-top: 6px; letter-spacing: -0.02em; line-height: 1.2; }
+.kpi-hero .kpi-value { font-size: clamp(28px, 8.5vw, 32px); }
 .kpi-sub { margin-top: 6px; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pill {
   display: inline-flex; align-items: center; gap: 3px;
@@ -286,8 +330,8 @@ body.private .amount { filter: blur(7px); user-select: none; transition: filter 
 
 /* ---------- tabel ---------- */
 
-.table-wrap { overflow-x: auto; margin: 0 -20px -18px; padding: 0 20px; border-radius: 0 0 var(--radius) var(--radius); }
-table.holdings { width: 100%; border-collapse: collapse; font-size: 13px; }
+.table-wrap { overflow-x: auto; margin: 0 -16px -14px; padding: 0 16px; border-radius: 0 0 var(--radius) var(--radius); }
+table.holdings { display: none; width: 100%; border-collapse: collapse; font-size: 13px; }
 table.holdings th, table.holdings td { padding: 10px 10px; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--border); white-space: nowrap; }
 table.holdings th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--surface); z-index: 1; }
 table.holdings th.n, table.holdings td.n { text-align: right; }
@@ -328,7 +372,25 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 .row-actions .btn { padding: 5px 7px; }
 
 /* Mobil-kort til beholdningsliste */
-.holding-cards { display: none; }
+.holding-cards { display: flex; flex-direction: column; }
+/* Ét kort pr. aktie på telefonen. To spalter: navn til venstre, tal til højre,
+   og begge sider klipper af i stedet for at knække et enkelt ord ned på ny linje. */
+.hcard {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px;
+  padding: 13px 0; border-bottom: 1px solid var(--border); cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.hcard:last-child { border-bottom: none; }
+.hcard:active { background: var(--surface-2); }
+.hcard .l1 { font-weight: 600; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.hcard .l1, .hcard .l2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hcard .l2 { font-size: 12px; color: var(--muted); }
+.hcard .r1 { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hcard .r2 { text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hcard .l3, .hcard .r3 { font-size: 12px; color: var(--muted); min-width: 0; }
+.hcard .l3 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hcard .r3 { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hcard-total { display: flex; justify-content: space-between; padding: 13px 0 4px; font-weight: 600; border-top: 2px solid var(--border-strong); }
 
 /* Tom tilstand */
 .empty { text-align: center; padding: 40px 20px; color: var(--muted); }
@@ -344,7 +406,7 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 
 .alloc-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--border); margin: 6px 0 12px; }
 .alloc-bar span { display: block; height: 100%; min-width: 2px; }
-.alloc-legend { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 14px; font-size: 12px; }
+.alloc-legend { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px 14px; font-size: 12px; }
 .alloc-legend li { display: flex; align-items: center; gap: 7px; list-style: none; min-width: 0; }
 .alloc-legend ul, ul.alloc-legend { margin: 0; padding: 0; }
 .alloc-legend .swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
@@ -354,7 +416,7 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 
 /* ---------- bevægelser ---------- */
 
-.movers { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.movers { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 .movers h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-bottom: 8px; }
 .movers ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .movers li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
@@ -369,7 +431,7 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 .range-pills { display: flex; gap: 2px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 2px; }
 .range-pills button { border: none; background: transparent; padding: 3px 9px; border-radius: 6px; font-size: 12px; font-weight: 500; color: var(--muted); }
 .range-pills button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
-.chart-box { position: relative; height: 240px; min-width: 0; }
+.chart-box { position: relative; height: clamp(200px, 42vw, 260px); min-width: 0; }
 .chart-box svg { width: 100%; height: 100%; display: block; overflow: visible; }
 .chart-box .chart-msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; text-align: center; padding: 20px; }
 .chart-tip {
@@ -398,13 +460,14 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 .input-group { display: flex; align-items: stretch; }
 .input-group .input { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
 .input-group .addon { display: flex; align-items: center; padding: 0 11px; border: 1px solid var(--border-strong); border-left: none; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; background: var(--surface-2); color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
-.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.field-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .dialog-intro { margin: 0 0 16px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .form-error { color: var(--neg); font-size: 13px; margin: -6px 0 12px; min-height: 0; }
 .form-error:empty { display: none; }
 .form-summary { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; margin-bottom: 14px; display: flex; justify-content: space-between; gap: 10px; }
 .form-summary b { font-variant-numeric: tabular-nums; }
-.checkbox { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+/* .field sætter kolonne-retning; et afkrydsningsfelt skal stå ved siden af sin tekst. */
+.checkbox { display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 13px; }
 .checkbox input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
 .segmented { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; margin-bottom: 14px; }
 .segmented button { border: none; background: var(--surface); padding: 7px 16px; font-weight: 500; color: var(--muted); }
@@ -441,12 +504,21 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 .panel-backdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); z-index: 30; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
 .panel-backdrop.show { opacity: 1; pointer-events: auto; }
 .panel {
-  position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100vw);
-  background: var(--surface); border-left: 1px solid var(--border); z-index: 31;
-  transform: translateX(100%); transition: transform 0.22s ease; overflow-y: auto;
+  position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: 100%;
+  max-height: min(90vh, 720px);
+  background: var(--surface); border-top: 1px solid var(--border); z-index: 31;
+  border-radius: 18px 18px 0 0;
+  transform: translateY(100%); transition: transform 0.22s ease; overflow-y: auto;
   display: flex; flex-direction: column;
+  padding-bottom: env(safe-area-inset-bottom);
 }
-.panel.show { transform: translateX(0); }
+.panel.show { transform: translateY(0); }
+/* Greb øverst, så det er tydeligt at arket kan trækkes væk. */
+.panel::before {
+  content: ''; position: sticky; top: 0; z-index: 1;
+  display: block; width: 36px; height: 4px; margin: 8px auto 0;
+  border-radius: 999px; background: var(--border-strong); flex: none;
+}
 .panel-head { padding: 18px 20px 12px; border-bottom: 1px solid var(--border); display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .panel-head h2 { font-size: 18px; }
 .panel-body { padding: 16px 20px 28px; display: flex; flex-direction: column; gap: 18px; }
@@ -465,7 +537,7 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 
 /* ---------- indstillinger ---------- */
 
-.settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.settings-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .settings-grid .card p.muted { margin-bottom: 12px; }
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .setting-row:last-child { border-bottom: none; }
@@ -484,8 +556,15 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 
 /* ---------- toast ---------- */
 
-.toasts { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
-.toast { background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 8px; font-size: 13px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 10px; animation: toast-in 0.2s ease; max-width: 360px; }
+.toasts {
+  position: fixed; left: 14px; right: 14px; bottom: calc(var(--tabbar-h) + 12px + env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; gap: 8px; z-index: 50;
+}
+@media (min-width: 768px) {
+  .toasts { left: auto; right: 20px; bottom: 20px; }
+}
+.toast { background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 8px; font-size: 13px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 10px; animation: toast-in 0.2s ease; }
+@media (min-width: 768px) { .toast { max-width: 360px; } }
 .toast.error { background: var(--neg); color: #fff; }
 .toast.success { background: var(--pos); color: #fff; }
 .toast button { background: transparent; border: none; color: inherit; font-weight: 600; text-decoration: underline; padding: 0; }
@@ -504,72 +583,63 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
    Responsivt
    ========================================================================== */
 
-@media (max-width: 1100px) {
-  .grid-kpi { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .grid-2 { grid-template-columns: minmax(0, 1fr); }
-  .settings-grid { grid-template-columns: minmax(0, 1fr); }
+/* Bredere skærme lægges ovenpå. Alt herunder er tilføjelser til mobil-grundlaget. */
+
+/* Lidt mere plads: to spalter hvor det giver mening. */
+@media (min-width: 480px) {
+  .alloc-legend { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .movers { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .field-row { grid-template-columns: 1fr 1fr; }
 }
 
-/* Tablet: sidebar kun med ikoner */
-@media (max-width: 1023px) and (min-width: 768px) {
+/* Tablet og opefter: sidebjælke i stedet for fanebjælke, og rigtig tabel. */
+@media (min-width: 768px) {
   :root { --sidebar-w: 72px; }
-  .sidebar { padding: 16px 12px; }
+  .sidebar { display: flex; padding: 16px 12px; }
   .brand { justify-content: center; padding: 0 0 14px; }
   .brand span, .nav a span, .sidebar-status, .sidebar .btn-primary span { display: none; }
   .nav a { justify-content: center; padding: 10px; }
   .sidebar .btn-primary { padding: 10px; }
+
+  .main { margin-left: var(--sidebar-w); }
+  .content { padding: 24px 24px 60px; }
+  .topbar, .tabbar { display: none; }
+
+  .grid { gap: 16px; }
+  .grid-kpi, .grid-2 { margin-bottom: 16px; }
+  .page-header { margin-bottom: 20px; }
+
+  table.holdings { display: table; }
+  .holding-cards { display: none; }
+  .table-wrap { margin: 0 -20px -18px; padding: 0 20px; }
+
+  /* Detaljer glider ind fra siden i stedet for op nedefra. */
+  .panel {
+    top: 0; right: 0; bottom: 0; left: auto; width: min(440px, 100vw); max-height: none;
+    border-left: 1px solid var(--border); border-top: none; border-radius: 0;
+    transform: translateX(100%);
+  }
+  .panel.show { transform: translateX(0); }
+  .panel::before { display: none; }
 }
 
-/* Mobil */
-@media (max-width: 767px) {
-  .sidebar { display: none; }
-  .main { margin-left: 0; }
-  .content { padding: 16px 14px calc(var(--tabbar-h) + 24px); }
+/* Plads til navnene i sidebjælken. */
+@media (min-width: 1024px) {
+  :root { --sidebar-w: 232px; }
+  .sidebar { padding: 20px 14px; }
+  .brand { justify-content: flex-start; padding: 4px 10px 18px; }
+  .brand span, .nav a span, .sidebar-status, .sidebar .btn-primary span { display: initial; }
+  .nav a { justify-content: flex-start; padding: 9px 10px; }
+  .sidebar .btn-primary { padding: 9px 14px; }
+  .content { padding: 28px 28px 80px; }
+}
 
-  .topbar {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    position: sticky; top: 0; z-index: 20; height: var(--topbar-h);
-    background: var(--sidebar-bg); color: var(--sidebar-text-strong); padding: 0 12px;
-  }
-  .topbar .brand { border: none; padding: 0; margin: 0; }
-  .topbar .btn-ghost { color: var(--sidebar-text); }
-
-  .tabbar {
-    display: grid; grid-template-columns: repeat(4, 1fr);
-    position: fixed; left: 0; right: 0; bottom: 0; height: var(--tabbar-h);
-    background: var(--surface); border-top: 1px solid var(--border); z-index: 20;
-    padding-bottom: env(safe-area-inset-bottom);
-  }
-  .tabbar a, .tabbar button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; font-size: 11px; color: var(--muted); border: none; background: transparent; }
-  .tabbar a.active { color: var(--accent); }
-  .tabbar .tab-add .icon { width: 36px; height: 36px; padding: 8px; border-radius: 50%; background: var(--accent); color: #fff; margin-top: -18px; box-shadow: 0 4px 10px rgba(37,99,235,0.4); }
-
-  .page-header { margin-bottom: 14px; }
-  h1 { font-size: 20px; }
-  .kpi-hero .kpi-value { font-size: 26px; }
-  .kpi-value { font-size: 20px; }
-  .card { padding: 14px 16px; }
-  .table-wrap { margin: 0 -16px -14px; padding: 0 16px; }
-
-  /* Tabel → kort */
-  table.holdings { display: none; }
-  .holding-cards { display: flex; flex-direction: column; }
-  .hcard { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 12px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
-  .hcard:last-child { border-bottom: none; }
-  .hcard .l1 { font-weight: 600; display: flex; align-items: center; gap: 6px; }
-  .hcard .l2 { font-size: 12px; color: var(--muted); }
-  .hcard .r1 { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .hcard .r2 { text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; }
-  .hcard-total { display: flex; justify-content: space-between; padding: 12px 0 4px; font-weight: 600; border-top: 2px solid var(--border-strong); }
-
-  .movers { grid-template-columns: minmax(0, 1fr); }
-  .alloc-legend { grid-template-columns: minmax(0, 1fr); }
-  .panel { width: 100vw; top: auto; max-height: 90vh; border-left: none; border-top: 1px solid var(--border); border-radius: 16px 16px 0 0; transform: translateY(100%); }
-  .panel.show { transform: translateY(0); }
-  .toasts { left: 14px; right: 14px; bottom: calc(var(--tabbar-h) + 12px); }
-  .toast { max-width: none; }
-  .field-row { grid-template-columns: 1fr; }
-  .chart-box { height: 200px; }
+/* Fuld bredde: nøgletal på én række og to spalter i indholdet. */
+@media (min-width: 1100px) {
+  .grid-kpi { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .grid-kpi .kpi-hero { grid-column: auto; }
+  .grid-2 { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+  .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media print {
@@ -618,8 +688,9 @@ table.holdings th:focus-visible { outline-offset: -2px; }
 .chip-btn:hover { border-color: var(--accent); color: var(--accent); }
 .kpi-label[title] { cursor: help; }
 dialog { max-height: calc(100dvh - 24px); overflow-y: auto; }
-@media (max-width: 767px) {
-  dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
+dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
+@media (min-width: 768px) {
+  dialog { width: min(var(--dialog-w, 520px), calc(100vw - 32px)); max-height: calc(100dvh - 64px); }
 }
 @media (prefers-reduced-motion: reduce) {
   .panel, .panel-backdrop, .toast, .switch .track, .switch .track::before, .amount { transition: none !important; animation: none !important; }
@@ -628,9 +699,10 @@ dialog { max-height: calc(100dvh - 24px); overflow-y: auto; }
 .chart-summary { flex-wrap: wrap; }
 .chart-summary .big { white-space: nowrap; }
 .card-header { flex-wrap: wrap; }
-@media (max-width: 767px) {
-  .page-actions .btn-icon { display: none; } /* findes allerede i topbaren */
-}
+/* Ikonknapperne står i toplinjen på mobil, så de skal ikke gentages i sidehovedet.
+   Kun sidehovedets egne – toplinjens bruger samme klasse og skal blive. */
+.page-header .page-actions .btn-icon { display: none; }
+@media (min-width: 768px) { .page-header .page-actions .btn-icon { display: inline-flex; } }
 
 /* ---------- Platform: profiler og følgere ---------- */
 .only-platform { display: none !important; }
@@ -658,3 +730,33 @@ body.viewing-person [data-action="add"] { display: none !important; }
 .chart-notes { margin-top: 10px; display: grid; gap: 6px; }
 .chart-notes p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
 .chart-notes b { color: var(--text); font-weight: 600; }
+
+/* ---------- Mobil: berøringsflader og rytme ---------- */
+@media (max-width: 767px) {
+  .btn { min-height: 44px; }
+  .btn-sm { min-height: 38px; }
+  .btn-icon { min-width: 44px; }
+  .input, .select-inline, select, input[type="text"], input[type="password"], input[type="email"], input[type="search"] {
+    min-height: 44px;
+    font-size: 16px; /* under 16px zoomer iOS ind ved fokus */
+  }
+  .setting-row { flex-wrap: wrap; padding: 14px 0; }
+  .setting-row > :last-child { margin-left: auto; }
+  .range-pills button { min-height: 36px; padding-inline: 10px; }
+  .card-header h2 { font-size: 15px; }
+  .card-header .input-group { flex: 1 1 100%; max-width: none; }
+  /* Små tekstlinks skal stadig kunne rammes med en tommelfinger. */
+  .card-header a { display: inline-flex; align-items: center; min-height: 44px; }
+  .topbar .brand { min-height: 44px; }
+  .person-row { padding: 14px 0; }
+  .person-actions { width: 100%; }
+  .person-actions .btn { flex: 1; justify-content: center; }
+  /* Tallene i grafen må ikke lægge sig oven i kurven. */
+  .chart-summary { gap: 6px 10px; }
+}
+/* "Tilføj aktie" står allerede som knap i fanebjælken på mobil. */
+@media (max-width: 767px) {
+  .page-header .page-actions .btn-primary { display: none; }
+  /* Står det sidste nøgletal alene på en række, får det hele bredden. */
+  .grid-kpi > :last-child:nth-child(even) { grid-column: 1 / -1; }
+}
