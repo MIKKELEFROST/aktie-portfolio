@@ -189,40 +189,72 @@ export function computePortfolio({ holdings, quotes, fxRates, baseCurrency }) {
 // Historisk porteføljeværdi i basisvaluta, givet nuværende beholdning
 // (antager beholdningen har været uændret i perioden – tydeligt markeret i UI).
 // histories: { [symbol]: { currency, points: [{t, close}] } }, fxRates: { [cur]: {ok, rate} }
-export function computeValueHistory({ holdings, histories, fxRates }) {
+export function computeValueHistory({ holdings, histories, fxRates, fxHistories = {} }) {
   const series = [];
   for (const h of holdings) {
     const hist = histories[h.symbol.toUpperCase()];
     if (!hist || !hist.points?.length) continue;
     const fx = fxRates[hist.currency];
     if (!fx || !fx.ok) continue;
-    const factor = (Number(h.quantity) || 0) * fx.rate;
+    const qty = Number(h.quantity) || 0;
+    // Historiske valutakurser når de findes; ellers dagens kurs hele vejen.
+    const rateOn = dailyRates(fxHistories[hist.currency], fx.rate);
     const byDay = new Map();
-    for (const p of hist.points) byDay.set(dayKey(p.t), p.close * factor);
-    series.push(byDay);
+    for (const p of hist.points) {
+      const day = dayKey(p.t);
+      byDay.set(day, { local: p.close * qty, day });
+    }
+    series.push({ symbol: hist.symbol || h.symbol, currency: hist.currency, byDay, rateOn, first: [...byDay.keys()].sort()[0] });
   }
-  if (!series.length) return [];
+  if (!series.length) return { points: [], limitedBy: null };
 
-  // Brug dagene fra den længste serie; manglende dage i andre serier udfyldes
-  // med seneste kendte lukkekurs (forward fill), så helligdage på én børs ikke
-  // giver dyk i grafen.
+  // Brug alle dage fra alle serier; manglende dage udfyldes med seneste kendte
+  // lukkekurs (forward fill), så en helligdag på én børs ikke giver et dyk.
   const allDays = new Set();
-  for (const s of series) for (const d of s.keys()) allDays.add(d);
+  for (const s of series) for (const d of s.byDay.keys()) allDays.add(d);
   const days = [...allDays].sort();
+
+  // En dag kan kun tegnes, når hvert papir har mindst én kurs til og med den dag.
+  // Derfor starter grafen, hvor den senest startede serie begynder – det fortæller
+  // vi om, i stedet for bare at vise en kortere periode end knappen lover.
+  const starts = series.map((s) => s.first).sort();
+  const begin = starts[starts.length - 1];
+  const limitedBy = begin > starts[0] ? { symbol: series.find((s) => s.first === begin).symbol, from: begin } : null;
+
   const last = new Array(series.length).fill(null);
   const out = [];
   for (const day of days) {
     let total = 0;
     let complete = true;
     for (let i = 0; i < series.length; i++) {
-      const v = series[i].get(day);
+      const v = series[i].byDay.get(day);
       if (v != null) last[i] = v;
       if (last[i] == null) complete = false;
-      else total += last[i];
+      else total += last[i].local * series[i].rateOn(day);
     }
     if (complete) out.push({ date: day, value: total });
   }
-  return out;
+  return { points: out, limitedBy };
+}
+
+// Opslag fra dato til valutakurs. Bruger seneste kurs til og med dagen; er dagen
+// før seriens start, bruges den første kendte kurs.
+export function dailyRates(history, fallback) {
+  const points = history?.ok !== false && Array.isArray(history?.points) ? history.points : [];
+  if (!points.length) return () => fallback;
+  const byDay = new Map();
+  for (const p of points) if (Number.isFinite(p.rate) && p.rate > 0) byDay.set(dayKey(p.t), p.rate);
+  const days = [...byDay.keys()].sort();
+  if (!days.length) return () => fallback;
+  const cache = new Map();
+  let i = 0;
+  let current = byDay.get(days[0]);
+  return (day) => {
+    if (cache.has(day)) return cache.get(day);
+    while (i < days.length && days[i] <= day) current = byDay.get(days[i++]);
+    cache.set(day, current);
+    return current;
+  };
 }
 
 function dayKey(ms) {

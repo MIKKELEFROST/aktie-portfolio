@@ -140,5 +140,23 @@ export function createMockYahooClient({ now = () => new Date() } = {}) {
       }
       return { symbol: s, currency: MINOR[f.currency] || f.currency, range, points };
     },
+    // Faste valutakurser gennem hele perioden: testene skal kunne regne efter i hånden.
+    async getFxHistory(from, to, range = '1y') {
+      if (from.toUpperCase() === to.toUpperCase()) return { points: [], identity: true };
+      const rate = await this.getFxRate(from, to);
+      const hist = await this.getHistory('NOVO-B.CO', range).catch(() => ({ points: [] }));
+      return { points: hist.points.map((p) => ({ t: p.t, rate })) };
+    },
+    async getFxHistories(currencies, base, range) {
+      const out = {};
+      for (const c of [...new Set(currencies.map((x) => x.toUpperCase()))]) {
+        try {
+          out[c] = { ok: true, ...(await this.getFxHistory(c, base, range)) };
+        } catch (err) {
+          out[c] = { ok: false, error: describeError(err) };
+        }
+      }
+      return out;
+    },
   };
 }

@@ -653,3 +653,8 @@ body.platform .only-platform { display: flex !important; }
   background: var(--surface-2, rgba(148, 163, 184, 0.14)); user-select: all;
 }
 body.viewing-person [data-action="add"] { display: none !important; }
+
+/* Forklaringer under grafen — hvad kurven er, og hvad der mangler. */
+.chart-notes { margin-top: 10px; display: grid; gap: 6px; }
+.chart-notes p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.chart-notes b { color: var(--text); font-weight: 600; }
