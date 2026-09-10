@@ -22,6 +22,7 @@ Et personligt, selv-hostet dashboard til din aktieportefølje. Du logger ind med
 - **Login** med adgangskode, "husk mig", brute-force-bremse, skift adgangskode og "log ud overalt".
 - **Mørkt tema**, mobilvenligt layout (bundmenu + kort), "skjul beløb"-knap til toget, dansk talformat.
 - **Sikkerhedskopi**: download/gendan som JSON. Serveren gemmer desuden de 5 seneste versioner automatisk.
+- **Ønskeliste**: hold øje med aktier du ikke ejer, med en valgfri ønskekurs.
 - **Ingen afhængigheder**: kun Node.js. Intet build-step, intet framework. Data i en JSON-fil – eller i Supabase/Upstash Redis på Vercel.
 
 ## Kom i gang
@@ -68,6 +69,10 @@ Har du allerede brugt siden i browser-tilstand, spørger den, om dine hidtidige 
 Hvert push til `main` deployer automatisk. Bemærk: på Vercel er der ingen baggrunds-opvarmning af kurser, så første visning efter en pause tager 1–2 sekunder. Yahoo kan desuden afvise flere kald fra cloud-IP'er end fra en hjemme-PC; appen viser i så fald seneste kendte kurser tydeligt markeret.
 
 Sådan vælges lageret, i den rækkefølge: findes `SUPABASE_URL`/`SUPABASE_KEY`, bruges Supabase; ellers `KV_REST_API_URL`/`KV_REST_API_TOKEN` (eller `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN`) → Redis; ellers JSON-filen i `DATA_DIR`. Det gælder også lokalt og i Docker.
+
+## Ønskeliste
+
+Aktier man overvejer, men ikke ejer, hører til under *Ønskeliste*. Søg en aktie frem, tilføj den, og sæt eventuelt en **ønskekurs**: den kurs du gerne vil købe til. Listen viser dagens kurs, dagens bevægelse og hvor langt der er ned til dit ønske – og markerer posten, når kursen er nået. Ønskelisten er din egen, følger med i sikkerhedskopien, og indgår ikke i porteføljens værdi eller afkast.
 
 ## Profiler og at følge hinanden
 

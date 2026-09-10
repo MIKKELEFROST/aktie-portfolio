@@ -155,6 +155,8 @@
     people: { q: '', results: [], loading: false, searched: false },
     follows: { following: [], followers: [] },
     inviteCode: null,
+    watchlist: { items: [], loaded: false, loading: false },
+    wlSearch: { q: '', results: [], loading: false, searched: false },
     account: storageGet('account', 'all'), // 'all' | 'none' | depot-id
     localImport: null, // data fundet i browserens lager, som kan overføres til kontoen
     allHoldings: [], // alle beholdninger uanset depot-filter (til tilføj/køb til og "Uden depot"-chip)
@@ -655,8 +657,8 @@
   // Routing
   // ======================================================================
 
-  const ROUTES = { '/': 'overview', '/beholdninger': 'holdings', '/indstillinger': 'settings', '/folk': 'people' };
-  const TITLES = { overview: 'Overblik', holdings: 'Beholdninger', settings: 'Indstillinger', people: 'Folk', person: 'Profil' };
+  const ROUTES = { '/': 'overview', '/beholdninger': 'holdings', '/indstillinger': 'settings', '/folk': 'people', '/liste': 'watchlist' };
+  const TITLES = { overview: 'Overblik', holdings: 'Beholdninger', settings: 'Indstillinger', people: 'Folk', person: 'Profil', watchlist: 'Ønskeliste' };
   const PERSON_PATH = /^\/profil\/([^/]+)$/;
 
   const personIdFromPath = () => PERSON_PATH.exec(location.pathname)?.[1] || null;
@@ -694,6 +696,7 @@
       followsLoaded = true;
       loadFollows();
     }
+    if (route === 'watchlist' && !state.watchlist.loaded && !state.watchlist.loading) loadWatchlist();
   }
 
   // ======================================================================
@@ -720,6 +723,7 @@
     if (route === 'overview') page.innerHTML = renderOverview();
     else if (route === 'holdings') page.innerHTML = renderHoldings();
     else if (route === 'people') page.innerHTML = renderPeople();
+    else if (route === 'watchlist') page.innerHTML = renderWatchlist();
     else if (route === 'person') page.innerHTML = renderPerson();
     else page.innerHTML = renderSettings();
     if (route === 'overview') afterRenderOverview();
@@ -1401,6 +1405,141 @@
     }
   }
 
+  // ---------- Ønskeliste ----------
+
+  async function loadWatchlist({ silent = false } = {}) {
+    state.watchlist.loading = true;
+    if (!silent) render();
+    try {
+      const data = await api('GET', '/api/watchlist');
+      state.watchlist = { items: data.items, loaded: true, loading: false };
+    } catch (err) {
+      state.watchlist.loading = false;
+      if (!silent) toast(err.message, 'error');
+    }
+    render();
+  }
+
+  let wlTimer = null;
+  function searchWatchSoon(q) {
+    state.wlSearch.q = q;
+    clearTimeout(wlTimer);
+    if (q.trim().length < 1) {
+      state.wlSearch = { q, results: [], loading: false, searched: false };
+      return render();
+    }
+    state.wlSearch.loading = true;
+    wlTimer = setTimeout(async () => {
+      try {
+        const data = await api('GET', `/api/search?q=${encodeURIComponent(q.trim())}`);
+        if (state.wlSearch.q !== q) return;
+        state.wlSearch = { q, results: data.results.slice(0, 8), loading: false, searched: true };
+      } catch (err) {
+        state.wlSearch = { q, results: [], loading: false, searched: true };
+        toast(err.message, 'error');
+      }
+      render();
+    }, 250);
+  }
+
+  async function addToWatchlist(symbol) {
+    try {
+      await api('POST', '/api/watchlist', { symbol });
+      state.wlSearch = { q: '', results: [], loading: false, searched: false };
+      toast('Tilføjet til ønskelisten', 'success');
+      await loadWatchlist({ silent: true });
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  async function removeFromWatchlist(symbol) {
+    try {
+      await api('DELETE', `/api/watchlist/${encodeURIComponent(symbol)}`);
+      state.watchlist.items = state.watchlist.items.filter((w) => w.symbol !== symbol);
+      render();
+      toast('Fjernet fra ønskelisten', 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  async function setWatchTarget(symbol) {
+    const nu = state.watchlist.items.find((w) => w.symbol === symbol);
+    const svar = await promptDialog({
+      title: 'Ønskekurs',
+      text: `Hvilken kurs vil du købe ${nu?.name || symbol} til? Lad feltet stå tomt for at fjerne ønskekursen.`,
+      value: isNum(nu?.target) ? fmtRaw(nu.target) : '',
+      placeholder: isNum(nu?.price) ? fmtPrice(nu.price) : '0,00',
+      suffix: nu?.currency || '',
+    });
+    if (svar === null) return;
+    const tal = svar.trim() ? parseInput(svar) : null;
+    if (svar.trim() && (!isNum(tal) || tal < 0)) return toast('Ønskekursen skal være et tal, f.eks. 250,50', 'error');
+    try {
+      await api('PUT', `/api/watchlist/${encodeURIComponent(symbol)}`, { target: tal });
+      await loadWatchlist({ silent: true });
+      toast(tal === null ? 'Ønskekursen er fjernet' : 'Ønskekursen er gemt', 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  function renderWatchlist() {
+    const { items, loaded } = state.watchlist;
+    const w = state.wlSearch;
+    const nået = items.filter((x) => x.atTarget);
+
+    const søgeresultater = w.loading
+      ? '<p class="muted">Søger…</p>'
+      : w.results.length
+        ? `<ul class="wl-results">${w.results.map((r) => {
+            const har = items.some((x) => x.symbol === r.symbol);
+            return `<li><span class="stock-avatar">${esc(initials(r.symbol))}</span><span class="wl-res-name"><b>${esc(r.name)}</b><br><span class="muted small">${esc(r.symbol)}${r.exchange ? ` · ${esc(r.exchange)}` : ''}</span></span>${har ? '<span class="chip">På listen</span>' : `<button class="btn btn-sm btn-primary" data-action="watch-add" data-symbol="${esc(r.symbol)}">Tilføj</button>`}</li>`;
+          }).join('')}</ul>`
+        : w.searched ? `<p class="muted">Ingen aktier matcher "${esc(w.q)}".</p>` : '';
+
+    const rækker = items.map((x) => `
+      <div class="wl-row${x.atTarget ? ' is-hit' : ''}">
+        <div class="wl-name">
+          <b>${esc(x.name)}</b>
+          <span class="muted small">${esc(x.symbol)}${x.currency ? ` · ${esc(x.currency)}` : ''}${x.exchange ? ` · ${esc(x.exchange)}` : ''}</span>
+          ${x.note ? `<span class="muted small">${esc(x.note)}</span>` : ''}
+        </div>
+        <div class="wl-price">
+          ${x.error ? `<span class="muted">${esc(x.error)}</span>` : `
+            <b class="amount">${isNum(x.price) ? `${fmtPrice(x.price)} ${esc(x.currency || '')}` : '–'}</b>
+            <span class="${signClass(x.changePercent)} small">${arrow(x.changePercent)}${fmtPct(x.changePercent)}</span>`}
+        </div>
+        <div class="wl-target">
+          ${isNum(x.target)
+            ? `<button class="btn btn-ghost btn-sm" data-action="watch-target" data-symbol="${esc(x.symbol)}">Ønske: <b class="amount">${fmtPrice(x.target)}</b></button>
+               <span class="small ${x.atTarget ? 'pos' : 'muted'}">${x.atTarget ? '✓ Kursen er nået' : `${fmtPct(x.toTarget, { sign: false })} over`}</span>`
+            : `<button class="btn btn-ghost btn-sm" data-action="watch-target" data-symbol="${esc(x.symbol)}">Sæt ønskekurs</button>`}
+        </div>
+        <button class="btn btn-ghost btn-icon" data-action="watch-remove" data-symbol="${esc(x.symbol)}" title="Fjern fra ønskelisten" aria-label="Fjern ${esc(x.name)} fra ønskelisten">${icon('trash')}</button>
+      </div>`).join('');
+
+    return `
+      ${pageHeader('Ønskeliste', `<span>Aktier du holder øje med${items.length ? ` · ${items.length}` : ''}</span>`, headerActions({ add: false }))}
+      ${nået.length ? `<div class="banner info">${icon('bell')}<div><b>${nået.length === 1 ? '1 aktie er nået sin ønskekurs' : `${nået.length} aktier er nået deres ønskekurs`}:</b> ${nået.map((x) => esc(x.name)).join(', ')}.</div></div>` : ''}
+
+      <div class="card">
+        <div class="card-header"><h2>${icon('search')}Tilføj en aktie</h2></div>
+        <div class="card-body">
+          <div class="input-group" style="max-width:420px"><input class="input" id="wl-search" type="search" placeholder="Søg efter aktie eller ETF…" value="${esc(w.q)}" aria-label="Søg efter aktie"></div>
+          ${søgeresultater}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2>${icon('star')}På listen <span class="hint">${items.length}</span></h2></div>
+        <div class="card-body">
+          ${!loaded ? '<p class="muted">Henter…</p>' : items.length ? rækker : '<p class="muted">Din ønskeliste er tom. Søg efter en aktie ovenfor – du kan sætte en ønskekurs og få den markeret, når kursen er nået.</p>'}
+        </div>
+      </div>`;
+  }
+
   // ---------- Folk: find, følg, godkend ----------
 
   const personInitials = (name) => String(name || '?').split(' ').filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
@@ -1641,6 +1780,35 @@
 
   function setError(id, msg) {
     $(id).textContent = msg || '';
+  }
+
+  // Spørger om én værdi. Returnerer teksten, eller null hvis der blev annulleret.
+  function promptDialog({ title, text = '', value = '', placeholder = '', suffix = '' }) {
+    return new Promise((resolve) => {
+      const dlg = $('#dlg-prompt');
+      const input = $('#prompt-input');
+      $('#prompt-title').textContent = title;
+      $('#prompt-text').textContent = text;
+      $('#prompt-suffix').textContent = suffix;
+      input.value = value;
+      input.placeholder = placeholder;
+      let done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        dlg.removeEventListener('close', onClose);
+        resolve(v);
+      };
+      const onClose = () => finish(dlg.returnValue === 'ok' ? input.value : null);
+      dlg.addEventListener('close', onClose);
+      dlg.returnValue = '';
+      $('#form-prompt').onsubmit = (e) => {
+        e.preventDefault();
+        dlg.close('ok');
+      };
+      dlg.showModal();
+      focusSoon('#prompt-input', 30);
+    });
   }
 
   function confirmDialog({ title, text, okLabel = 'Slet', danger = true }) {
@@ -2458,6 +2626,15 @@
       case 'delete':
         e.stopPropagation();
         return deleteHolding(el.dataset.id);
+      case 'watch-add':
+        addToWatchlist(el.dataset.symbol);
+        break;
+      case 'watch-remove':
+        removeFromWatchlist(el.dataset.symbol);
+        break;
+      case 'watch-target':
+        setWatchTarget(el.dataset.symbol);
+        break;
       case 'follow':
         followAction('POST', `/api/follows/${encodeURIComponent(el.dataset.id)}`, 'Anmodningen er sendt');
         break;
@@ -2574,6 +2751,13 @@
     else if (e.target.dataset.importSymbol !== undefined) {
       imp.rows[Number(e.target.dataset.importSymbol)].symbol = e.target.value.trim().toUpperCase();
       updateImportCount();
+    }
+    else if (id === 'wl-search') {
+      const felt = e.target;
+      const pos = felt.selectionStart;
+      searchWatchSoon(felt.value);
+      const igen = $('#wl-search');
+      if (igen && igen !== felt) { igen.focus(); igen.setSelectionRange(pos, pos); }
     }
     else if (id === 'people-search') {
       const felt = e.target;
