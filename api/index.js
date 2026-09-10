@@ -46,7 +46,8 @@ let databaseChecked = !database;
 // Hver serverless-instans er sin egen proces, så en tilfældig opsætningsnøgle ville skifte
 // mellem kald. Kræves der login, skal den første adgangskode derfor komme fra
 // DASHBOARD_PASSWORD og ikke oprettes i browseren.
-let passwordConfirmed = config.publicAccess || Boolean(config.envPassword);
+// Uden database er der hverken login eller noget at slå op – så er der intet at bekræfte.
+let passwordConfirmed = !database || config.publicAccess || Boolean(config.envPassword);
 
 export default async function handler(req, res) {
   if (!databaseChecked) {
