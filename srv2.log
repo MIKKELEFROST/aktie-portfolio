@@ -1,3 +1,0 @@
-Aktie-portfolio kører på http://localhost:3142
-Data gemmes i /tmp/tmp.MWLHFTt0Mo
-YAHOO_MOCK=1: bruger falske kurser (ingen kald til Yahoo Finance).

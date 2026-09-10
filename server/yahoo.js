@@ -31,9 +31,10 @@ export class YahooError extends Error {
 // ---------- lille cache med TTL + dedup af igangværende kald ----------
 
 class TtlCache {
-  constructor() {
+  constructor({ maxEntries = 500 } = {}) {
     this.map = new Map();
     this.inflight = new Map();
+    this.maxEntries = maxEntries;
   }
 
   get(key) {
@@ -43,13 +44,16 @@ class TtlCache {
   }
 
   set(key, value, ttlMs) {
+    this.map.delete(key);
     this.map.set(key, { value, expires: Date.now() + ttlMs, fetchedAt: Date.now() });
+    // Begrænset størrelse: smid de ældste ud, så cachen ikke vokser uendeligt.
+    while (this.map.size > this.maxEntries) this.map.delete(this.map.keys().next().value);
   }
 
-  // Kør `fn` højst én gang ad gangen pr. nøgle; genbrug friskt cache-hit.
-  async through(key, ttlMs, fn) {
+  // Kør `fn` højst én gang ad gangen pr. nøgle; genbrug friskt cache-hit (medmindre `refresh`).
+  async through(key, ttlMs, fn, { refresh = false } = {}) {
     const hit = this.get(key);
-    if (hit && hit.fresh) return hit.value;
+    if (hit && hit.fresh && !refresh) return hit.value;
     if (this.inflight.has(key)) return this.inflight.get(key);
     const p = (async () => {
       try {
@@ -119,7 +123,12 @@ async function fetchJson(url, { symbol = null } = {}) {
     if (!res.ok) {
       throw new YahooError(`Yahoo Finance svarede HTTP ${res.status}`, { status: res.status, symbol, code: 'HTTP' });
     }
-    return await res.json();
+    try {
+      return await res.json();
+    } catch (err) {
+      if (err?.name === 'AbortError') throw new YahooError('Yahoo Finance svarede ikke i tide', { symbol, code: 'TIMEOUT' });
+      throw new YahooError('Uventet svar fra Yahoo Finance', { symbol, code: 'BAD_RESPONSE' });
+    }
   } finally {
     clearTimeout(timer);
     release();
@@ -187,10 +196,10 @@ export function normalizeChartMeta(meta, nowSeconds = Math.floor(Date.now() / 10
 
 // ---------- offentligt API ----------
 
-const quoteCache = new TtlCache();
-const fxCache = new TtlCache();
-const searchCache = new TtlCache();
-const historyCache = new TtlCache();
+const quoteCache = new TtlCache({ maxEntries: 500 });
+const fxCache = new TtlCache({ maxEntries: 100 });
+const searchCache = new TtlCache({ maxEntries: 300 });
+const historyCache = new TtlCache({ maxEntries: 200 });
 
 const FX_TTL_MS = 5 * 60_000;
 const SEARCH_TTL_MS = 10 * 60_000;
@@ -208,27 +217,28 @@ export function createYahooClient({ quoteTtlMs = 60_000 } = {}) {
     return result;
   }
 
-  async function getQuote(symbol) {
+  async function getQuote(symbol, { refresh = false } = {}) {
     const key = symbol.toUpperCase();
     return quoteCache.through(key, quoteTtlMs, async () => {
       const result = await fetchChart(symbol);
       return { ...normalizeChartMeta(result.meta), fetchedAt: new Date().toISOString() };
-    });
+    }, { refresh });
   }
 
   // Henter flere kurser. Fejler aldrig som helhed: hver post er enten
   // { ok: true, quote, stale } eller { ok: false, error, quote? (sidst kendte) }.
-  async function getQuotes(symbols) {
+  // En forældet kurs får marketOpen: null – vi ved ikke længere, om børsen er åben.
+  async function getQuotes(symbols, { refresh = false } = {}) {
     const unique = [...new Set(symbols.map((s) => s.toUpperCase()))];
     const entries = await Promise.all(
       unique.map(async (symbol) => {
         try {
-          const quote = await getQuote(symbol);
+          const quote = await getQuote(symbol, { refresh });
           return [symbol, { ok: true, quote, stale: false }];
         } catch (err) {
           const cached = quoteCache.get(symbol);
           if (cached) {
-            return [symbol, { ok: true, quote: cached.value, stale: true, error: describeError(err) }];
+            return [symbol, { ok: true, quote: { ...cached.value, marketOpen: null }, stale: true, error: describeError(err) }];
           }
           return [symbol, { ok: false, error: describeError(err) }];
         }
@@ -298,10 +308,13 @@ export function createYahooClient({ quoteTtlMs = 60_000 } = {}) {
     return searchCache.through(q.toLowerCase(), SEARCH_TTL_MS, async () => {
       const ascii = transliterate(q);
       const variants = ascii !== q ? [ascii, q] : [q];
-      const lists = await Promise.all(variants.map((v) => searchOnce(v).catch(() => [])));
+      let lastError = null;
+      const lists = await Promise.all(variants.map((v) => searchOnce(v).catch((err) => { lastError = err; return null; })));
+      if (lists.every((l) => l === null)) throw lastError; // fejl må ikke caches som "ingen resultater"
       const seen = new Set();
       const merged = [];
       for (const list of lists) {
+        if (!list) continue;
         for (const item of list) {
           if (seen.has(item.symbol)) continue;
           seen.add(item.symbol);
@@ -337,7 +350,7 @@ export function createYahooClient({ quoteTtlMs = 60_000 } = {}) {
       for (let i = 0; i < ts.length; i++) {
         const c = closes[i];
         if (typeof c === 'number' && Number.isFinite(c)) {
-          points.push({ t: ts[i] * 1000, close: c / divisor });
+          points.push({ t: interval === '1wk' ? weekStart(ts[i] * 1000) : ts[i] * 1000, close: c / divisor });
         }
       }
       return { symbol: meta.symbol, currency: meta.currency, range, points };
@@ -345,6 +358,15 @@ export function createYahooClient({ quoteTtlMs = 60_000 } = {}) {
   }
 
   return { getQuote, getQuotes, getFxRate, getFxRates, search, getHistory };
+}
+
+// Ugentlige bars stemples forskelligt af Yahoo (søndag aften UTC for Europa, mandag for USA).
+// Vi lægger alle på ugens mandag, så serier fra forskellige børser kan lægges sammen.
+export function weekStart(ms) {
+  const d = new Date(ms + 12 * 3600e3);
+  d.setUTCHours(0, 0, 0, 0);
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+  return d.getTime();
 }
 
 export function transliterate(text) {

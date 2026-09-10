@@ -1,7 +1,7 @@
 // Adgangskode-hash (scrypt) og HMAC-signerede session-tokens.
 // Ingen eksterne afhængigheder – kun node:crypto.
 
-import { scrypt, randomBytes, timingSafeEqual, createHmac } from 'node:crypto';
+import { scrypt, randomBytes, timingSafeEqual, createHmac, createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 
 const scryptAsync = promisify(scrypt);
@@ -28,14 +28,20 @@ function b64url(buf) {
   return Buffer.from(buf).toString('base64url');
 }
 
-export function createSessionToken(secret, { ttlMs = 30 * 24 * 60 * 60 * 1000, now = Date.now() } = {}) {
-  const payload = JSON.stringify({ iat: now, exp: now + ttlMs, nonce: randomBytes(8).toString('hex') });
+// `pv` (password version) binder tokenet til den aktuelle adgangskode, så alle sessioner
+// falder bort når adgangskoden skiftes – også hvis SESSION_SECRET kommer fra miljøet.
+export function passwordVersion(passwordHash) {
+  return createHash('sha256').update(String(passwordHash || '')).digest('hex').slice(0, 16);
+}
+
+export function createSessionToken(secret, { ttlMs = 30 * 24 * 60 * 60 * 1000, now = Date.now(), pv = '' } = {}) {
+  const payload = JSON.stringify({ iat: now, exp: now + ttlMs, nonce: randomBytes(8).toString('hex'), pv });
   const body = b64url(payload);
   const sig = createHmac('sha256', secret).update(body).digest('base64url');
   return `${body}.${sig}`;
 }
 
-export function verifySessionToken(secret, token, { now = Date.now() } = {}) {
+export function verifySessionToken(secret, token, { now = Date.now(), pv = null } = {}) {
   if (typeof token !== 'string') return null;
   const dot = token.indexOf('.');
   if (dot < 0) return null;
@@ -52,6 +58,7 @@ export function verifySessionToken(secret, token, { now = Date.now() } = {}) {
     return null;
   }
   if (typeof payload.exp !== 'number' || payload.exp <= now) return null;
+  if (pv !== null && payload.pv !== pv) return null;
   return payload;
 }
 

@@ -23,3 +23,6 @@ playwright-report/
 *.png
 !public/*.png
 !docs/*.png
+
+# Log-filer
+*.log

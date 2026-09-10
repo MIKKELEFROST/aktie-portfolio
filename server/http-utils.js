@@ -43,11 +43,14 @@ export function readJsonBody(req) {
     });
     req.on('end', () => {
       if (chunks.length === 0) return resolve({});
+      let parsed;
       try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       } catch {
-        reject(new HttpError(400, 'Ugyldig JSON'));
+        return reject(new HttpError(400, 'Ugyldig JSON'));
       }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return reject(new HttpError(400, 'Forventede et JSON-objekt'));
+      resolve(parsed);
     });
     req.on('error', reject);
   });
@@ -62,9 +65,23 @@ export function parseCookies(req) {
     if (idx < 0) continue;
     const key = part.slice(0, idx).trim();
     const val = part.slice(idx + 1).trim();
-    if (key) out[key] = decodeURIComponent(val);
+    if (!key) continue;
+    // En fremmed cookie med et løst '%' må ikke vælte hele forespørgslen.
+    try {
+      out[key] = decodeURIComponent(val);
+    } catch {
+      out[key] = val;
+    }
   }
   return out;
+}
+
+export function safeDecode(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
 }
 
 export function cookieHeader(name, value, { maxAgeSeconds, secure = false, path: cookiePath = '/' } = {}) {
@@ -88,7 +105,8 @@ const MIME = {
 
 // Serverer en fil fra `root`. Returnerer false hvis filen ikke findes.
 export async function serveStatic(res, root, urlPath, { cacheControl = 'no-cache' } = {}) {
-  const decoded = decodeURIComponent(urlPath.split('?')[0]);
+  const decoded = safeDecode(urlPath.split('?')[0]);
+  if (decoded === null) return false;
   const safe = path.normalize(decoded).replace(/^(\.\.[/\\])+/, '');
   const filePath = path.join(root, safe);
   if (!filePath.startsWith(root)) return false;
@@ -111,10 +129,20 @@ export async function serveStatic(res, root, urlPath, { cacheControl = 'no-cache
 
 // X-Forwarded-For må kun bruges bag en reverse proxy man stoler på (TRUST_PROXY=1),
 // ellers kan en angriber forfalske sin IP og omgå login-bremsen.
+// Bag en proxy bruges den SIDSTE adresse i X-Forwarded-For (den proxyen selv har tilføjet);
+// de forreste kan klienten selv skrive.
 export function clientIp(req, { trustProxy = false } = {}) {
   if (trustProxy) {
     const fwd = req.headers['x-forwarded-for'];
-    if (typeof fwd === 'string' && fwd.length) return fwd.split(',')[0].trim();
+    if (typeof fwd === 'string' && fwd.length) {
+      const parts = fwd.split(',').map((s) => s.trim()).filter(Boolean);
+      if (parts.length) return parts[parts.length - 1];
+    }
   }
   return req.socket?.remoteAddress || 'unknown';
+}
+
+export function isLoopback(req) {
+  const ip = req.socket?.remoteAddress || '';
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }

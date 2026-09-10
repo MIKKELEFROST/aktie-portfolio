@@ -5,8 +5,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { newId } from './store.js';
 import { computePortfolio, computeValueHistory, parseDanishNumber } from './portfolio-math.js';
-import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter } from './auth.js';
-import { sendJson, sendError, readJsonBody, parseCookies, cookieHeader, serveStatic, clientIp, HttpError } from './http-utils.js';
+import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter, passwordVersion } from './auth.js';
+import { sendJson, sendError, readJsonBody, parseCookies, cookieHeader, serveStatic, clientIp, isLoopback, safeDecode, HttpError } from './http-utils.js';
+import { timingSafeEqual } from 'node:crypto';
 import { YahooError } from './yahoo.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -22,6 +23,7 @@ const CURRENCY_RE = /^[A-Z]{3}$/;
 const PAGE_ROUTES = new Set(['/', '/beholdninger', '/indstillinger']);
 const HISTORY_RANGES = new Set(['5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '5y', 'max']);
 const HOLDABLE_TYPES = new Set(['EQUITY', 'ETF', 'MUTUALFUND']);
+const MAX_HOLDINGS = 200;
 const TYPE_NAMES = { INDEX: 'et indeks', CRYPTOCURRENCY: 'en kryptovaluta', CURRENCY: 'en valuta', FUTURE: 'en future', OPTION: 'en option' };
 
 export function createApp({ store, yahoo, config, logger = console, onPortfolioRequest = null }) {
@@ -49,7 +51,24 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     const cookies = parseCookies(req);
     const token = cookies[COOKIE_NAME];
     if (!token) return false;
-    return Boolean(verifySessionToken(await sessionSecret(), token));
+    const { passwordHash } = await authState();
+    return Boolean(verifySessionToken(await sessionSecret(), token, { pv: passwordVersion(passwordHash) }));
+  }
+
+  // Opsætningsnøgle: kræves for at oprette den første adgangskode, medmindre man sidder
+  // på selve maskinen (localhost). Forhindrer at en fremmed "kaprer" en ny, åben instans.
+  function setupTokenRequired(req) {
+    return Boolean(config.setupToken) && !isLoopback(req);
+  }
+
+  function checkSetupToken(req, body) {
+    if (!setupTokenRequired(req)) return;
+    const given = Buffer.from(String(body.setupToken ?? ''));
+    const expected = Buffer.from(String(config.setupToken));
+    if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
+      limiter.recordFailure(clientIp(req, { trustProxy: config.trustProxy }));
+      throw new HttpError(403, 'Forkert opsætningsnøgle – den står i serverens log/terminal');
+    }
   }
 
   function isSecure(req) {
@@ -61,7 +80,8 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   async function issueSession(req, res, { remember = true } = {}) {
     const ttlMs = remember ? SESSION_LONG_MS : SESSION_SHORT_MS;
-    const token = createSessionToken(await sessionSecret(), { ttlMs });
+    const { passwordHash } = await authState();
+    const token = createSessionToken(await sessionSecret(), { ttlMs, pv: passwordVersion(passwordHash) });
     const opts = { secure: isSecure(req) };
     if (remember) opts.maxAgeSeconds = Math.floor(ttlMs / 1000);
     res.setHeader('Set-Cookie', cookieHeader(COOKIE_NAME, token, opts));
@@ -131,6 +151,20 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     );
     const currencies = Object.values(histories).map((h) => h.currency);
     const fxRates = currencies.length ? await yahoo.getFxRates(currencies, baseCurrency) : {};
+    for (const h of holdings) {
+      const hist = histories[h.symbol];
+      if (!hist) continue; // allerede i missing
+      if (!hist.points?.length) {
+        missing.push({ symbol: h.symbol, error: 'Ingen historiske kurser' });
+        delete histories[h.symbol];
+        continue;
+      }
+      const fx = fxRates[hist.currency];
+      if (!fx?.ok) {
+        missing.push({ symbol: h.symbol, error: fx?.error?.message || `Ingen valutakurs for ${hist.currency}/${baseCurrency}` });
+        delete histories[h.symbol];
+      }
+    }
     const points = computeValueHistory({ holdings, histories, fxRates });
     return { range, baseCurrency, points, missing, approximate: true };
   }
@@ -192,13 +226,21 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   const api = {
     async status(req, res) {
       const { setupRequired, usesEnvPassword } = await authState();
-      sendJson(res, 200, { setupRequired, usesEnvPassword, authenticated: !setupRequired && (await isAuthenticated(req)) });
+      sendJson(res, 200, {
+        setupRequired,
+        setupTokenRequired: setupRequired && setupTokenRequired(req),
+        usesEnvPassword,
+        authenticated: !setupRequired && (await isAuthenticated(req)),
+      });
     },
 
     async setup(req, res) {
       const { setupRequired } = await authState();
       if (!setupRequired) throw new HttpError(409, 'Der er allerede oprettet en adgangskode');
+      const ip = clientIp(req, { trustProxy: config.trustProxy });
+      if (limiter.isBlocked(ip)) throw new HttpError(429, 'For mange forsøg – prøv igen senere', { retryAfter: limiter.retryAfterSeconds(ip) });
       const body = await readJsonBody(req);
+      checkSetupToken(req, body);
       const password = String(body.password ?? '');
       if (password.length < MIN_PASSWORD_LENGTH) throw new HttpError(400, `Adgangskoden skal være mindst ${MIN_PASSWORD_LENGTH} tegn`);
       if (body.confirm !== undefined && String(body.confirm) !== password) throw new HttpError(400, 'De to adgangskoder er ikke ens');
@@ -247,7 +289,9 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       await store.updateAuth((draft) => {
         draft.passwordHash = newHash;
         draft.updatedAt = new Date().toISOString();
+        if (!config.sessionSecret) draft.sessionSecret = null; // alle andre enheder logges ud
       });
+      await issueSession(req, res, { remember: true }); // denne browser forbliver logget ind
       sendJson(res, 200, { ok: true });
     },
 
@@ -299,8 +343,10 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const avgPrice = parseNumber(body.avgPrice, 'Købskurs', { min: 0, allowNull: true });
       const note = parseNote(body.note);
 
-      const existing = (await store.getPortfolio()).holdings.find((h) => h.symbol === symbol);
+      const current = (await store.getPortfolio()).holdings;
+      const existing = current.find((h) => h.symbol === symbol);
       if (existing) throw new HttpError(409, `${existing.name || symbol} er allerede i porteføljen`, { id: existing.id });
+      if (current.length >= MAX_HOLDINGS) throw new HttpError(409, `Porteføljen kan højst indeholde ${MAX_HOLDINGS} aktier`);
 
       const quotes = await yahoo.getQuotes([symbol]);
       const entry = quotes[symbol];
@@ -428,9 +474,11 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     async restore(req, res) {
       const body = await readJsonBody(req);
       if (!Array.isArray(body.holdings)) throw new HttpError(400, 'Filen indeholder ingen "holdings"-liste');
+      if (body.holdings.length > MAX_HOLDINGS) throw new HttpError(400, `Højst ${MAX_HOLDINGS} aktier kan gendannes`);
       const now = new Date().toISOString();
       const seen = new Set();
       const holdings = body.holdings.map((raw, i) => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new HttpError(400, `Ugyldig post (linje ${i + 1})`);
         const symbol = parseSymbol(raw.symbol);
         if (seen.has(symbol)) throw new HttpError(400, `Symbolet ${symbol} optræder flere gange (linje ${i + 1})`);
         seen.add(symbol);
@@ -442,16 +490,19 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
           quantity: parseQuantity(raw.quantity),
           avgPrice: parseNumber(raw.avgPrice, 'Købskurs', { min: 0, allowNull: true }),
           note: parseNote(raw.note),
-          addedAt: typeof raw.addedAt === 'string' ? raw.addedAt : now,
+          addedAt: typeof raw.addedAt === 'string' && raw.addedAt.length <= 40 && !Number.isNaN(Date.parse(raw.addedAt)) ? raw.addedAt : now,
           updatedAt: now,
         };
       });
       const baseCurrency = body.settings?.baseCurrency ? parseCurrency(body.settings.baseCurrency) : undefined;
       const cash = body.settings?.cash !== undefined ? parseNumber(body.settings.cash, 'Kontanter', { min: 0, allowNull: true }) ?? 0 : undefined;
+      const settings = body.settings && typeof body.settings === 'object' ? body.settings : {};
       const data = await store.updatePortfolio((draft) => {
         draft.holdings = holdings;
         if (baseCurrency) draft.settings.baseCurrency = baseCurrency;
         if (cash !== undefined) draft.settings.cash = cash;
+        if (settings.displayName !== undefined) draft.settings.displayName = String(settings.displayName ?? '').trim().slice(0, 40);
+        if (settings.showDecimals !== undefined) draft.settings.showDecimals = Boolean(settings.showDecimals);
       });
       sendJson(res, 200, { ok: true, count: holdings.length, settings: data.settings });
     },
@@ -510,7 +561,11 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         if (!type.startsWith('application/json')) throw new HttpError(415, 'Forventede application/json');
       }
       const params = {};
-      for (const [k, v] of Object.entries(match.groups || {})) params[k] = decodeURIComponent(v);
+      for (const [k, v] of Object.entries(match.groups || {})) {
+        const decoded = safeDecode(v);
+        if (decoded === null) throw new HttpError(400, 'Ugyldig sti');
+        params[k] = decoded;
+      }
       await handler(req, res, url, params);
       return;
     }
@@ -595,5 +650,5 @@ export function rankSearchResults(results, query = '') {
 }
 
 function formatQty(n) {
-  return Number.isInteger(n) ? String(n) : String(Math.round(n * 1e4) / 1e4).replace('.', ',');
+  return Number.isInteger(n) ? String(n) : String(Math.round(n * 1e6) / 1e6).replace('.', ',');
 }

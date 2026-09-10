@@ -2,10 +2,34 @@
 
 import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { readFileSync, promises as fs, constants as fsConstants } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { createApp } from './app.js';
 import { createStore } from './store.js';
 import { createYahooClient } from './yahoo.js';
 import { createMockYahooClient } from './yahoo-mock.js';
+
+// Læser en .env-fil (KEY=VALUE pr. linje) uden at overskrive allerede satte variabler.
+export function loadDotEnv(file = path.resolve('.env'), env = process.env) {
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    return false;
+  }
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq < 1) continue;
+    const key = line.slice(0, eq).trim();
+    let value = line.slice(eq + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+    if (env[key] === undefined) env[key] = value;
+  }
+  return true;
+}
 
 export function loadConfig(env = process.env) {
   return {
@@ -19,6 +43,7 @@ export function loadConfig(env = process.env) {
     secureCookies: env.SECURE_COOKIES === '1' || env.SECURE_COOKIES === 'true',
     mockYahoo: env.YAHOO_MOCK === '1' || env.YAHOO_MOCK === 'true',
     trustProxy: env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true',
+    setupToken: env.SETUP_TOKEN || randomBytes(12).toString('hex'),
     warmCache: env.WARM_CACHE !== '0',
   };
 }
@@ -37,7 +62,7 @@ export function startCacheWarmer({ store, yahoo, config, logger = console }) {
       const data = await store.getPortfolio();
       const symbols = data.holdings.map((h) => h.symbol);
       if (!symbols.length) return;
-      const quotes = await yahoo.getQuotes(symbols);
+      const quotes = await yahoo.getQuotes(symbols, { refresh: true });
       const anyOpen = Object.values(quotes).some((q) => q.ok && q.quote.marketOpen === true);
       if (!anyOpen) lastClientRequest = 0; // Ingen grund til at hente igen før næste besøg.
       const currencies = Object.values(quotes).filter((q) => q.ok).map((q) => q.quote.currency);
@@ -61,7 +86,14 @@ export function startCacheWarmer({ store, yahoo, config, logger = console }) {
   };
 }
 
-export function startServer(config = loadConfig()) {
+export async function startServer(config = loadConfig()) {
+  try {
+    await fs.mkdir(config.dataDir, { recursive: true });
+    await fs.access(config.dataDir, fsConstants.W_OK);
+  } catch (err) {
+    console.error(`DATA_DIR ${config.dataDir} kan ikke bruges (${err.code || err.message}). Tjek stien og rettigheder (i Docker: mappen skal kunne skrives af uid 1000).`);
+    process.exit(1);
+  }
   const store = createStore(config.dataDir, { baseCurrency: config.baseCurrency });
   const yahoo = config.mockYahoo ? createMockYahooClient() : createYahooClient({ quoteTtlMs: config.quoteTtlMs });
   const warmer = config.warmCache && !config.mockYahoo ? startCacheWarmer({ store, yahoo, config }) : null;
@@ -72,10 +104,22 @@ export function startServer(config = loadConfig()) {
     console.log(`Aktie-portfolio kører på http://${shownHost}:${config.port}`);
     console.log(`Data gemmes i ${config.dataDir}`);
     if (config.mockYahoo) console.log('YAHOO_MOCK=1: bruger falske kurser (ingen kald til Yahoo Finance).');
-    if (!config.envPassword) console.log('Ingen DASHBOARD_PASSWORD sat – adgangskoden oprettes i browseren første gang.');
+    if (!config.envPassword) {
+      store.getAuth().then((auth) => {
+        if (auth.passwordHash) return;
+        console.log('Ingen adgangskode endnu – åbn siden i browseren for at oprette den.');
+        console.log(`Åbner du siden fra en anden maskine, skal du bruge denne opsætningsnøgle: ${config.setupToken}`);
+      });
+    }
   });
   return server;
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
-if (isMain) startServer();
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  loadDotEnv();
+  startServer().catch((err) => {
+    console.error('Serveren kunne ikke starte:', err);
+    process.exit(1);
+  });
+}

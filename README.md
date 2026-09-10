@@ -34,26 +34,30 @@ npm start
 
 Åbn <http://localhost:3000>. Første gang bliver du bedt om at **oprette en adgangskode** – derefter er du logget ind og kan tilføje din første aktie.
 
+Åbner du siden fra en *anden* maskine end den, serveren kører på (fx en server eller Docker på en NAS), skal du også indtaste den **opsætningsnøgle**, som serveren skriver i terminalen/loggen ved start. Det forhindrer, at en fremmed opretter adgangskoden før dig.
+
 ### Docker
 
 ```bash
 docker compose up -d
 ```
 
-Dashboardet kører på port 3000, og dine data ligger i Docker-volumen `aktie-data` (så de overlever genstart og opdateringer).
+Dashboardet kører på port 3000, og dine data ligger i Docker-volumen `aktie-data` (så de overlever genstart og opdateringer). Opsætningsnøglen ses med `docker compose logs`. Bruger du en bind-mount i stedet for volumen, skal mappen kunne skrives af uid 1000.
 
 ## Konfiguration
 
-Alle indstillinger er valgfrie miljøvariabler (se `.env.example`):
+Alle indstillinger er valgfrie miljøvariabler. Læg dem i en `.env`-fil i projektmappen (indlæses automatisk af `npm start`), sæt dem i din shell, eller under `environment:` i `docker-compose.yml`. Se `.env.example`.
 
 | Variabel | Standard | Beskrivelse |
 |---|---|---|
 | `PORT` | `3000` | Port serveren lytter på |
+| `HOST` | `0.0.0.0` | Adresse serveren lytter på (`127.0.0.1` = kun denne maskine) |
 | `DATA_DIR` | `./data` | Mappe til `portfolio.json`, `auth.json` og `backups/` |
 | `DASHBOARD_PASSWORD` | *(tom)* | Fast adgangskode. Hvis tom, oprettes den i browseren første gang |
+| `SETUP_TOKEN` | *(genereres)* | Opsætningsnøgle, der kræves for at oprette den første adgangskode fra en anden maskine end serveren. Skrives i loggen ved start |
 | `SESSION_SECRET` | *(genereres)* | Nøgle til login-sessioner. Genereres automatisk og gemmes i `auth.json` |
 | `BASE_CURRENCY` | `DKK` | Basisvaluta for totaler (kan også ændres under Indstillinger) |
-| `QUOTE_CACHE_SECONDS` | `60` | Hvor længe kurser caches. Yahoo blokerer ved for mange kald |
+| `QUOTE_CACHE_SECONDS` | `60` | Hvor længe kurser caches (mindst 10). Yahoo blokerer ved for mange kald |
 | `TRUST_PROXY` | `0` | Sæt til `1` bag en reverse proxy, så `X-Forwarded-For`/`-Proto` bruges til login-bremse og cookies |
 | `SECURE_COOKIES` | `0` | Tving `Secure`-flag på cookies (sættes automatisk bag proxy med `TRUST_PROXY=1` og HTTPS) |
 | `WARM_CACHE` | `1` | Genhent kurser i baggrunden mens en børs er åben, så siden loader øjeblikkeligt |
@@ -69,8 +73,9 @@ Alle indstillinger er valgfrie miljøvariabler (se `.env.example`):
 
 ## Sikkerhed
 
-- Adgangskoden hashes med scrypt. Sessioner er HMAC-signerede `HttpOnly`-cookies.
-- Max 8 mislykkede login pr. IP pr. 15 min.
+- Adgangskoden hashes med scrypt. Sessioner er HMAC-signerede `HttpOnly`-cookies, der ugyldiggøres når adgangskoden skiftes.
+- Max 8 mislykkede login pr. IP pr. 15 min. Første adgangskode kan kun oprettes fra localhost eller med opsætningsnøglen.
+- Bag en reverse proxy: sæt `TRUST_PROXY=1`, så den rigtige klient-IP bruges.
 - CSRF-værn (JSON-only API), Content-Security-Policy, ingen inline scripts, ingen eksterne ressourcer.
 - **Kør altid bag HTTPS**, hvis dashboardet skal kunne nås udefra – fx med [Caddy](https://caddyserver.com) (`reverse_proxy localhost:3000`) eller Nginx. Login-siden advarer, hvis den åbnes ukrypteret uden for localhost.
 - Glemt adgangskode? Slet `auth.json` i datamappen (eller sæt `DASHBOARD_PASSWORD`) og genstart.
@@ -115,6 +120,7 @@ Alle `/api/*`-kald kræver login (cookie). Muterende kald skal sende `Content-Ty
 | `POST` | `/api/holdings/:id/trade` | `{ type: "buy"\|"sell", quantity, price }` |
 | `GET/PUT` | `/api/settings` | Basisvaluta, navn, kontanter, decimaler |
 | `GET` | `/api/backup` · `POST /api/restore` | Sikkerhedskopi |
+| `GET` | `/api/health` | Sundhedstjek (kræver ikke login) |
 | `POST` | `/api/auth/setup` · `login` · `logout` · `change-password` · `logout-all` | Auth |
 
 ## Begrænsninger

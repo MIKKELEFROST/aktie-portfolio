@@ -11,9 +11,12 @@
 // Returnerer null for tom streng og NaN for ugyldigt input. Tal gives uændret tilbage.
 export function parseDanishNumber(value) {
   if (typeof value === 'number') return value;
-  const s = String(value ?? '').trim().replace(/\s/g, '');
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string') return NaN;
+  const s = value.trim().replace(/\s/g, '');
   if (!s) return null;
   let norm = s;
+  if (s.includes(',') && s.includes('.') && s.lastIndexOf('.') > s.lastIndexOf(',')) return NaN; // "1,234.56"
   if (s.includes(',')) norm = s.replace(/\./g, '').replace(',', '.');
   else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) norm = s.replace(/\./g, '');
   if (!/^-?(\d+\.?\d*|\.\d+)$/.test(norm)) return NaN;
@@ -121,6 +124,7 @@ export function computePortfolio({ holdings, quotes, fxRates, baseCurrency }) {
 
   let valueBase = 0;
   let costBase = 0;
+  let valueWithCostBase = 0; // værdi af de positioner, der har en kendt købskurs
   let dayChangeBase = 0;
   let prevValueBase = 0;
   let hasCost = false;
@@ -137,6 +141,7 @@ export function computePortfolio({ holdings, quotes, fxRates, baseCurrency }) {
     valueBase += p.valueBase;
     if (p.costBase != null) {
       costBase += p.costBase;
+      valueWithCostBase += p.valueBase;
       hasCost = true;
     } else {
       incomplete = true;
@@ -152,7 +157,9 @@ export function computePortfolio({ holdings, quotes, fxRates, baseCurrency }) {
     p.weight = p.valueBase != null && valueBase > 0 ? (p.valueBase / valueBase) * 100 : null;
   }
 
-  const gainBase = hasCost ? valueBase - costBase : null;
+  // Afkast beregnes kun over positioner med kendt købskurs – ellers ville en aktie
+  // uden købskurs tælle som ren gevinst.
+  const gainBase = hasCost ? valueWithCostBase - costBase : null;
   const gainPercent = hasCost && costBase > 0 ? (gainBase / costBase) * 100 : null;
   const dayChangePercent = hasDay && prevValueBase > 0 ? (dayChangeBase / prevValueBase) * 100 : null;
 
@@ -209,11 +216,8 @@ export function computeValueHistory({ holdings, histories, fxRates }) {
     for (let i = 0; i < series.length; i++) {
       const v = series[i].get(day);
       if (v != null) last[i] = v;
-      if (last[i] == null) {
-        complete = false;
-        break;
-      }
-      total += last[i];
+      if (last[i] == null) complete = false;
+      else total += last[i];
     }
     if (complete) out.push({ date: day, value: total });
   }

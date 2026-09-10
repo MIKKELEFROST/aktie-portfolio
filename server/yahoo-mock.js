@@ -81,7 +81,7 @@ export function createMockYahooClient({ now = () => new Date() } = {}) {
         try {
           out[s] = { ok: true, quote: await this.getQuote(s), stale: false };
         } catch (err) {
-          out[s] = lastGood.has(s) ? { ok: true, quote: lastGood.get(s), stale: true, error: describeError(err) } : { ok: false, error: describeError(err) };
+          out[s] = lastGood.has(s) ? { ok: true, quote: { ...lastGood.get(s), marketOpen: null }, stale: true, error: describeError(err) } : { ok: false, error: describeError(err) };
         }
       }
       return out;
@@ -119,7 +119,13 @@ export function createMockYahooClient({ now = () => new Date() } = {}) {
       const days = { '5d': 5, '1mo': 22, '3mo': 65, '6mo': 130, ytd: 180, '1y': 252, '2y': 504, '5y': 260, max: 520 }[range] || 252;
       const step = range === '5y' || range === 'max' ? 7 : 1;
       const div = MINOR[f.currency] ? 100 : 1;
-      const end = now().getTime();
+      let end = now().getTime();
+      if (step === 7) {
+        const d = new Date(end);
+        d.setUTCHours(8, 0, 0, 0);
+        d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); // seneste mandag
+        end = d.getTime();
+      }
       const points = [];
       let seed = s.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
       let value = (f.price / div) * 0.8;
@@ -129,7 +135,7 @@ export function createMockYahooClient({ now = () => new Date() } = {}) {
         value = Math.max(0.01, value * (1 + drift));
         const t = end - i * step * 86_400_000;
         const day = new Date(t).getUTCDay();
-        if (day === 0 || day === 6) continue;
+        if (step === 1 && (day === 0 || day === 6)) continue;
         points.push({ t, close: i === 0 ? f.price / div : value });
       }
       return { symbol: s, currency: MINOR[f.currency] || f.currency, range, points };

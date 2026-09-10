@@ -51,6 +51,7 @@
     try {
       const status = await api('/api/auth/status');
       if (status.authenticated) return location.replace(nextUrl());
+      $('setup-token-field').classList.toggle('hidden', !status.setupTokenRequired);
       show(status.setupRequired ? formSetup : formLogin);
     } catch (err) {
       loading.textContent = 'Kunne ikke kontakte serveren. Prøv at genindlæse siden.';
@@ -123,7 +124,8 @@
     if (password !== confirm) { error.textContent = 'De to adgangskoder er ikke ens.'; return; }
     setBusy(button, true, 'Opret og gå til dashboard');
     try {
-      await api('/api/auth/setup', { password, confirm });
+      const setupToken = $('setup-token-field').classList.contains('hidden') ? undefined : $('setup-token').value.trim();
+      await api('/api/auth/setup', { password, confirm, setupToken });
       location.replace('/');
     } catch (err) {
       error.textContent = err.message;
