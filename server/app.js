@@ -249,7 +249,14 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       }),
     );
     const currencies = Object.values(histories).map((h) => h.currency);
-    const fxRates = currencies.length ? await yahoo.getFxRates(currencies, baseCurrency) : {};
+    const [fxRates, fxHistories] = currencies.length
+      ? await Promise.all([
+          yahoo.getFxRates(currencies, baseCurrency),
+          // Historiske valutakurser, så en dag i juni omregnes med juni-kursen.
+          // Kan de ikke hentes, falder hver valuta tilbage til dagens kurs.
+          yahoo.getFxHistories ? yahoo.getFxHistories(currencies, baseCurrency, range).catch(() => ({})) : Promise.resolve({}),
+        ])
+      : [{}, {}];
     for (const h of holdings) {
       const hist = histories[h.symbol];
       if (!hist) continue; // allerede i missing
@@ -264,8 +271,12 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         delete histories[h.symbol];
       }
     }
-    const points = computeValueHistory({ holdings, histories, fxRates });
-    return { range, baseCurrency, points, missing, approximate: true };
+    const { points, limitedBy } = computeValueHistory({ holdings, histories, fxRates, fxHistories });
+    // Hvilke valutaer der måtte bruge dagens kurs i stedet for dagens egen.
+    const fxToday = Object.entries(fxHistories)
+      .filter(([cur, h]) => cur !== baseCurrency && (!h?.ok || !h.points?.length) && !h?.identity)
+      .map(([cur]) => cur);
+    return { range, baseCurrency, points, missing, limitedBy, fxToday, approximate: true };
   }
 
   // ---------- validering ----------

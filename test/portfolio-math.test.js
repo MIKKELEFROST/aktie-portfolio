@@ -133,11 +133,12 @@ test('computeValueHistory: summerer på tværs af serier med forward fill', () =
     },
     fxRates: { DKK: { ok: true, rate: 1 }, USD: { ok: true, rate: 7 } },
   });
-  assert.deepEqual(history, [
+  assert.deepEqual(history.points, [
     { date: '2026-01-01', value: 2 * 10 + 100 * 7 },
     { date: '2026-01-02', value: 2 * 11 + 100 * 7 },
     { date: '2026-01-03', value: 2 * 12 + 110 * 7 },
   ]);
+  assert.equal(history.limitedBy, null, 'begge serier starter samme dag');
 });
 
 test('computeValueHistory: dage før alle serier har data udelades', () => {
@@ -150,7 +151,9 @@ test('computeValueHistory: dage før alle serier har data udelades', () => {
     },
     fxRates: { DKK: { ok: true, rate: 1 } },
   });
-  assert.deepEqual(history, [{ date: '2026-01-02', value: 16 }]);
+  assert.deepEqual(history.points, [{ date: '2026-01-02', value: 16 }]);
+  // …og det fortælles, hvem der afkorter perioden.
+  assert.deepEqual(history.limitedBy, { symbol: 'B', from: '2026-01-02' });
 });
 
 test('round', () => {
@@ -205,5 +208,36 @@ test('computeValueHistory: rækkefølge af beholdninger påvirker ikke resultate
   const ab = computeValueHistory({ holdings: [{ symbol: 'A', quantity: 1 }, { symbol: 'B', quantity: 1 }], histories, fxRates: fx });
   const ba = computeValueHistory({ holdings: [{ symbol: 'B', quantity: 1 }, { symbol: 'A', quantity: 1 }], histories, fxRates: fx });
   assert.deepEqual(ab, ba);
-  assert.deepEqual(ab, [{ date: '2026-01-02', value: 15 }, { date: '2026-01-03', value: 17 }]);
+  assert.deepEqual(ab.points, [{ date: '2026-01-02', value: 15 }, { date: '2026-01-03', value: 17 }]);
+});
+
+test('computeValueHistory: hver dag omregnes med sin egen valutakurs', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const fælles = {
+    holdings: [{ symbol: 'A', quantity: 10 }],
+    histories: { A: { currency: 'USD', points: [{ t: day(1), close: 100 }, { t: day(2), close: 100 }, { t: day(3), close: 100 }] } },
+    fxRates: { USD: { ok: true, rate: 7 } },
+  };
+
+  // Uden historik bruges dagens kurs hele vejen: kursen står stille, så værdien gør også.
+  const fast = computeValueHistory(fælles);
+  assert.deepEqual(fast.points.map((p) => p.value), [7000, 7000, 7000]);
+
+  // Med historik følger værdien valutaen, selv om aktiekursen står stille.
+  const historisk = computeValueHistory({
+    ...fælles,
+    fxHistories: { USD: { ok: true, points: [{ t: day(1), rate: 6 }, { t: day(2), rate: 7 }, { t: day(3), rate: 8 }] } },
+  });
+  assert.deepEqual(historisk.points.map((p) => p.value), [6000, 7000, 8000]);
+
+  // Mangler en dag i valutaserien, bruges seneste kendte kurs.
+  const huller = computeValueHistory({
+    ...fælles,
+    fxHistories: { USD: { ok: true, points: [{ t: day(1), rate: 6 }, { t: day(3), rate: 8 }] } },
+  });
+  assert.deepEqual(huller.points.map((p) => p.value), [6000, 6000, 8000]);
+
+  // Fejler valutaserien, falder den tilbage til dagens kurs i stedet for at fejle.
+  const fejlet = computeValueHistory({ ...fælles, fxHistories: { USD: { ok: false, error: { message: 'nede' } } } });
+  assert.deepEqual(fejlet.points.map((p) => p.value), [7000, 7000, 7000]);
 });

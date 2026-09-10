@@ -24,6 +24,7 @@
     { key: 'ytd', label: 'ÅTD' },
     { key: '1y', label: '1Å' },
     { key: '5y', label: '5Å' },
+    { key: 'max', label: 'Alt' },
   ];
 
   const nf = (opts) => new Intl.NumberFormat('da-DK', opts);
@@ -956,7 +957,8 @@
     return `<div class="card-header"><h2>${icon('chart')}Udvikling <span class="hint">ca.</span></h2><div class="range-pills">${pills}</div></div>
       <div id="chart-summary" class="chart-summary"></div>
       <div class="chart-box" id="chart-box"></div>
-      <div class="chart-legend"><span><i></i>Porteføljeværdi</span><span><i class="dashed"></i>Investeret</span><span class="muted">Beregnet ud fra din nuværende beholdning og historiske lukkekurser.</span></div>`;
+      <div class="chart-legend"><span><i></i>Porteføljeværdi</span><span class="chart-invested-key"><i class="dashed"></i>Investeret</span></div>
+      <div class="chart-notes" id="chart-notes"></div>`;
   }
 
   function renderChartCard() {
@@ -984,11 +986,40 @@
     const last = h.points[h.points.length - 1];
     const diff = last.value - first.value;
     const pct = first.value ? (diff / first.value) * 100 : null;
-    summary.innerHTML = `<span class="big amount">${fmtAmount(last.value)}</span><span class="${signClass(diff)}"><span class="amount">${fmtAmount(diff, state.baseCurrency, { sign: true })}</span> (${fmtPct(pct)})</span><span class="muted small">siden ${esc(fmtDate(first.date, { year: longRange() }))}${h.missing?.length ? ` · ${h.missing.length} aktie${h.missing.length > 1 ? 'r' : ''} uden historik` : ''}${state.historyLoading === state.range ? ' · opdaterer…' : ''}</span>`;
+    // Tallet er ikke dit afkast: det er kursbevægelsen på det, du ejer i dag,
+    // som om du havde ejet det hele perioden. Det skal stå, hvor tallet står.
+    summary.innerHTML = `<span class="big amount">${fmtAmount(last.value)}</span>`
+      + `<span class="${signClass(diff)}"><span class="amount">${fmtAmount(diff, state.baseCurrency, { sign: true })}</span> (${fmtPct(pct)})</span>`
+      + `<span class="muted small">i kursbevægelse siden ${esc(fmtDate(first.date, { year: longRange() }))}`
+      + `${state.historyLoading === state.range ? ' · opdaterer…' : ''}</span>`;
     drawChart(box, h.points, state.portfolio?.totals?.costBase ?? null);
+    renderChartNotes(h);
   }
 
   const longRange = () => ['1y', '2y', '5y', 'max'].includes(state.range);
+
+  // Alt det, grafen ikke selv kan vise: hvad kurven egentlig er, hvorfor perioden
+  // kan være kortere end knappen, og hvad der eventuelt mangler.
+  function renderChartNotes(h) {
+    const el = $('#chart-notes');
+    if (!el) return;
+    const noter = [];
+    noter.push('Kurven viser, hvad <b>din nuværende beholdning</b> ville have været værd på hver dag – ikke hvad du faktisk ejede dengang. Dit rigtige afkast står under "Samlet afkast".');
+    if (h.limitedBy) {
+      const valgt = RANGES.find((r) => r.key === state.range)?.label || state.range;
+      noter.push(`Perioden er kortere end <b>${esc(valgt)}</b>: <b>${esc(h.limitedBy.symbol)}</b> har ingen kurser før ${esc(fmtDate(h.limitedBy.from, { year: true }))}, og grafen kan først tegnes, når alle papirer har en kurs.`);
+    }
+    if (h.fxToday?.length) {
+      noter.push(`Historiske valutakurser kunne ikke hentes for ${esc(h.fxToday.join(', '))} – de dage er omregnet med dagens kurs.`);
+    }
+    if (h.missing?.length) {
+      noter.push(`Ikke med i kurven: ${h.missing.map((m) => `<b>${esc(m.symbol)}</b> (${esc(m.error)})`).join(', ')}.`);
+    }
+    if (state.investedOffChart) {
+      noter.push(`Investeret (<span class="amount">${fmtAmount(state.portfolio?.totals?.costBase)}</span>) ligger uden for grafens skala og er ikke tegnet.`);
+    }
+    el.innerHTML = noter.map((n) => `<p>${n}</p>`).join('');
+  }
 
   function drawChart(box, points, invested) {
     const W = Math.max(280, box.clientWidth || 600);
@@ -997,7 +1028,12 @@
     const values = points.map((p) => p.value);
     let min = Math.min(...values);
     let max = Math.max(...values);
-    if (isNum(invested) && invested > 0) {
+    // Investeret-linjen må gerne udvide skalaen lidt, men ikke mase kurven flad.
+    // Ligger den længere væk end halvdelen af kurvens eget udsving, udelades den.
+    const spread = Math.max(max - min, Math.abs(max) * 0.005);
+    const showInvested = isNum(invested) && invested > 0 && invested > min - spread * 0.5 && invested < max + spread * 0.5;
+    state.investedOffChart = isNum(invested) && invested > 0 && !showInvested;
+    if (showInvested) {
       min = Math.min(min, invested);
       max = Math.max(max, invested);
     }
@@ -1029,9 +1065,10 @@
       const anchor = i === 0 ? 'start' : i === labelCount - 1 ? 'end' : 'middle';
       xLabels.push(`<text x="${x(p.date).toFixed(1)}" y="${H - 8}" text-anchor="${anchor}" font-size="10" fill="var(--muted)">${esc(fmtDate(p.date, { year: longRange() }))}</text>`);
     }
-    const investedLine = isNum(invested) && invested > 0
+    const investedLine = showInvested
       ? `<line x1="${padL}" x2="${W - padR}" y1="${y(invested).toFixed(1)}" y2="${y(invested).toFixed(1)}" stroke="var(--chart-invested)" stroke-width="1.5" stroke-dasharray="5 4"/>`
       : '';
+    $$('.chart-invested-key').forEach((el) => el.classList.toggle('hidden', !showInvested));
     const last = points[points.length - 1];
     box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
       <defs><linearGradient id="chart-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--chart-line)" stop-opacity="0.22"/><stop offset="1" stop-color="var(--chart-line)" stop-opacity="0"/></linearGradient></defs>

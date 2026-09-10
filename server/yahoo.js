@@ -357,7 +357,53 @@ export function createYahooClient({ quoteTtlMs = 60_000 } = {}) {
     });
   }
 
-  return { getQuote, getQuotes, getFxRate, getFxRates, search, getHistory };
+  // Historiske valutakurser, så en gammel dags værdi omregnes med dagens egen kurs
+  // og ikke med kursen i dag. Uden det viser grafen kursbevægelsen, ikke kroneværdien.
+  async function getFxHistory(from, to, range = '1y') {
+    const f = from.toUpperCase();
+    const t = to.toUpperCase();
+    if (f === t) return { points: [], identity: true };
+    if (!VALID_RANGES.has(range)) range = '1y';
+    return historyCache.through(`fx:${f}${t}:${range}`, HISTORY_TTL_MS, async () => {
+      const interval = range === '5d' ? '1d' : range === '5y' || range === 'max' ? '1wk' : '1d';
+      const read = (result, invert) => {
+        const ts = result.timestamp || [];
+        const closes = result.indicators?.quote?.[0]?.close || [];
+        const points = [];
+        for (let i = 0; i < ts.length; i++) {
+          const c = closes[i];
+          if (typeof c === 'number' && Number.isFinite(c) && c !== 0) {
+            points.push({ t: interval === '1wk' ? weekStart(ts[i] * 1000) : ts[i] * 1000, rate: invert ? 1 / c : c });
+          }
+        }
+        return points;
+      };
+      try {
+        const points = read(await fetchChart(`${f}${t}=X`, range, interval), false);
+        if (points.length) return { points };
+      } catch (err) {
+        if (err.code !== 'NOT_FOUND') throw err;
+      }
+      return { points: read(await fetchChart(`${t}${f}=X`, range, interval), true) };
+    });
+  }
+
+  // Én serie pr. valuta. Fejler en enkelt, falder den tilbage til dagens faste kurs.
+  async function getFxHistories(currencies, base, range) {
+    const unique = [...new Set(currencies.map((c) => c.toUpperCase()))];
+    const entries = await Promise.all(
+      unique.map(async (cur) => {
+        try {
+          return [cur, { ok: true, ...(await getFxHistory(cur, base, range)) }];
+        } catch (err) {
+          return [cur, { ok: false, error: describeError(err) }];
+        }
+      }),
+    );
+    return Object.fromEntries(entries);
+  }
+
+  return { getQuote, getQuotes, getFxRate, getFxRates, search, getHistory, getFxHistory, getFxHistories };
 }
 
 // Ugentlige bars stemples forskelligt af Yahoo (søndag aften UTC for Europa, mandag for USA).
