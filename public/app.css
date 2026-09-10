@@ -579,7 +579,8 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 
 /* ---------- tilføjelser ---------- */
 .stale, td.stale, td.stale .sub, .stale .pos, .stale .neg { color: var(--muted) !important; }
-body.browser-mode .only-server { display: none !important; }
+body.browser-mode .only-server,
+body.open-access .only-server { display: none !important; } /* intet login at logge ud af */
 dialog.dialog-wide { width: min(860px, calc(100vw - 32px)); }
 .dialog-body .table-wrap { margin: 0; padding: 0; }
 #import-cash-row { margin: 14px 0 4px; }

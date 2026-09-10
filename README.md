@@ -22,7 +22,7 @@ Et personligt, selv-hostet dashboard til din aktieportefølje. Du logger ind med
 - **Login** med adgangskode, "husk mig", brute-force-bremse, skift adgangskode og "log ud overalt".
 - **Mørkt tema**, mobilvenligt layout (bundmenu + kort), "skjul beløb"-knap til toget, dansk talformat.
 - **Sikkerhedskopi**: download/gendan som JSON. Serveren gemmer desuden de 5 seneste versioner automatisk.
-- **Ingen afhængigheder**: kun Node.js. Intet build-step, intet framework. Data i en JSON-fil – eller i Upstash Redis på Vercel.
+- **Ingen afhængigheder**: kun Node.js. Intet build-step, intet framework. Data i en JSON-fil – eller i Supabase/Upstash Redis på Vercel.
 
 ## Kom i gang
 
@@ -48,23 +48,27 @@ Dashboardet kører på port 3000, og dine data ligger i Docker-volumen `aktie-da
 
 ### Vercel (gratis hosting fra GitHub)
 
-Appen kan køre som én serverless-funktion på [Vercel](https://vercel.com) med data i Upstash Redis:
+Appen kan køre som én serverless-funktion på [Vercel](https://vercel.com):
 
 1. **Importér repoet** i Vercel: *Add New → Project → Import* `aktie-portfolio`. Framework: *Other*. Deploy.
-   Uden trin 2–3 kører siden i *browser-tilstand*: den virker med det samme, men data ligger kun i den enkelte browser.
-2. **Database** (giver login og synkronisering mellem enheder): I projektet → *Storage → Create Database* → vælg en Redis-database, fx Upstash → *Connect to Project*. Vercel sætter selv `KV_REST_API_URL` og `KV_REST_API_TOKEN`.
-3. **Miljøvariabler** under *Settings → Environment Variables*:
-   - `DASHBOARD_PASSWORD` – din adgangskode, mindst 8 tegn. Påkrævet, fordi hver serverless-instans er sin egen proces og derfor ikke kan dele en midlertidig opsætningsnøgle.
-   - `SESSION_SECRET` – en lang tilfældig streng, fx fra `openssl rand -hex 32`. Valgfri, men uden den logges du ud, når databasen nulstilles.
-4. **Redeploy** (*Deployments → ⋯ → Redeploy*). Åbn projektets URL og log ind.
+   Uden trin 2 kører siden i *browser-tilstand*: den virker med det samme, men data ligger kun i den enkelte browser.
+2. **Vælg en database** – så følger porteføljen med til alle dine enheder. Enten:
+   - **Upstash Redis** (færrest klik): I projektet → *Storage → Create Database* → vælg en Redis-database, fx Upstash → *Connect to Project*. Vercel sætter selv `KV_REST_API_URL` og `KV_REST_API_TOKEN`.
+   - **Supabase** (Postgres): opret et projekt på [supabase.com](https://supabase.com), kør SQL'en i [`docs/database.md`](docs/database.md), og sæt `SUPABASE_URL` og `SUPABASE_KEY` under *Settings → Environment Variables*.
+3. **Redeploy** (*Deployments → ⋯ → Redeploy*), og åbn projektets URL.
 
-Har du allerede brugt siden i browser-tilstand, spørger den efter login, om dine hidtidige aktier skal overføres til kontoen. Depoter matches på navn, og aktier der allerede findes i samme depot springes over, så en gentagelse ikke dublerer noget. En kopi bliver liggende i browseren som sikkerhedsnet.
+Med en database og ingen `DASHBOARD_PASSWORD` er siden **åben**: porteføljen vises, så snart adressen åbnes – på alle enheder og i alle browsere, uden login. Det er også prisen: alle der kender adressen, kan se og ændre den. Vil du have login i stedet, så sæt:
 
-**Uden database virker siden også** – i *browser-tilstand*: der er intet login, og dine aktier gemmes kun i din egen browser (localStorage), mens serveren leverer kurser og beregninger. Det er nemt, men data følger ikke med til andre enheder, og rydder du browserdata, er de væk – så brug *Indstillinger → Download sikkerhedskopi*. Trin 2–3 ovenfor giver login, synkronisering mellem alle enheder og serverside-backup.
+- `DASHBOARD_PASSWORD` – din adgangskode, mindst 8 tegn. Kræves, fordi hver serverless-instans er sin egen proces og derfor ikke kan dele en midlertidig opsætningsnøgle.
+- `SESSION_SECRET` – en lang tilfældig streng, fx fra `openssl rand -hex 32`. Valgfri, men uden den logges du ud, når databasen nulstilles.
+
+Har du allerede brugt siden i browser-tilstand, spørger den, om dine hidtidige aktier skal overføres til databasen. Depoter matches på navn, og aktier der allerede findes i samme depot springes over, så en gentagelse ikke dublerer noget. En kopi bliver liggende i browseren som sikkerhedsnet.
+
+**Uden database virker siden også** – i *browser-tilstand*: dine aktier gemmes kun i din egen browser (localStorage), mens serveren leverer kurser og beregninger. Det er nemt, men data følger ikke med til andre enheder, og rydder du browserdata, er de væk – så brug *Indstillinger → Download sikkerhedskopi*.
 
 Hvert push til `main` deployer automatisk. Bemærk: på Vercel er der ingen baggrunds-opvarmning af kurser, så første visning efter en pause tager 1–2 sekunder. Yahoo kan desuden afvise flere kald fra cloud-IP'er end fra en hjemme-PC; appen viser i så fald seneste kendte kurser tydeligt markeret.
 
-Sådan vælges lageret: findes `KV_REST_API_URL`/`KV_REST_API_TOKEN` (eller `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN`), bruges Redis – ellers JSON-filen i `DATA_DIR`. Det gælder også lokalt og i Docker.
+Sådan vælges lageret, i den rækkefølge: findes `SUPABASE_URL`/`SUPABASE_KEY`, bruges Supabase; ellers `KV_REST_API_URL`/`KV_REST_API_TOKEN` (eller `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN`) → Redis; ellers JSON-filen i `DATA_DIR`. Det gælder også lokalt og i Docker.
 
 ## Konfiguration
 
@@ -85,7 +89,9 @@ Alle indstillinger er valgfrie miljøvariabler. Læg dem i en `.env`-fil i proje
 | `WARM_CACHE` | `1` | Genhent kurser i baggrunden mens en børs er åben, så siden loader øjeblikkeligt |
 | `YAHOO_MOCK` | `0` | `1` = brug indbyggede testkurser i stedet for Yahoo (til udvikling) |
 | `STORAGE` | *(auto)* | `browser` = tving browser-tilstand (intet login, data i brugerens browser). På Vercel vælges den automatisk, når der ingen database er |
+| `SUPABASE_URL` + `SUPABASE_KEY` | *(tom)* | Supabase-projekt. Når de findes, gemmes data dér. Kræver tabellerne og funktionerne i [`docs/database.md`](docs/database.md) |
 | `KV_REST_API_URL` + `KV_REST_API_TOKEN` | *(tom)* | Upstash Redis (sættes automatisk af Vercel). Når de findes, gemmes data i Redis i stedet for `DATA_DIR` |
+| `PUBLIC_ACCESS` | *(auto)* | `1` = ingen login; alle med adressen ser og redigerer den samme portefølje. På Vercel slås den automatisk til, når der er en database og ingen `DASHBOARD_PASSWORD`. `0` slår den fra igen |
 
 ## Sådan virker det
 
@@ -117,9 +123,10 @@ vercel.json         rewrites + funktionsopsætning til Vercel
 server/
   index.js          start, konfiguration, cache-opvarmning, .env
   app.js            routing, auth, API
-  storage.js        vælger fil- eller Redis-lager ud fra miljøet
+  storage.js        vælger Supabase-, Redis- eller fil-lager ud fra miljøet
   resolve.js        finder Yahoo-symbol ud fra ISIN eller navn
   store-redis.js    Upstash Redis-lager (REST, compare-and-set, backups)
+  store-supabase.js Supabase-lager (PostgREST, compare-and-set, backups)
   views/            index.html og login.html (serveres kun efter login-tjek)
   yahoo.js          Yahoo Finance-klient med cache
   yahoo-mock.js     falske kurser til udvikling/test

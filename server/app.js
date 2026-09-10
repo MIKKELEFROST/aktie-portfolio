@@ -34,6 +34,9 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   // Browser-tilstand: ingen database og intet login. Beholdninger ligger i brugerens browser;
   // serveren leverer kun kurser og beregninger. API'et er så åbent og beskyttes af en kald-grænse pr. IP.
   const browserMode = config.storageMode === 'browser';
+  // Åben adgang: ingen login. Alle der kender adressen ser og redigerer den samme
+  // portefølje. Kræver et lager på serveren, ellers er der intet at dele.
+  const openAccess = Boolean(config.publicAccess) && !browserMode && Boolean(store);
   const apiLimiter = createLoginLimiter({ limit: 240, windowMs: 60_000 });
   let envPasswordHash = null;
 
@@ -44,7 +47,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   async function authState() {
-    if (browserMode) return { usesEnvPassword: false, passwordHash: null, setupRequired: false };
+    if (browserMode || openAccess) return { usesEnvPassword: false, passwordHash: null, setupRequired: false };
     const auth = await store.getAuth();
     const usesEnvPassword = Boolean(config.envPassword);
     const passwordHash = usesEnvPassword ? await getEnvPasswordHash() : auth.passwordHash;
@@ -56,7 +59,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   async function isAuthenticated(req) {
-    if (browserMode) return true;
+    if (browserMode || openAccess) return true;
     const cookies = parseCookies(req);
     const token = cookies[COOKIE_NAME];
     if (!token) return false;
@@ -335,6 +338,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         usesEnvPassword,
         authenticated: !setupRequired && (await isAuthenticated(req)),
         storage: config.storageMode || 'file',
+        access: browserMode ? 'browser' : openAccess ? 'open' : 'login',
       });
     },
 
@@ -709,14 +713,17 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   // I browser-tilstand findes intet lager på serveren – disse ruter giver ingen mening.
   const STORE_ROUTES = /^\/api\/(portfolio|holdings|settings|backup|restore|auth\/(setup|login|change-password|logout-all))(\/|$)/;
+  const AUTH_ROUTES = /^\/api\/auth\/(setup|login|change-password|logout-all|logout)$/;
 
   async function handleApi(req, res, url) {
     const method = req.method === 'HEAD' ? 'GET' : req.method;
-    if (browserMode) {
+    if (browserMode || openAccess) {
+      // Uden login beskytter en kald-grænse pr. IP mod misbrug.
       const ip = clientIp(req, { trustProxy: config.trustProxy });
       apiLimiter.recordFailure(ip);
       if (apiLimiter.isBlocked(ip)) throw new HttpError(429, 'For mange kald – prøv igen om lidt', { retryAfter: apiLimiter.retryAfterSeconds(ip) });
-      if (STORE_ROUTES.test(url.pathname)) throw new HttpError(404, 'Ikke tilgængelig i browser-tilstand (ingen database på serveren)', { code: 'BROWSER_MODE' });
+      if (browserMode && STORE_ROUTES.test(url.pathname)) throw new HttpError(404, 'Ikke tilgængelig i browser-tilstand (ingen database på serveren)', { code: 'BROWSER_MODE' });
+      if (openAccess && AUTH_ROUTES.test(url.pathname)) throw new HttpError(404, 'Login er slået fra (åben adgang)', { code: 'OPEN_ACCESS' });
     }
     for (const [m, pattern, handler, opts = {}] of routes) {
       const match = url.pathname.match(pattern);
@@ -747,7 +754,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     const authed = !setupRequired && (await isAuthenticated(req));
 
     if (url.pathname === '/login') {
-      if (authed || browserMode) return redirect(res, '/');
+      if (authed || browserMode || openAccess) return redirect(res, '/');
       if (!(await serveStatic(res, VIEWS_DIR, '/login.html'))) throw new HttpError(500, 'login.html mangler');
       return;
     }
