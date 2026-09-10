@@ -55,6 +55,8 @@ Appen kan køre som én serverless-funktion på [Vercel](https://vercel.com) med
    - `SESSION_SECRET` – en lang tilfældig streng (valgfri, men anbefalet; fx `openssl rand -hex 32`).
 4. **Redeploy** (*Deployments → ⋯ → Redeploy*). Åbn projektets URL og log ind.
 
+**Uden database virker siden også** – i *browser-tilstand*: der er intet login, og dine aktier gemmes kun i din egen browser (localStorage), mens serveren leverer kurser og beregninger. Det er nemt, men data følger ikke med til andre enheder, og rydder du browserdata, er de væk – så brug *Indstillinger → Download sikkerhedskopi*. Trin 2–3 ovenfor giver login og synkronisering.
+
 Hvert push til `main` deployer automatisk. Bemærk: på Vercel er der ingen baggrunds-opvarmning af kurser, så første visning efter en pause tager 1–2 sekunder. Yahoo kan desuden afvise flere kald fra cloud-IP'er end fra en hjemme-PC; appen viser i så fald seneste kendte kurser tydeligt markeret.
 
 Sådan vælges lageret: findes `KV_REST_API_URL`/`KV_REST_API_TOKEN` (eller `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN`), bruges Redis – ellers JSON-filen i `DATA_DIR`. Det gælder også lokalt og i Docker.
@@ -77,6 +79,7 @@ Alle indstillinger er valgfrie miljøvariabler. Læg dem i en `.env`-fil i proje
 | `SECURE_COOKIES` | `0` | Tving `Secure`-flag på cookies (sættes automatisk bag proxy med `TRUST_PROXY=1` og HTTPS) |
 | `WARM_CACHE` | `1` | Genhent kurser i baggrunden mens en børs er åben, så siden loader øjeblikkeligt |
 | `YAHOO_MOCK` | `0` | `1` = brug indbyggede testkurser i stedet for Yahoo (til udvikling) |
+| `STORAGE` | *(auto)* | `browser` = tving browser-tilstand (intet login, data i brugerens browser). På Vercel vælges den automatisk, når der ingen database er |
 | `KV_REST_API_URL` + `KV_REST_API_TOKEN` | *(tom)* | Upstash Redis (sættes automatisk af Vercel). Når de findes, gemmes data i Redis i stedet for `DATA_DIR` |
 
 ## Sådan virker det

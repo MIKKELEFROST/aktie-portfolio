@@ -146,13 +146,18 @@
     lastAttempt: 0,
     lastManual: 0,
     usesEnvPassword: false,
+    storage: 'server', // 'server' (fil/redis med login) eller 'browser' (localStorage, intet login)
   };
 
   // ======================================================================
   // API
   // ======================================================================
 
-  async function api(method, path, body) {
+  function api(method, path, body) {
+    return state.storage === 'browser' ? localApi(method, path, body) : serverApi(method, path, body);
+  }
+
+  async function serverApi(method, path, body) {
     const opts = { method, credentials: 'same-origin', headers: {} };
     if (method !== 'GET') {
       opts.headers['Content-Type'] = 'application/json';
@@ -179,6 +184,173 @@
       throw err;
     }
     return data;
+  }
+
+  // ======================================================================
+  // Browser-tilstand: lokalt "API" i localStorage, når serveren ingen database har.
+  // Efterligner serverens endpoints, så resten af appen er uændret. Kurser og
+  // beregninger hentes stadig fra serveren (/api/compute, /api/search, /api/quote).
+  // ======================================================================
+
+  const LOCAL_KEY = 'portfolio-local-v1';
+  const HOLDABLE = ['EQUITY', 'ETF', 'MUTUALFUND'];
+
+  function localLoad() {
+    try {
+      const raw = localStorage.getItem(LOCAL_KEY);
+      if (raw) {
+        const d = JSON.parse(raw);
+        if (d && Array.isArray(d.holdings)) return { version: 1, settings: { baseCurrency: 'DKK', ...(d.settings || {}) }, holdings: d.holdings };
+      }
+    } catch {}
+    return { version: 1, settings: { baseCurrency: 'DKK' }, holdings: [] };
+  }
+
+  function localSave(data) {
+    try {
+      localStorage.setItem(LOCAL_KEY, JSON.stringify(data));
+    } catch {
+      throw localErr(500, 'Kunne ikke gemme i browseren – er lagring af websteds-data slået fra?');
+    }
+  }
+
+  const localErr = (status, message, extra = {}) => Object.assign(new Error(message), { status, data: extra });
+  const round6 = (n) => Math.round(n * 1e6) / 1e6;
+  const pubHolding = (h) => ({ id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', addedAt: h.addedAt || null, updatedAt: h.updatedAt || null });
+  const newLocalId = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
+
+  function localQty(value) {
+    const n = typeof value === 'number' ? value : parseInput(value);
+    if (!isNum(n) || n <= 0) throw localErr(400, 'Antal skal være større end 0');
+    return round6(n);
+  }
+
+  function localPrice(value, { allowNull = true } = {}) {
+    if (value === null || value === undefined || value === '') {
+      if (allowNull) return null;
+      throw localErr(400, 'Kurs mangler');
+    }
+    const n = typeof value === 'number' ? value : parseInput(value);
+    if (!isNum(n) || n < 0) throw localErr(400, 'Kursen skal være et tal');
+    return round6(n);
+  }
+
+  async function localApi(method, path, body = {}) {
+    const url = new URL(path, location.origin);
+    const p = url.pathname;
+    const data = localLoad();
+    const now = new Date().toISOString();
+
+    if (p === '/api/auth/status') return { authenticated: true, setupRequired: false, setupTokenRequired: false, usesEnvPassword: false, storage: 'browser' };
+    if (p.startsWith('/api/auth/')) return { ok: true };
+    if (p === '/api/portfolio' && method === 'GET') return serverApi('POST', '/api/compute', { holdings: data.holdings, settings: data.settings });
+    if (p === '/api/portfolio/history') return serverApi('POST', '/api/compute/history', { holdings: data.holdings, settings: data.settings, range: url.searchParams.get('range') || '1y' });
+    if (p === '/api/holdings' && method === 'GET') return { holdings: data.holdings.map(pubHolding), settings: data.settings };
+
+    if (p === '/api/holdings' && method === 'POST') {
+      const symbol = String(body.symbol || '').trim().toUpperCase();
+      if (!/^[A-Z0-9^][A-Z0-9.\-=^]{0,24}$/.test(symbol)) throw localErr(400, 'Ugyldigt symbol');
+      const quantity = localQty(body.quantity);
+      const avgPrice = localPrice(body.avgPrice);
+      const existing = data.holdings.find((h) => h.symbol === symbol);
+      if (existing) throw localErr(409, `${existing.name || symbol} er allerede i porteføljen`, { id: existing.id });
+      if (data.holdings.length >= 100) throw localErr(409, 'Porteføljen kan højst indeholde 100 aktier i browser-tilstand');
+      let quote = null;
+      let warning = null;
+      try {
+        quote = (await serverApi('GET', `/api/quote/${encodeURIComponent(symbol)}`)).quote;
+      } catch (err) {
+        if (err.status === 404) throw localErr(400, `Ukendt symbol "${symbol}" – husk fx .CO for danske aktier`);
+        warning = `Kunne ikke hente kurs lige nu (${err.message}). Aktien er tilføjet alligevel.`;
+      }
+      if (quote?.type && !HOLDABLE.includes(quote.type)) throw localErr(400, "Kun aktier, ETF'er og fonde kan tilføjes");
+      const holding = { id: newLocalId(), symbol, name: quote ? quote.name : String(body.name || symbol).slice(0, 120), currency: quote ? quote.currency : null, quantity, avgPrice, note: String(body.note || '').trim().slice(0, 200), addedAt: now, updatedAt: now };
+      data.holdings.push(holding);
+      localSave(data);
+      return { holding: pubHolding(holding), warning };
+    }
+
+    const m = p.match(/^\/api\/holdings\/([^/]+)(\/trade)?$/);
+    if (m) {
+      const h = data.holdings.find((x) => x.id === decodeURIComponent(m[1]));
+      if (!h) throw localErr(404, 'Aktien findes ikke i porteføljen');
+      if (m[2] && method === 'POST') {
+        const type = body.type === 'sell' ? 'sell' : 'buy';
+        const q = localQty(body.quantity);
+        if (type === 'buy') {
+          const price = localPrice(body.price, { allowNull: false });
+          const oldQty = Number(h.quantity) || 0;
+          const newQty = oldQty + q;
+          if (h.avgPrice != null && oldQty > 0) h.avgPrice = round6((oldQty * h.avgPrice + q * price) / newQty);
+          else if (oldQty === 0) h.avgPrice = price;
+          h.quantity = round6(newQty);
+        } else {
+          if (q > h.quantity + 1e-9) throw localErr(400, `Du ejer kun ${fmtQty(h.quantity)} stk.`);
+          const newQty = round6(h.quantity - q);
+          if (newQty <= 0) {
+            data.holdings = data.holdings.filter((x) => x !== h);
+            localSave(data);
+            return { removed: true, holding: pubHolding({ ...h, quantity: 0 }) };
+          }
+          h.quantity = newQty;
+        }
+        h.updatedAt = now;
+        localSave(data);
+        return { removed: false, holding: pubHolding(h) };
+      }
+      if (method === 'PUT') {
+        if (body.quantity !== undefined) h.quantity = localQty(body.quantity);
+        if (body.avgPrice !== undefined) h.avgPrice = localPrice(body.avgPrice);
+        if (body.note !== undefined) h.note = String(body.note ?? '').trim().slice(0, 200);
+        h.updatedAt = now;
+        localSave(data);
+        return { holding: pubHolding(h) };
+      }
+      if (method === 'DELETE') {
+        data.holdings = data.holdings.filter((x) => x !== h);
+        localSave(data);
+        return { ok: true, holding: pubHolding(h) };
+      }
+    }
+
+    if (p === '/api/settings' && method === 'GET') return { settings: data.settings };
+    if (p === '/api/settings' && method === 'PUT') {
+      if (body.baseCurrency !== undefined) {
+        const c = String(body.baseCurrency).trim().toUpperCase();
+        if (!/^[A-Z]{3}$/.test(c)) throw localErr(400, 'Ugyldig valuta (brug f.eks. DKK, EUR eller USD)');
+        data.settings.baseCurrency = c;
+      }
+      if (body.displayName !== undefined) data.settings.displayName = String(body.displayName ?? '').trim().slice(0, 40);
+      if (body.showDecimals !== undefined) data.settings.showDecimals = Boolean(body.showDecimals);
+      if (body.cash !== undefined) data.settings.cash = body.cash == null ? 0 : localPrice(body.cash) ?? 0;
+      localSave(data);
+      return { settings: data.settings };
+    }
+    if (p === '/api/backup') return { ...data, exportedAt: now };
+    if (p === '/api/restore' && method === 'POST') {
+      if (!Array.isArray(body.holdings)) throw localErr(400, 'Filen indeholder ingen "holdings"-liste');
+      if (body.holdings.length > 100) throw localErr(400, 'Højst 100 aktier kan gendannes i browser-tilstand');
+      const seen = new Set();
+      const holdings = body.holdings.map((raw, i) => {
+        if (!raw || typeof raw !== 'object') throw localErr(400, `Ugyldig post (linje ${i + 1})`);
+        const symbol = String(raw.symbol || '').trim().toUpperCase();
+        if (!/^[A-Z0-9^][A-Z0-9.\-=^]{0,24}$/.test(symbol)) throw localErr(400, `Ugyldigt symbol (linje ${i + 1})`);
+        if (seen.has(symbol)) throw localErr(400, `Symbolet ${symbol} optræder flere gange (linje ${i + 1})`);
+        seen.add(symbol);
+        return { id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newLocalId(), symbol, name: String(raw.name || symbol).slice(0, 120), currency: raw.currency ? String(raw.currency).toUpperCase().slice(0, 3) : null, quantity: localQty(raw.quantity), avgPrice: localPrice(raw.avgPrice), note: String(raw.note || '').trim().slice(0, 200), addedAt: typeof raw.addedAt === 'string' ? raw.addedAt : now, updatedAt: now };
+      });
+      data.holdings = holdings;
+      if (body.settings && typeof body.settings === 'object') {
+        const s = body.settings;
+        if (s.baseCurrency && /^[A-Za-z]{3}$/.test(String(s.baseCurrency))) data.settings.baseCurrency = String(s.baseCurrency).toUpperCase();
+        if (s.cash !== undefined) data.settings.cash = localPrice(s.cash) ?? 0;
+        if (s.displayName !== undefined) data.settings.displayName = String(s.displayName ?? '').trim().slice(0, 40);
+        if (s.showDecimals !== undefined) data.settings.showDecimals = Boolean(s.showDecimals);
+      }
+      localSave(data);
+      return { ok: true, count: holdings.length, settings: data.settings };
+    }
+    return serverApi(method, path, body); // søgning, kurs, health
   }
 
   // ======================================================================
@@ -453,10 +625,14 @@
       ${add ? `<button class="btn btn-primary" data-action="add">${icon('plus')}<span>Tilføj aktie</span></button>` : ''}`;
   }
 
+  function browserModePill() {
+    return state.storage === 'browser' ? '<span class="status-pill" title="Serveren har ingen database, så dine aktier gemmes kun i denne browser. Se Indstillinger.">💾 Gemt i denne browser</span>' : '';
+  }
+
   function updatedSub() {
     const p = state.portfolio;
     if (!p) return state.loadError ? '<span class="status-pill error" role="status"><span class="dot"></span>Kunne ikke hente kurser</span>' : '<span>Henter kurser…</span>';
-    return `<span>Opdateret kl. ${esc(fmtTime(p.updatedAt))}</span>${marketPill()}`;
+    return `<span>Opdateret kl. ${esc(fmtTime(p.updatedAt))}</span>${marketPill()}${browserModePill()}`;
   }
 
   function banners() {
@@ -871,8 +1047,9 @@
         <div class="card">
           <div class="card-header"><h2>${icon('lock')}Konto</h2></div>
           <div class="setting-row"><div><div class="lbl">Dit navn</div><div class="desc">Bruges i hilsenen på forsiden.</div></div><input class="input" id="set-name" style="max-width:180px" value="${esc(s.displayName || '')}" placeholder="F.eks. Mikkel" maxlength="40" aria-label="Dit navn"></div>
+          ${state.storage === 'browser' ? `<div class="setting-row"><div><div class="lbl">Browser-tilstand – intet login</div><div class="desc">Serveren har ingen database, så dine aktier og indstillinger gemmes kun i denne browser (de sendes til serveren for at få kurser, men gemmes ikke der). Tag jævnligt en sikkerhedskopi under Data. Vil du have login og synkronisering mellem enheder, så tilføj Upstash Redis og DASHBOARD_PASSWORD til Vercel-projektet – se README.</div></div></div>` : `
           <div class="setting-row"><div><div class="lbl">Adgangskode</div><div class="desc">${usesEnvPassword ? 'Styres af DASHBOARD_PASSWORD på serveren.' : 'Skift adgangskoden til dashboardet.'}</div></div><button class="btn btn-sm" data-action="change-password" ${usesEnvPassword ? 'disabled' : ''}>Skift adgangskode</button></div>
-          <div class="setting-row"><div><div class="lbl">Log ud på alle enheder</div><div class="desc">Ugyldiggør alle aktive logins, også dette.</div></div><button class="btn btn-sm" data-action="logout-all">Log ud overalt</button></div>
+          <div class="setting-row"><div><div class="lbl">Log ud på alle enheder</div><div class="desc">Ugyldiggør alle aktive logins, også dette.</div></div><button class="btn btn-sm" data-action="logout-all">Log ud overalt</button></div>`}
         </div>
 
         <div class="card">
@@ -896,7 +1073,7 @@
           <div class="card-header"><h2>${icon('download')}Data</h2></div>
           <div class="setting-row"><div><div class="lbl">Sikkerhedskopi</div><div class="desc">Download alle beholdninger som en JSON-fil.</div></div><button class="btn btn-sm" data-action="backup">${icon('download', 'icon icon-sm')}Download</button></div>
           <div class="setting-row"><div><div class="lbl">Gendan</div><div class="desc">Erstat beholdningerne med indholdet af en sikkerhedskopi.</div></div><button class="btn btn-sm" data-action="restore">${icon('upload', 'icon icon-sm')}Vælg fil…</button></div>
-          <div class="setting-row"><div><div class="lbl">Hvor ligger mine data?</div><div class="desc">I en JSON-fil i serverens datamappe. Ingen data sendes til andre end Yahoo Finance (kun symboler).</div></div></div>
+          <div class="setting-row"><div><div class="lbl">Hvor ligger mine data?</div><div class="desc">${state.storage === 'browser' ? 'I denne browsers lokale lager (localStorage). Rydder du browserdata, forsvinder de – så download en sikkerhedskopi.' : 'I serverens database/datamappe.'} Ingen data sendes til andre end Yahoo Finance (kun symboler).</div></div></div>
         </div>
       </div>`;
   }
@@ -1350,10 +1527,18 @@
 
   async function downloadBackup() {
     try {
-      const res = await fetch('/api/backup', { credentials: 'same-origin' });
-      if (!res.ok) throw new Error('Kunne ikke hente sikkerhedskopi');
-      const blob = await res.blob();
-      const name = (res.headers.get('content-disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'aktie-portfolio.json';
+      let blob;
+      let name;
+      if (state.storage === 'browser') {
+        const data = await api('GET', '/api/backup');
+        blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        name = `aktie-portfolio-${new Date().toISOString().slice(0, 10)}.json`;
+      } else {
+        const res = await fetch('/api/backup', { credentials: 'same-origin' });
+        if (!res.ok) throw new Error('Kunne ikke hente sikkerhedskopi');
+        blob = await res.blob();
+        name = (res.headers.get('content-disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'aktie-portfolio.json';
+      }
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -1717,9 +1902,11 @@
     document.body.classList.toggle('private', state.privacy);
     render();
     try {
-      const status = await api('GET', '/api/auth/status');
+      const status = await serverApi('GET', '/api/auth/status');
       state.usesEnvPassword = status.usesEnvPassword;
-      if (!status.authenticated) return location.replace('/login');
+      state.storage = status.storage === 'browser' ? 'browser' : 'server';
+      document.body.classList.toggle('browser-mode', state.storage === 'browser');
+      if (state.storage !== 'browser' && !status.authenticated) return location.replace('/login');
     } catch {}
     // Vis beholdningerne med det samme; kurserne fylder ind, når de er hentet.
     const quick = api('GET', '/api/holdings')

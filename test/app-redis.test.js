@@ -20,7 +20,7 @@ globalThis.__fakeFetch = async (url, opts) => {
 test('hele API-flowet virker med Redis-lager og fast adgangskode (som på Vercel)', async () => {
   const realFetch = globalThis.fetch;
   globalThis.fetch = globalThis.__fakeFetch; // store-redis bruger globalThis.fetch som standard
-  const config = { envPassword: 'vercel-pass-123', sessionSecret: '', secureCookies: true, trustProxy: true, alwaysRequireSetupToken: true, setupToken: 'x', baseCurrency: 'DKK' };
+  const config = { envPassword: 'vercel-pass-123', sessionSecret: '', secureCookies: true, trustProxy: true, alwaysRequireSetupToken: true, setupToken: 'x', baseCurrency: 'DKK', storageMode: 'redis' };
   const store = createStoreFromConfig(config, { KV_REST_API_URL: 'https://fake', KV_REST_API_TOKEN: 't' });
   globalThis.fetch = realFetch;
   const yahoo = {
@@ -42,7 +42,7 @@ test('hele API-flowet virker med Redis-lager og fast adgangskode (som på Vercel
   };
   try {
     const status = await call('GET', '/api/auth/status');
-    assert.deepEqual(status.json, { setupRequired: false, setupTokenRequired: false, usesEnvPassword: true, authenticated: false });
+    assert.deepEqual(status.json, { setupRequired: false, setupTokenRequired: false, usesEnvPassword: true, authenticated: false, storage: 'redis' });
     assert.equal((await call('POST', '/api/auth/login', { password: 'forkert' })).status, 401);
     const login = await call('POST', '/api/auth/login', { password: 'vercel-pass-123' });
     assert.equal(login.status, 200);

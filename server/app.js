@@ -29,6 +29,10 @@ const TYPE_NAMES = { INDEX: 'et indeks', CRYPTOCURRENCY: 'en kryptovaluta', CURR
 
 export function createApp({ store, yahoo, config, logger = console, onPortfolioRequest = null }) {
   const limiter = createLoginLimiter({ limit: 8, windowMs: 15 * 60_000 });
+  // Browser-tilstand: ingen database og intet login. Beholdninger ligger i brugerens browser;
+  // serveren leverer kun kurser og beregninger. API'et er så åbent og beskyttes af en kald-grænse pr. IP.
+  const browserMode = config.storageMode === 'browser';
+  const apiLimiter = createLoginLimiter({ limit: 240, windowMs: 60_000 });
   let envPasswordHash = null;
 
   async function getEnvPasswordHash() {
@@ -38,6 +42,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   async function authState() {
+    if (browserMode) return { usesEnvPassword: false, passwordHash: null, setupRequired: false };
     const auth = await store.getAuth();
     const usesEnvPassword = Boolean(config.envPassword);
     const passwordHash = usesEnvPassword ? await getEnvPasswordHash() : auth.passwordHash;
@@ -49,6 +54,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   async function isAuthenticated(req) {
+    if (browserMode) return true;
     const cookies = parseCookies(req);
     const token = cookies[COOKIE_NAME];
     if (!token) return false;
@@ -96,6 +102,16 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   async function buildPortfolio() {
     const data = await store.getPortfolio();
+    const result = await computeFrom(data);
+    rememberNames(data, result.quotes).catch((err) => logger.warn('Kunne ikke gemme navne:', err.message));
+    if (onPortfolioRequest) onPortfolioRequest();
+    delete result.quotes;
+    return result;
+  }
+
+  // Beregner porteføljen ud fra givne beholdninger/indstillinger (bruges både af det gemte
+  // lager og af browser-tilstanden, hvor klienten sender sine beholdninger med).
+  async function computeFrom(data) {
     const baseCurrency = data.settings.baseCurrency;
     const symbols = data.holdings.map((h) => h.symbol);
     const quotes = symbols.length ? await yahoo.getQuotes(symbols) : {};
@@ -104,13 +120,12 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       .map((q) => q.quote.currency);
     const fxRates = currencies.length ? await yahoo.getFxRates(currencies, baseCurrency) : {};
     const result = computePortfolio({ holdings: data.holdings, quotes, fxRates, baseCurrency });
-    rememberNames(data, quotes).catch((err) => logger.warn('Kunne ikke gemme navne:', err.message));
     const cashBase = Number(data.settings.cash) > 0 ? Number(data.settings.cash) : 0;
     result.totals.cashBase = cashBase;
     result.totals.totalValueBase = result.totals.valueBase + cashBase;
-    if (onPortfolioRequest) onPortfolioRequest();
     return {
       ...result,
+      quotes,
       fxRates,
       settings: data.settings,
       updatedAt: new Date().toISOString(),
@@ -135,8 +150,8 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     });
   }
 
-  async function buildHistory(range) {
-    const data = await store.getPortfolio();
+  async function buildHistory(range, data = null) {
+    if (!data) data = await store.getPortfolio();
     const baseCurrency = data.settings.baseCurrency;
     const holdings = data.holdings.filter((h) => Number(h.quantity) > 0);
     const histories = {};
@@ -212,6 +227,40 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     return c;
   }
 
+  // Beholdninger sendt fra klienten (browser-tilstand): valideres som ved gendan, uden at gemmes.
+  function parseHoldingsList(list, { max = 100 } = {}) {
+    if (!Array.isArray(list)) throw new HttpError(400, 'Forventede en liste af beholdninger');
+    if (list.length > max) throw new HttpError(400, `Højst ${max} aktier ad gangen`);
+    const seen = new Set();
+    return list.map((raw, i) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new HttpError(400, `Ugyldig post (linje ${i + 1})`);
+      const symbol = parseSymbol(raw.symbol);
+      if (seen.has(symbol)) throw new HttpError(400, `Symbolet ${symbol} optræder flere gange`);
+      seen.add(symbol);
+      return {
+        id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newId(),
+        symbol,
+        name: String(raw.name || symbol).slice(0, 120),
+        currency: raw.currency ? parseCurrency(raw.currency) : null,
+        quantity: parseQuantity(raw.quantity),
+        avgPrice: parseNumber(raw.avgPrice, 'Købskurs', { min: 0, allowNull: true }),
+        note: parseNote(raw.note),
+        addedAt: typeof raw.addedAt === 'string' && raw.addedAt.length <= 40 ? raw.addedAt : null,
+        updatedAt: typeof raw.updatedAt === 'string' && raw.updatedAt.length <= 40 ? raw.updatedAt : null,
+      };
+    });
+  }
+
+  function parseSettingsInput(raw) {
+    const s = raw && typeof raw === 'object' ? raw : {};
+    return {
+      baseCurrency: s.baseCurrency ? parseCurrency(s.baseCurrency) : config.baseCurrency || 'DKK',
+      cash: s.cash !== undefined ? parseNumber(s.cash, 'Kontanter', { min: 0, allowNull: true }) ?? 0 : 0,
+      displayName: String(s.displayName ?? '').trim().slice(0, 40),
+      showDecimals: Boolean(s.showDecimals),
+    };
+  }
+
   function findHolding(data, id) {
     const h = data.holdings.find((x) => x.id === id);
     if (!h) throw new HttpError(404, 'Aktien findes ikke i porteføljen');
@@ -232,7 +281,24 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         setupTokenRequired: setupRequired && setupTokenRequired(req),
         usesEnvPassword,
         authenticated: !setupRequired && (await isAuthenticated(req)),
+        storage: config.storageMode || 'file',
       });
+    },
+
+    // Beregn portefølje ud fra beholdninger sendt af klienten (browser-tilstand).
+    async compute(req, res) {
+      const body = await readJsonBody(req);
+      const data = { holdings: parseHoldingsList(body.holdings), settings: parseSettingsInput(body.settings) };
+      const result = await computeFrom(data);
+      delete result.quotes;
+      sendJson(res, 200, result);
+    },
+
+    async computeHistory(req, res) {
+      const body = await readJsonBody(req);
+      const range = typeof body.range === 'string' && HISTORY_RANGES.has(body.range) ? body.range : '1y';
+      const data = { holdings: parseHoldingsList(body.holdings), settings: parseSettingsInput(body.settings) };
+      sendJson(res, 200, await buildHistory(range, data));
     },
 
     async setup(req, res) {
@@ -521,6 +587,8 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     ['POST', /^\/api\/auth\/logout-all$/, api.logoutAll],
     ['GET', /^\/api\/portfolio$/, api.portfolio],
     ['GET', /^\/api\/portfolio\/history$/, api.history],
+    ['POST', /^\/api\/compute$/, api.compute],
+    ['POST', /^\/api\/compute\/history$/, api.computeHistory],
     ['GET', /^\/api\/search$/, api.search],
     ['GET', /^\/api\/quote\/(?<symbol>[^/]+)$/, api.quote],
     ['GET', /^\/api\/holdings$/, api.listHoldings],
@@ -549,8 +617,17 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     res.end();
   }
 
+  // I browser-tilstand findes intet lager på serveren – disse ruter giver ingen mening.
+  const STORE_ROUTES = /^\/api\/(portfolio|holdings|settings|backup|restore|auth\/(setup|login|change-password|logout-all))(\/|$)/;
+
   async function handleApi(req, res, url) {
     const method = req.method === 'HEAD' ? 'GET' : req.method;
+    if (browserMode) {
+      const ip = clientIp(req, { trustProxy: config.trustProxy });
+      apiLimiter.recordFailure(ip);
+      if (apiLimiter.isBlocked(ip)) throw new HttpError(429, 'For mange kald – prøv igen om lidt', { retryAfter: apiLimiter.retryAfterSeconds(ip) });
+      if (STORE_ROUTES.test(url.pathname)) throw new HttpError(404, 'Ikke tilgængelig i browser-tilstand (ingen database på serveren)', { code: 'BROWSER_MODE' });
+    }
     for (const [m, pattern, handler, opts = {}] of routes) {
       const match = url.pathname.match(pattern);
       if (!match) continue;
@@ -580,7 +657,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     const authed = !setupRequired && (await isAuthenticated(req));
 
     if (url.pathname === '/login') {
-      if (authed) return redirect(res, '/');
+      if (authed || browserMode) return redirect(res, '/');
       if (!(await serveStatic(res, VIEWS_DIR, '/login.html'))) throw new HttpError(500, 'login.html mangler');
       return;
     }
