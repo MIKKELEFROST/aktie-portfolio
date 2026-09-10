@@ -100,9 +100,9 @@ test('storage: vælger Redis når miljøvariabler findes, ellers fil', async () 
 });
 
 test('storage: genkender Upstash-variabler med brugerdefineret præfiks og ignorerer redis://', async () => {
-  const { redisConfigFromEnv, describeRedisEnv } = await import('../server/storage.js');
+  const { redisConfigFromEnv, describeStorageEnv } = await import('../server/storage.js');
   assert.equal(redisConfigFromEnv({ MINDB_KV_REST_API_URL: 'https://x.upstash.io', MINDB_KV_REST_API_TOKEN: 'tok' })?.url, 'https://x.upstash.io');
   assert.equal(redisConfigFromEnv({ KV_URL: 'redis://:pw@host:6379', REDIS_URL: 'redis://x' }), null, 'kun REST-adresser bruges');
   assert.equal(redisConfigFromEnv({ KV_REST_API_URL: 'https://x', KV_REST_API_TOKEN: '' }), null, 'token mangler');
-  assert.deepEqual(describeRedisEnv({ KV_URL: 'a', PATH: 'b', UPSTASH_REDIS_REST_TOKEN: 'c' }), ['KV_URL', 'UPSTASH_REDIS_REST_TOKEN']);
+  assert.deepEqual(describeStorageEnv({ KV_URL: 'a', PATH: 'b', UPSTASH_REDIS_REST_TOKEN: 'c' }), ['KV_URL', 'UPSTASH_REDIS_REST_TOKEN']);
 });

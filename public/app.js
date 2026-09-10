@@ -146,7 +146,8 @@
     lastAttempt: 0,
     lastManual: 0,
     usesEnvPassword: false,
-    storage: 'server', // 'server' (fil/redis med login) eller 'browser' (localStorage, intet login)
+    storage: 'server', // 'server' (database eller fil) eller 'browser' (localStorage)
+    access: 'login', // 'login' = adgangskode kræves | 'open' = åben adgang for alle med adressen | 'browser'
     account: storageGet('account', 'all'), // 'all' | 'none' | depot-id
     localImport: null, // data fundet i browserens lager, som kan overføres til kontoen
     allHoldings: [], // alle beholdninger uanset depot-filter (til tilføj/køb til og "Uden depot"-chip)
@@ -284,7 +285,7 @@
     const data = localLoad();
     const now = new Date().toISOString();
 
-    if (p === '/api/auth/status') return { authenticated: true, setupRequired: false, setupTokenRequired: false, usesEnvPassword: false, storage: 'browser' };
+    if (p === '/api/auth/status') return { authenticated: true, setupRequired: false, setupTokenRequired: false, usesEnvPassword: false, access: 'browser', storage: 'browser' };
     if (p.startsWith('/api/auth/')) return { ok: true };
     const account = url.searchParams.get('account') || '';
     if (p === '/api/portfolio' && method === 'GET') return serverApi('POST', '/api/compute', { holdings: data.holdings, settings: data.settings, account });
@@ -807,7 +808,9 @@
   }
 
   function browserModePill() {
-    return state.storage === 'browser' ? '<span class="status-pill" title="Serveren har ingen database, så dine aktier gemmes kun i denne browser. Se Indstillinger.">💾 Gemt i denne browser</span>' : '';
+    if (state.storage === 'browser') return '<span class="status-pill" title="Serveren har ingen database, så dine aktier gemmes kun i denne browser. Se Indstillinger.">💾 Gemt i denne browser</span>';
+    if (state.access === 'open') return '<span class="status-pill" title="Porteføljen ligger i databasen, så du ser den samme uanset enhed og browser.">☁️ Synkroniseret</span>';
+    return '';
   }
 
   function updatedSub() {
@@ -1247,7 +1250,7 @@
         <div class="card">
           <div class="card-header"><h2>${icon('lock')}Konto</h2></div>
           <div class="setting-row"><div><div class="lbl">Dit navn</div><div class="desc">Bruges i hilsenen på forsiden.</div></div><input class="input" id="set-name" style="max-width:180px" value="${esc(s.displayName || '')}" placeholder="F.eks. Mikkel" maxlength="40" aria-label="Dit navn"></div>
-          ${state.storage === 'browser' ? `<div class="setting-row"><div><div class="lbl">Browser-tilstand – intet login</div><div class="desc">Serveren har ingen database, så dine aktier og indstillinger gemmes kun i denne browser (de sendes til serveren for at få kurser, men gemmes ikke der). Tag jævnligt en sikkerhedskopi under Data. Vil du have login og synkronisering mellem enheder, så tilføj Upstash Redis og DASHBOARD_PASSWORD til Vercel-projektet – se README.</div></div></div>` : `
+          ${state.storage === 'browser' ? `<div class="setting-row"><div><div class="lbl">Browser-tilstand – intet login</div><div class="desc">Serveren har ingen database, så dine aktier og indstillinger gemmes kun i denne browser (de sendes til serveren for at få kurser, men gemmes ikke der). Tag jævnligt en sikkerhedskopi under Data. Vil du have, at porteføljen følger med til alle dine enheder, så tilslut en database – se README.</div></div></div>` : state.access === 'open' ? `<div class="setting-row"><div><div class="lbl">Åben adgang – intet login</div><div class="desc">Porteføljen ligger i databasen og vises, så snart siden åbnes – på alle dine enheder og i alle browsere. Det betyder også, at alle der kender adressen, kan se og ændre den. Vil du hellere have login, så sæt <code>DASHBOARD_PASSWORD</code> i Vercel-projektet – se README.</div></div></div>` : `
           <div class="setting-row"><div><div class="lbl">Adgangskode</div><div class="desc">${usesEnvPassword ? 'Styres af DASHBOARD_PASSWORD på serveren.' : 'Skift adgangskoden til dashboardet.'}</div></div><button class="btn btn-sm" data-action="change-password" ${usesEnvPassword ? 'disabled' : ''}>Skift adgangskode</button></div>
           <div class="setting-row"><div><div class="lbl">Log ud på alle enheder</div><div class="desc">Ugyldiggør alle aktive logins, også dette.</div></div><button class="btn btn-sm" data-action="logout-all">Log ud overalt</button></div>`}
         </div>
@@ -2389,8 +2392,11 @@
       const status = await serverApi('GET', '/api/auth/status');
       state.usesEnvPassword = status.usesEnvPassword;
       state.storage = status.storage === 'browser' ? 'browser' : 'server';
+      state.access = status.access || (state.storage === 'browser' ? 'browser' : 'login');
       document.body.classList.toggle('browser-mode', state.storage === 'browser');
-      if (state.storage !== 'browser' && !status.authenticated) return location.replace('/login');
+      document.body.classList.toggle('open-access', state.access === 'open');
+      // Ved åben adgang findes der intet login at sende brugeren til.
+      if (state.access === 'login' && !status.authenticated) return location.replace('/login');
       checkLocalImport();
     } catch {}
     // Vis beholdningerne med det samme; kurserne fylder ind, når de er hentet.

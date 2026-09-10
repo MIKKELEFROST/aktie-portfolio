@@ -42,7 +42,7 @@ test('hele API-flowet virker med Redis-lager og fast adgangskode (som på Vercel
   };
   try {
     const status = await call('GET', '/api/auth/status');
-    assert.deepEqual(status.json, { setupRequired: false, setupTokenRequired: false, usesEnvPassword: true, authenticated: false, storage: 'redis' });
+    assert.deepEqual(status.json, { setupRequired: false, setupTokenRequired: false, usesEnvPassword: true, access: 'login', authenticated: false, storage: 'redis' });
     assert.equal((await call('POST', '/api/auth/login', { password: 'forkert' })).status, 401);
     const login = await call('POST', '/api/auth/login', { password: 'vercel-pass-123' });
     assert.equal(login.status, 200);

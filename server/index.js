@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync, promises as fs, constants as fsConstants } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createApp } from './app.js';
-import { createStoreFromConfig, redisConfigFromEnv } from './storage.js';
+import { createStoreFromConfig, databaseModeFromEnv } from './storage.js';
 import { createYahooClient } from './yahoo.js';
 import { createMockYahooClient } from './yahoo-mock.js';
 
@@ -43,6 +43,7 @@ export function loadConfig(env = process.env) {
     secureCookies: env.SECURE_COOKIES === '1' || env.SECURE_COOKIES === 'true',
     mockYahoo: env.YAHOO_MOCK === '1' || env.YAHOO_MOCK === 'true',
     trustProxy: env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true',
+    publicAccess: env.PUBLIC_ACCESS === '1' || env.PUBLIC_ACCESS === 'true',
     setupToken: env.SETUP_TOKEN || randomBytes(12).toString('hex'),
     storageMode: env.STORAGE === 'browser' ? 'browser' : null, // null = vælges ud fra miljøet (fil/redis)
     warmCache: env.WARM_CACHE !== '0',
@@ -88,9 +89,9 @@ export function startCacheWarmer({ store, yahoo, config, logger = console }) {
 }
 
 export async function startServer(config = loadConfig()) {
-  const usesRedis = Boolean(redisConfigFromEnv());
-  if (!config.storageMode) config.storageMode = usesRedis ? 'redis' : 'file';
-  if (!usesRedis && config.storageMode === 'file') {
+  const database = databaseModeFromEnv(); // 'supabase', 'redis' eller null
+  if (!config.storageMode) config.storageMode = database || 'file';
+  if (!database && config.storageMode === 'file') {
     try {
       await fs.mkdir(config.dataDir, { recursive: true });
       await fs.access(config.dataDir, fsConstants.W_OK);
@@ -107,9 +108,10 @@ export async function startServer(config = loadConfig()) {
   server.listen(config.port, config.host, () => {
     const shownHost = config.host === '0.0.0.0' ? 'localhost' : config.host;
     console.log(`Aktie-portfolio kører på http://${shownHost}:${config.port}`);
-    console.log(config.storageMode === 'browser' ? 'STORAGE=browser: data gemmes i brugerens browser, intet login.' : usesRedis ? 'Data gemmes i Redis (Upstash)' : `Data gemmes i ${config.dataDir}`);
+    console.log(config.storageMode === 'browser' ? 'STORAGE=browser: data gemmes i brugerens browser, intet login.' : database === 'supabase' ? 'Data gemmes i Supabase' : database === 'redis' ? 'Data gemmes i Redis (Upstash)' : `Data gemmes i ${config.dataDir}`);
+    if (config.publicAccess && config.storageMode !== 'browser') console.log('PUBLIC_ACCESS=1: ingen login – alle med adressen kan se og ændre porteføljen.');
     if (config.mockYahoo) console.log('YAHOO_MOCK=1: bruger falske kurser (ingen kald til Yahoo Finance).');
-    if (!config.envPassword && config.storageMode !== 'browser') {
+    if (!config.envPassword && config.storageMode !== 'browser' && !config.publicAccess) {
       store.getAuth().then((auth) => {
         if (auth.passwordHash) return;
         console.log('Ingen adgangskode endnu – åbn siden i browseren for at oprette den.');

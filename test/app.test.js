@@ -88,7 +88,7 @@ after(() => server.close());
 
 test('første start: opsætning kræves, sider omdirigerer til /login', async () => {
   const status = await request('GET', '/api/auth/status');
-  assert.deepEqual(status.json, { setupRequired: true, setupTokenRequired: false, usesEnvPassword: false, authenticated: false, storage: 'file' });
+  assert.deepEqual(status.json, { setupRequired: true, setupTokenRequired: false, usesEnvPassword: false, access: 'login', authenticated: false, storage: 'file' });
 
   const page = await request('GET', '/');
   assert.equal(page.status, 302);
@@ -115,7 +115,7 @@ test('opsætning: for kort adgangskode afvises, gyldig logger ind', async () => 
   assert.equal(again.status, 409, 'opsætning kan ikke køres igen');
 
   const status = await request('GET', '/api/auth/status');
-  assert.deepEqual(status.json, { setupRequired: false, setupTokenRequired: false, usesEnvPassword: false, authenticated: true, storage: 'file' });
+  assert.deepEqual(status.json, { setupRequired: false, setupTokenRequired: false, usesEnvPassword: false, access: 'login', authenticated: true, storage: 'file' });
 
   const page = await request('GET', '/');
   assert.equal(page.status, 200);
