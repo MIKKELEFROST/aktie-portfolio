@@ -1083,15 +1083,21 @@
     }
     const first = h.points[0];
     const last = h.points[h.points.length - 1];
-    const diff = last.value - first.value;
-    const pct = first.value ? (diff / first.value) * 100 : null;
-    // Tallet er ikke dit afkast: det er kursbevægelsen på det, du ejer i dag,
-    // som om du havde ejet det hele perioden. Det skal stå, hvor tallet står.
+    // Kurven stiger også, når man køber til, og det er ikke afkast. Kender vi
+    // det indsatte, trækkes det fra i begge ender, så tallet kun er det,
+    // markedet gav i perioden. Ellers vises den rå bevægelse som før.
+    const medIndskud = isNum(last.invested) && last.invested > 0 && isNum(first.invested);
+    const diff = medIndskud
+      ? (last.value - last.invested) - (first.value - first.invested)
+      : last.value - first.value;
+    const pct = medIndskud
+      ? (diff / last.invested) * 100
+      : (first.value ? (diff / first.value) * 100 : null);
     summary.innerHTML = `<span class="big amount">${fmtAmount(last.value)}</span>`
       + `<span class="${signClass(diff)}"><span class="amount">${fmtAmount(diff, state.baseCurrency, { sign: true })}</span> (${fmtPct(pct)})</span>`
-      + `<span class="muted small">i kursbevægelse siden ${esc(fmtDate(first.date, { year: longRange() }))}`
+      + `<span class="muted small">i ${medIndskud ? 'afkast' : 'kursbevægelse'} siden ${esc(fmtDate(first.date, { year: longRange() }))}`
       + `${state.historyLoading === state.range ? ' · opdaterer…' : ''}</span>`;
-    drawChart(box, h.points, state.portfolio?.totals?.costBase ?? null);
+    drawChart(box, h.points);
     renderChartNotes(h);
   }
 
@@ -1103,7 +1109,14 @@
     const el = $('#chart-notes');
     if (!el) return;
     const noter = [];
-    noter.push('Kurven viser, hvad <b>din nuværende beholdning</b> ville have været værd på hver dag – ikke hvad du faktisk ejede dengang. Dit rigtige afkast står under "Samlet afkast".');
+    // Kurven bygger på købsdatoerne, når de er der. Mangler de, kan vi kun vise
+    // dagens antal hele vejen – og det skal siges, for så er den ikke historisk.
+    const udenDato = state.portfolio?.positions?.filter((p) => !p.purchasedAt).length || 0;
+    if (udenDato) {
+      noter.push(`For ${udenDato === 1 ? 'én beholdning' : `${udenDato} beholdninger`} mangler købsdatoen, så ${udenDato === 1 ? 'den regnes' : 'de regnes'} med i hele perioden – også før du ejede ${udenDato === 1 ? 'den' : 'dem'}. Skriv datoen ind under Redigér, så bliver kurven rigtig.`);
+    } else {
+      noter.push('Kurven viser, hvad du <b>faktisk ejede hver dag</b>. Køber du til, stiger den – den del er ikke afkast. Den stiplede linje er det, du har lagt ind, så afstanden mellem de to er dit afkast.');
+    }
     // Er perioden klippet til første køb, skal det stå – ellers ser det ud som
     // om knappen ikke virkede, når 6M og 1Å viser det samme.
     if (h.ownedFrom) {
@@ -1120,26 +1133,31 @@
       noter.push(`Ikke med i kurven: ${h.missing.map((m) => `<b>${esc(m.symbol)}</b> (${esc(m.error)})`).join(', ')}.`);
     }
     if (state.investedOffChart) {
-      noter.push(`Investeret (<span class="amount">${fmtAmount(state.portfolio?.totals?.costBase)}</span>) ligger uden for grafens skala og er ikke tegnet.`);
+      noter.push('Investeret ligger uden for grafens skala og er ikke tegnet.');
     }
     el.innerHTML = noter.map((n) => `<p>${n}</p>`).join('');
   }
 
-  function drawChart(box, points, invested) {
+  function drawChart(box, points) {
     const W = Math.max(280, box.clientWidth || 600);
     const H = box.clientHeight || 240;
     const padL = 8, padR = 8, padT = 14, padB = 26;
     const values = points.map((p) => p.value);
     let min = Math.min(...values);
     let max = Math.max(...values);
-    // Investeret-linjen må gerne udvide skalaen lidt, men ikke mase kurven flad.
-    // Ligger den længere væk end halvdelen af kurvens eget udsving, udelades den.
+    // Investeret er en trappe: den stiger den dag, der blev lagt penge ind.
+    const inv = points.map((p) => p.invested);
+    const harInv = inv.every(isNum) && Math.max(...inv) > 0;
+    // Linjen må gerne udvide skalaen lidt, men ikke mase kurven flad. Ligger
+    // den længere væk end halvdelen af kurvens eget udsving, udelades den.
     const spread = Math.max(max - min, Math.abs(max) * 0.005);
-    const showInvested = isNum(invested) && invested > 0 && invested > min - spread * 0.5 && invested < max + spread * 0.5;
-    state.investedOffChart = isNum(invested) && invested > 0 && !showInvested;
+    const invMin = harInv ? Math.min(...inv.filter((v) => v > 0)) : null;
+    const invMax = harInv ? Math.max(...inv) : null;
+    const showInvested = harInv && invMax > min - spread * 0.5 && invMin < max + spread * 0.5;
+    state.investedOffChart = harInv && !showInvested;
     if (showInvested) {
-      min = Math.min(min, invested);
-      max = Math.max(max, invested);
+      min = Math.min(min, invMin);
+      max = Math.max(max, invMax);
     }
     if (max === min) { max += 1; min -= 1; }
     const span = max - min;
@@ -1170,8 +1188,10 @@
       const anchor = i === 0 ? 'start' : i === labelCount - 1 ? 'end' : 'middle';
       xLabels.push(`<text x="${x(p.date).toFixed(1)}" y="${H - 8}" text-anchor="${anchor}" font-size="10" fill="var(--muted)">${esc(fmtDate(p.date, { year: longRange() }))}</text>`);
     }
+    // Trappen tegnes vandret frem til købsdagen og så lodret op – ikke skråt,
+    // for pengene kom ind på én dag.
     const investedLine = showInvested
-      ? `<line x1="${padL}" x2="${W - padR}" y1="${y(invested).toFixed(1)}" y2="${y(invested).toFixed(1)}" stroke="var(--chart-invested)" stroke-width="1.5" stroke-dasharray="5 4"/>`
+      ? `<path d="${points.map((p, i) => (i ? `H${x(p.date).toFixed(1)} V${y(p.invested).toFixed(1)}` : `M${x(p.date).toFixed(1)},${y(p.invested).toFixed(1)}`)).join(' ')}" fill="none" stroke="var(--chart-invested)" stroke-width="1.5" stroke-dasharray="5 4"/>`
       : '';
     $$('.chart-invested-key').forEach((el) => el.classList.toggle('hidden', !showInvested));
     const last = points[points.length - 1];
@@ -1206,8 +1226,12 @@
       const cy = y(p.value);
       cursor.setAttribute('x1', cx); cursor.setAttribute('x2', cx); cursor.style.display = '';
       dot.setAttribute('cx', cx); dot.setAttribute('cy', cy); dot.style.display = '';
-      const change = p.value - points[0].value;
-      tip.innerHTML = `${esc(fmtDate(p.date, { year: true }))}<b class="amount">${fmtAmount(p.value)}</b><span class="amount">${fmtAmount(change, state.baseCurrency, { sign: true })}</span> siden start`;
+      // Afkast den dag: værdien mod det, der faktisk var lagt ind indtil da.
+      const afkast = isNum(p.invested) && p.invested > 0 ? p.value - p.invested : null;
+      tip.innerHTML = `${esc(fmtDate(p.date, { year: true }))}<b class="amount">${fmtAmount(p.value)}</b>`
+        + (afkast == null
+          ? `<span class="amount">${fmtAmount(p.value - points[0].value, state.baseCurrency, { sign: true })}</span> siden start`
+          : `<span class="amount ${signClass(afkast)}">${fmtAmount(afkast, state.baseCurrency, { sign: true })}</span> af ${fmtAmount(p.invested)} indsat`);
       tip.style.display = '';
       const leftPx = clamp((cx / W) * rect.width, 70, rect.width - 70);
       tip.style.left = `${leftPx}px`;
