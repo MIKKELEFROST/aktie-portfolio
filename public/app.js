@@ -153,6 +153,9 @@
     me: null, // min profil på platformen: { id, name, email, isOwner }
     viewing: null, // ser jeg en andens portefølje? { id, name }
     people: { q: '', results: [], loading: false, loaded: false },
+    analytics: { data: null, loaded: false, loading: false },
+    // Fremskrivningens felter. null = "brug det, analysen fandt".
+    plan: { years: 10, perMonth: null, growth: null },
     inviteCode: null,
     account: storageGet('account', 'all'), // 'all' | 'none' | depot-id
     localImport: null, // data fundet i browserens lager, som kan overføres til kontoen
@@ -654,8 +657,8 @@
   // Routing
   // ======================================================================
 
-  const ROUTES = { '/': 'overview', '/beholdninger': 'holdings', '/indstillinger': 'settings', '/folk': 'people' };
-  const TITLES = { overview: 'Overblik', holdings: 'Beholdninger', settings: 'Indstillinger', people: 'Folk', person: 'Profil' };
+  const ROUTES = { '/': 'overview', '/beholdninger': 'holdings', '/indstillinger': 'settings', '/folk': 'people', '/analyse': 'analytics' };
+  const TITLES = { overview: 'Overblik', holdings: 'Beholdninger', settings: 'Indstillinger', people: 'Folk', person: 'Profil', analytics: 'Analyse' };
   const PERSON_PATH = /^\/profil\/([^/]+)$/;
 
   const personIdFromPath = () => PERSON_PATH.exec(location.pathname)?.[1] || null;
@@ -689,6 +692,7 @@
     }
     if (state.viewing) stopViewing();
     if (route === 'people' && state.access === 'platform' && !state.people.loaded && !state.people.loading) loadPeople('');
+    if (route === 'analytics' && !state.analytics.loaded && !state.analytics.loading) loadAnalytics();
   }
 
   // ======================================================================
@@ -715,6 +719,7 @@
     if (route === 'overview') page.innerHTML = renderOverview();
     else if (route === 'holdings') page.innerHTML = renderHoldings();
     else if (route === 'people') page.innerHTML = renderPeople();
+    else if (route === 'analytics') page.innerHTML = renderAnalytics();
     else if (route === 'person') page.innerHTML = renderPerson();
     else page.innerHTML = renderSettings();
     if (route === 'overview') afterRenderOverview();
@@ -894,6 +899,9 @@
     const rest = måneder % 12;
     return rest ? `${år} år og ${rest} md.` : `${år} år`;
   }
+
+  // Sætter punktum, medmindre teksten allerede ender på et.
+  const punktum = (t) => (/[.!?]$/.test(String(t).trim()) ? t : `${t}.`);
 
   const AFKAST_TOOLTIP = 'Kursafkast i forhold til din gns. købskurs, omregnet til basisvalutaen med dagens valutakurs. Valutaudsving siden købet indgår ikke.';
 
@@ -1330,6 +1338,132 @@
         ${holdingsTable({ compact: false })}
       </div>
       <p class="footer-note">Tryk på en aktie for detaljer – her kan du købe til, sælge, redigere eller slette.</p>`}`;
+  }
+
+  // ---------- Analyse ----------
+
+  async function loadAnalytics() {
+    state.analytics.loading = true;
+    try {
+      const data = await api('GET', '/api/analytics');
+      state.analytics = { data, loaded: true, loading: false };
+    } catch (err) {
+      state.analytics = { data: null, loaded: true, loading: false };
+      toast(err.message, 'error');
+    }
+    render();
+  }
+
+  // Samme regnestykke som på serveren: renter tilskrives månedligt.
+  function projectValue({ start = 0, perMonth = 0, annualPercent = 0, years = 10 }) {
+    const måneder = Math.max(0, Math.round(years * 12));
+    const r = (1 + annualPercent / 100) ** (1 / 12) - 1;
+    const vokset = start * (1 + r) ** måneder;
+    const bidrag = Math.abs(r) < 1e-9 ? perMonth * måneder : perMonth * (((1 + r) ** måneder - 1) / r);
+    const indbetalt = start + perMonth * måneder;
+    const slut = vokset + bidrag;
+    return { value: slut, contributed: indbetalt, growth: slut - indbetalt };
+  }
+
+  // Hvad fremskrivningen regner med, hvis brugeren ikke selv har rettet noget.
+  const DEFAULT_VÆKST = 7;
+  function planInput(a) {
+    const perMonth = state.plan.perMonth ?? (isNum(a.perMonth) ? Math.round(a.perMonth) : 0);
+    // Eget afkast bruges kun, når der er over et års historik bag det.
+    const eget = a.annualizedReliable && isNum(a.annualizedPercent) ? a.annualizedPercent : null;
+    const growth = state.plan.growth ?? (eget === null ? DEFAULT_VÆKST : Math.round(eget * 10) / 10);
+    return { perMonth, growth, eget, years: state.plan.years };
+  }
+
+  function renderAnalytics() {
+    const { data: a, loaded } = state.analytics;
+    if (!loaded) return `${pageHeader('Analyse', '<span>Henter…</span>', headerActions({ add: false }))}`;
+    if (!a || !a.positionsTotal) {
+      return `${pageHeader('Analyse', '<span>Tal om din portefølje</span>', headerActions({ add: false }))}
+        <div class="card"><div class="empty">${icon('chart')}<h3>Ikke noget at regne på endnu</h3><p>Tilføj dine aktier – og skriv gerne købsdatoen på. Så kan der regnes på, hvor meget du lægger til side om måneden, og hvad det kan blive til.</p></div></div>`;
+    }
+
+    const { perMonth, growth, eget, years } = planInput(a);
+    const f = projectValue({ start: a.value, perMonth, annualPercent: growth, years });
+    const årValg = [5, 10, 15, 20, 30].map((å) => `<button type="button" class="chip-btn${å === years ? ' active' : ''}" data-action="plan-years" data-years="${å}">${å} år</button>`).join('');
+
+    // ---------- sjove tal ----------
+    const fakta = [];
+    if (isNum(a.months)) fakta.push([icon('chart'), `Du har investeret i <b>${esc(ejertid(a.days))}</b> – siden ${esc(fmtDate(a.since, { year: true }))}.`]);
+    if (isNum(a.perDay)) fakta.push([icon(a.perDay >= 0 ? 'trend' : 'warn'), `Porteføljen har i gennemsnit ${a.perDay >= 0 ? 'tjent' : 'tabt'} <b class="amount ${signClass(a.perDay)}">${fmtAmount(Math.abs(a.perDay))}</b> om dagen.`]);
+    if (isNum(a.gainShare)) fakta.push([icon('briefcase'), `<b>${fmtPct(a.gainShare, { sign: false })}</b> af det, porteføljen er værd, er afkast. Resten er dine egne penge.`]);
+    if (a.biggest) fakta.push([icon('list'), `Størst: <b>${esc(a.biggest.name)}</b>${isNum(a.biggest.weight) ? ` – ${fmtPct(a.biggest.weight, { sign: false })} af porteføljen` : ''}.`]);
+    if (isNum(a.concentration) && a.positionsTotal > 3) fakta.push([icon('list'), `Dine tre største fylder <b>${fmtPct(a.concentration, { sign: false })}</b> tilsammen.`]);
+    if (a.best) fakta.push([icon('trend'), `Højest afkast: <b>${esc(a.best.name)}</b> med <span class="${signClass(a.best.gainPercent)}">${fmtPct(a.best.gainPercent)}</span>.`]);
+    if (a.worst) fakta.push([icon(a.worst.gainPercent < 0 ? 'warn' : 'list'), `Lavest afkast: <b>${esc(a.worst.name)}</b> med <span class="${signClass(a.worst.gainPercent)}">${fmtPct(a.worst.gainPercent)}</span>${a.worst.gainPercent >= 0 ? ' – stadig i plus' : ''}.`]);
+    if (a.longestHeld) fakta.push([icon('chart'), `Længst ejet: <b>${esc(a.longestHeld.name)}</b> i ${esc(punktum(ejertid(a.longestHeld.heldDays)))}`]);
+    if (isNum(a.doublingYears)) fakta.push([icon('trend'), `Fortsætter væksten, er pengene fordoblet om <b>${fmtNum(a.doublingYears, 0, 1)} år</b>.`]);
+    if (a.currencies > 1) fakta.push([icon('eye'), `Du har papirer i <b>${a.currencies} valutaer</b>${a.accounts ? ` fordelt på ${a.accounts} ${a.accounts === 1 ? 'depot' : 'depoter'}` : ''}.`]);
+
+    return `
+      ${pageHeader('Analyse', `<span>Tal om din portefølje</span>`, headerActions({ add: false }))}
+
+      ${a.withoutDates ? `<div class="banner">${icon('warn')}<div><b>${a.withoutDates} ${a.withoutDates === 1 ? 'papir mangler' : 'papirer mangler'} en købsdato.</b> Uden den kan der ikke regnes på tid – hverken månedligt gennemsnit eller afkast pr. år. Datoen sættes under Redigér.</div></div>` : ''}
+
+      <div class="grid grid-kpi">
+        <div class="card kpi kpi-hero">
+          <div class="kpi-label">Investeret pr. måned</div>
+          <div class="kpi-value amount">${isNum(a.perMonth) ? fmtAmount(a.perMonth) : '–'}</div>
+          <div class="kpi-sub">${isNum(a.months) ? `i gennemsnit over ${fmtNum(a.months, 0, 0)} måneder` : 'kræver købsdatoer'}</div>
+        </div>
+        <div class="card kpi">
+          <div class="kpi-label">Investeret i alt</div>
+          <div class="kpi-value amount">${fmtAmount(a.invested)}</div>
+          <div class="kpi-sub">dine egne indbetalinger</div>
+        </div>
+        <div class="card kpi">
+          <div class="kpi-label">Afkast pr. år</div>
+          <div class="kpi-value amount ${signClass(a.annualizedPercent)}">${isNum(a.annualizedPercent) ? fmtPct(a.annualizedPercent) : '–'}</div>
+          <div class="kpi-sub">${isNum(a.annualizedPercent) ? (a.annualizedReliable ? 'over hele ejertiden' : 'kort historik – tallet svinger meget') : 'kræver købsdatoer'}</div>
+        </div>
+        <div class="card kpi">
+          <div class="kpi-label">Værdi nu</div>
+          <div class="kpi-value amount">${fmtAmount(a.value)}</div>
+          <div class="kpi-sub ${signClass(a.gain)}">${fmtAmount(a.gain, state.baseCurrency, { sign: true })} i afkast</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2>${icon('trend')}Hvis det fortsætter sådan her</h2></div>
+        <div class="card-body">
+          <div class="chip-row" style="margin-bottom:14px">${årValg}</div>
+          <div class="plan-grid">
+            <div class="field">
+              <label for="plan-month">Jeg lægger til side hver måned</label>
+              <div class="input-group"><input class="input n" id="plan-month" inputmode="decimal" value="${esc(fmtRaw(perMonth))}"><span class="addon">${esc(a.baseCurrency)}</span></div>
+            </div>
+            <div class="field">
+              <label for="plan-growth">Vækst om året</label>
+              <div class="input-group"><input class="input n" id="plan-growth" inputmode="decimal" value="${esc(fmtRaw(growth))}"><span class="addon">%</span></div>
+              <span class="help">${eget === null ? `Der er ikke historik nok til dit eget tal endnu, så der regnes med ${DEFAULT_VÆKST} %.` : `Dit eget afkast hidtil er ${fmtPct(eget)}.`}</span>
+            </div>
+          </div>
+
+          <div class="plan-result">
+            <div class="plan-total">
+              <div class="kpi-label">Om ${years} år har du</div>
+              <div class="plan-value amount">${fmtAmount(f.value)}</div>
+            </div>
+            <dl class="kv">
+              <dt>Heraf lagt til side selv</dt><dd class="amount">${fmtAmount(f.contributed)}</dd>
+              <dt>Heraf vækst</dt><dd class="amount ${signClass(f.growth)}">${fmtAmount(f.growth, state.baseCurrency, { sign: true })}</dd>
+            </dl>
+          </div>
+          <p class="muted small" style="margin:12px 0 0">Det er et regnestykke, ikke en forudsigelse. Markedet giver ikke det samme hvert år, og et enkelt dårligt år ændrer tallet markant. Skatten er ikke regnet med.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2>${icon('list')}Om din portefølje</h2></div>
+        <div class="card-body">
+          <ul class="fact-list">${fakta.map(([ikon, tekst]) => `<li>${ikon}<span>${tekst}</span></li>`).join('')}</ul>
+        </div>
+      </div>`;
   }
 
   // ---------- Platform: profil, følgere, søgning ----------
@@ -2412,6 +2546,10 @@
       case 'delete':
         e.stopPropagation();
         return deleteHolding(el.dataset.id);
+      case 'plan-years':
+        state.plan.years = Number(el.dataset.years) || 10;
+        render();
+        break;
       case 'copy-invite':
         navigator.clipboard?.writeText(state.inviteCode || '').then(
           () => toast('Invitationskoden er kopieret', 'success'),
@@ -2516,6 +2654,24 @@
     else if (e.target.dataset.importSymbol !== undefined) {
       imp.rows[Number(e.target.dataset.importSymbol)].symbol = e.target.value.trim().toUpperCase();
       updateImportCount();
+    }
+    else if (id === 'plan-month' || id === 'plan-growth') {
+      const n = parseInput(e.target.value);
+      const felt = id === 'plan-month' ? 'perMonth' : 'growth';
+      state.plan[felt] = isNum(n) ? n : (e.target.value.trim() ? state.plan[felt] : 0);
+      // Kun resultatet tegnes om, så markøren ikke hopper ud af feltet.
+      const a = state.analytics.data;
+      if (a) {
+        const { perMonth, growth, years } = planInput(a);
+        const f = projectValue({ start: a.value, perMonth, annualPercent: growth, years });
+        const boks = $('.plan-result');
+        if (boks) {
+          $('.plan-value', boks).innerHTML = fmtAmount(f.value);
+          const dd = $$('.plan-result .kv dd');
+          if (dd[0]) dd[0].innerHTML = fmtAmount(f.contributed);
+          if (dd[1]) { dd[1].innerHTML = fmtAmount(f.growth, state.baseCurrency, { sign: true }); dd[1].className = `amount ${signClass(f.growth)}`; }
+        }
+      }
     }
     else if (id === 'people-search') {
       const felt = e.target;

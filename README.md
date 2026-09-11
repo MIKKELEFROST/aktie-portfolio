@@ -22,6 +22,7 @@ Et personligt, selv-hostet dashboard til din aktieportefølje. Du logger ind med
 - **Login** med adgangskode, "husk mig", brute-force-bremse, skift adgangskode og "log ud overalt".
 - **Mørkt tema**, mobilvenligt layout (bundmenu + kort), "skjul beløb"-knap til toget, dansk talformat.
 - **Sikkerhedskopi**: download/gendan som JSON. Serveren gemmer desuden de 5 seneste versioner automatisk.
+- **Analyse**: månedligt gennemsnit, afkast pr. år, fremskrivning og tal om porteføljen.
 - **Ingen afhængigheder**: kun Node.js. Intet build-step, intet framework. Data i en JSON-fil – eller i Supabase/Upstash Redis på Vercel.
 
 ## Kom i gang
@@ -68,6 +69,15 @@ Har du allerede brugt siden i browser-tilstand, spørger den, om dine hidtidige 
 Hvert push til `main` deployer automatisk. Bemærk: på Vercel er der ingen baggrunds-opvarmning af kurser, så første visning efter en pause tager 1–2 sekunder. Yahoo kan desuden afvise flere kald fra cloud-IP'er end fra en hjemme-PC; appen viser i så fald seneste kendte kurser tydeligt markeret.
 
 Sådan vælges lageret, i den rækkefølge: findes `SUPABASE_URL`/`SUPABASE_KEY`, bruges Supabase; ellers `KV_REST_API_URL`/`KV_REST_API_TOKEN` (eller `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN`) → Redis; ellers JSON-filen i `DATA_DIR`. Det gælder også lokalt og i Docker.
+
+## Analyse
+
+Under *Analyse* regnes der på porteføljen som helhed – det kræver købsdatoer, ellers kan tid ikke indgå:
+
+- **Investeret pr. måned**: hvad du i gennemsnit har lagt til side hver måned siden dit første køb.
+- **Afkast pr. år**: vægtet efter hvor længe hver krone har været investeret, så 100.000 kr. i tre år tæller tungere end 10.000 kr. i en måned. Er den vægtede ejertid under et år, står der, at tallet svinger for meget til at bygge på.
+- **Fremskrivning**: bliver du ved med at lægge det samme til side hver måned, og fortsætter væksten, hvad er det så blevet til om 5, 10, 15, 20 eller 30 år? Beløb og vækstprocent kan ændres; er der mindre end et års historik, foreslås 7 % i stedet for dit eget tal. Renter tilskrives månedligt. Det er et regnestykke, ikke en forudsigelse – og skat indgår ikke.
+- **Om din portefølje**: største position, højest og lavest afkast, længst ejede papir, hvor stor en del af værdien der er afkast, hvad porteføljen i snit har tjent om dagen, og hvornår pengene er fordoblet ved samme vækst.
 
 ## Profiler
 

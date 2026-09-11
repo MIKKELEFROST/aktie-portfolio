@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { newId } from './store.js';
-import { computePortfolio, computeValueHistory, dayKey, parseDanishNumber } from './portfolio-math.js';
+import { computeAnalytics, computePortfolio, computeValueHistory, dayKey, parseDanishNumber } from './portfolio-math.js';
 import { resolveSecurities } from './resolve.js';
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter, passwordVersion } from './auth.js';
 import { createAccounts, publicProfile, SignupError, normalizeEmail } from './accounts.js';
@@ -26,7 +26,7 @@ const CURRENCY_RE = /^[A-Z]{3}$/;
 // Sider klienten kan tegne. Står en sti ikke her, giver et direkte besøg eller en
 // genindlæsning 404, selv om navigation inde i appen virker.
 // Skal holdes i takt med ROUTES i public/app.js – test/pages.test.js kontrollerer det.
-const PAGE_ROUTES = new Set(['/', '/beholdninger', '/indstillinger', '/folk']);
+const PAGE_ROUTES = new Set(['/', '/beholdninger', '/indstillinger', '/folk', '/analyse']);
 // Profil-sider: /profil/<id> viser en andens portefølje, hvis man følger vedkommende.
 const PERSON_PAGE = /^\/profil\/[^/]+$/;
 const HISTORY_RANGES = new Set(['5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '5y', 'max']);
@@ -593,6 +593,25 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       sendJson(res, 200, await buildHistory(range, null, parseAccountFilter(url.searchParams.get('account')), await own(req)));
     },
 
+    // ---------- analyse ----------
+
+    async analytics(req, res, url) {
+      const ps = await own(req);
+      const data = await ps.get();
+      const beregnet = await computeFrom(data, parseAccountFilter(url.searchParams.get('account')));
+      sendJson(res, 200, computeAnalytics({
+        positions: beregnet.positions,
+        totals: beregnet.totals,
+        baseCurrency: beregnet.baseCurrency,
+      }));
+    },
+
+    async personAnalytics(req, res, url, params) {
+      const { person, ps } = await viewable(req, params.id);
+      const beregnet = await computeFrom(await ps.get(), parseAccountFilter(url.searchParams.get('account')));
+      sendJson(res, 200, { person, ...computeAnalytics({ positions: beregnet.positions, totals: beregnet.totals, baseCurrency: beregnet.baseCurrency }) });
+    },
+
     // ---------- profiler ----------
 
     async signup(req, res) {
@@ -922,6 +941,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         ['GET', /^\/api\/users\/(?<id>[^/]+)\/portfolio\/history$/, api.personHistory],
         ['GET', /^\/api\/users\/(?<id>[^/]+)\/portfolio$/, api.personPortfolio],
         ['GET', /^\/api\/users\/(?<id>[^/]+)\/holdings$/, api.personHoldings],
+        ['GET', /^\/api\/users\/(?<id>[^/]+)\/analytics$/, api.personAnalytics],
       ]
     : [];
 
@@ -943,6 +963,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     ['PUT', /^\/api\/holdings\/(?<id>[^/]+)$/, api.updateHolding],
     ['POST', /^\/api\/holdings\/(?<id>[^/]+)\/trade$/, api.trade],
     ['DELETE', /^\/api\/holdings\/(?<id>[^/]+)$/, api.deleteHolding],
+    ['GET', /^\/api\/analytics$/, api.analytics],
     ['GET', /^\/api\/settings$/, api.getSettings],
     ['PUT', /^\/api\/settings$/, api.updateSettings],
     ['GET', /^\/api\/backup$/, api.backup],
@@ -965,7 +986,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   // I browser-tilstand findes intet lager på serveren – disse ruter giver ingen mening.
-  const STORE_ROUTES = /^\/api\/(portfolio|holdings|settings|backup|restore|auth\/(setup|login|change-password|logout-all))(\/|$)/;
+  const STORE_ROUTES = /^\/api\/(portfolio|holdings|settings|analytics|backup|restore|auth\/(setup|login|change-password|logout-all))(\/|$)/;
   // Ved åben adgang findes der intet login at bruge – men /api/auth/setup skal være åben,
   // for det er dén vej, man lukker siden med en adgangskode.
   const AUTH_ROUTES_WHEN_OPEN = /^\/api\/auth\/(login|change-password|logout-all|logout)$/;
