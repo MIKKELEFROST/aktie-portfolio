@@ -250,9 +250,17 @@ test('kurs-opslag', async () => {
 test('historik', async () => {
   const res = await request('GET', '/api/portfolio/history?range=1mo');
   assert.equal(res.status, 200);
-  assert.equal(res.json.points.length, 2);
+  // To dage fra historikken, plus et sidste punkt med værdien lige nu.
+  assert.equal(res.json.points.length, 3);
   // NOVO 15 stk. (290/300) + SHEL 5 stk. (25/35 GBP * 8.7)
   assert.equal(res.json.points[1].value, 15 * 300 + 5 * 35 * 8.7);
+
+  // Kurven skal slutte på præcis det tal, dashboardet viser – ellers står der
+  // to forskellige beløb for det samme oven på hinanden.
+  assert.equal(res.json.liveEnd, true);
+  const nu = await request('GET', '/api/portfolio');
+  assert.equal(res.json.points[res.json.points.length - 1].value, nu.json.totals.valueBase);
+
   assert.equal((await request('GET', '/api/portfolio/history?range=99y')).status, 400);
 });
 

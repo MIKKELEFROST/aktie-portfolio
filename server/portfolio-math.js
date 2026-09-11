@@ -206,35 +206,34 @@ export function computeValueHistory({ holdings, histories, fxRates, fxHistories 
     }
     series.push({ symbol: hist.symbol || h.symbol, currency: hist.currency, byDay, rateOn, first: [...byDay.keys()].sort()[0] });
   }
-  if (!series.length) return { points: [], limitedBy: null };
+  if (!series.length) return { points: [], backfilled: [] };
 
   // Brug alle dage fra alle serier; manglende dage udfyldes med seneste kendte
   // lukkekurs (forward fill), så en helligdag på én børs ikke giver et dyk.
   const allDays = new Set();
   for (const s of series) for (const d of s.byDay.keys()) allDays.add(d);
   const days = [...allDays].sort();
+  const begin = days[0];
 
-  // En dag kan kun tegnes, når hvert papir har mindst én kurs til og med den dag.
-  // Derfor starter grafen, hvor den senest startede serie begynder – det fortæller
-  // vi om, i stedet for bare at vise en kortere periode end knappen lover.
-  const starts = series.map((s) => s.first).sort();
-  const begin = starts[starts.length - 1];
-  const limitedBy = begin > starts[0] ? { symbol: series.find((s) => s.first === begin).symbol, from: begin } : null;
+  // Et papir med kortere historik end resten afkortede før hele grafen. I stedet
+  // regnes det med til sin første kendte kurs i tiden inden. Det er stadig et gæt,
+  // så hvilke papirer det gælder, gives videre og skrives under grafen.
+  const backfilled = series
+    .filter((s) => s.first > begin)
+    .map((s) => ({ symbol: s.symbol, from: s.first }));
 
-  const last = new Array(series.length).fill(null);
+  const last = series.map((s) => s.byDay.get(s.first));
   const out = [];
   for (const day of days) {
     let total = 0;
-    let complete = true;
     for (let i = 0; i < series.length; i++) {
       const v = series[i].byDay.get(day);
       if (v != null) last[i] = v;
-      if (last[i] == null) complete = false;
-      else total += last[i].local * series[i].rateOn(day);
+      total += last[i].local * series[i].rateOn(day);
     }
-    if (complete) out.push({ date: day, value: total });
+    out.push({ date: day, value: total });
   }
-  return { points: out, limitedBy };
+  return { points: out, backfilled };
 }
 
 // Opslag fra dato til valutakurs. Bruger seneste kurs til og med dagen; er dagen
@@ -257,6 +256,6 @@ export function dailyRates(history, fallback) {
   };
 }
 
-function dayKey(ms) {
+export function dayKey(ms) {
   return new Date(ms).toISOString().slice(0, 10);
 }

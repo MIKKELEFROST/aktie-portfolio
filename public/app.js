@@ -1000,9 +1000,9 @@
     if (!el) return;
     const noter = [];
     noter.push('Kurven viser, hvad <b>din nuværende beholdning</b> ville have været værd på hver dag – ikke hvad du faktisk ejede dengang. Dit rigtige afkast står under "Samlet afkast".');
-    if (h.limitedBy) {
-      const valgt = RANGES.find((r) => r.key === state.range)?.label || state.range;
-      noter.push(`Perioden er kortere end <b>${esc(valgt)}</b>: <b>${esc(h.limitedBy.symbol)}</b> har ingen kurser før ${esc(fmtDate(h.limitedBy.from, { year: true }))}, og grafen kan først tegnes, når alle papirer har en kurs.`);
+    if (h.backfilled?.length) {
+      const liste = h.backfilled.map((b) => `<b>${esc(b.symbol)}</b> (før ${esc(fmtDate(b.from, { year: true }))})`).join(', ');
+      noter.push(`Yahoo har ikke kurser så langt tilbage for ${liste}. Der regnes med den første kurs, som findes – så kurven dækker hele perioden, men bevæger sig lidt mindre i den ældste del.`);
     }
     if (h.fxToday?.length) {
       noter.push(`Historiske valutakurser kunne ikke hentes for ${esc(h.fxToday.join(', '))} – de dage er omregnet med dagens kurs.`);

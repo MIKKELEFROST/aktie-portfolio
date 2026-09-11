@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { newId } from './store.js';
-import { computePortfolio, computeValueHistory, parseDanishNumber } from './portfolio-math.js';
+import { computePortfolio, computeValueHistory, dayKey, parseDanishNumber } from './portfolio-math.js';
 import { resolveSecurities } from './resolve.js';
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter, passwordVersion } from './auth.js';
 import { createAccounts, publicProfile, SignupError, normalizeEmail } from './accounts.js';
@@ -272,12 +272,32 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         delete histories[h.symbol];
       }
     }
-    const { points, limitedBy } = computeValueHistory({ holdings, histories, fxRates, fxHistories });
+    const { points, backfilled } = computeValueHistory({ holdings, histories, fxRates, fxHistories });
+
+    // Yahoos dagsserier halter af og til efter de løbende kurser, og så sluttede
+    // kurven et andet sted end tallet lige over den. Sidste punkt sættes derfor
+    // til den værdi, dashboardet viser nu.
+    let liveEnd = false;
+    if (points.length) {
+      try {
+        const nu = await computeFrom(data, account);
+        const værdi = nu.totals.valueBase;
+        if (Number.isFinite(værdi) && værdi > 0) {
+          const iDag = dayKey(Date.now());
+          const sidste = points[points.length - 1];
+          if (sidste.date >= iDag) sidste.value = værdi;
+          else points.push({ date: iDag, value: værdi });
+          liveEnd = true;
+        }
+      } catch {
+        // Kurserne kunne ikke hentes lige nu; kurven står, som historikken siger.
+      }
+    }
     // Hvilke valutaer der måtte bruge dagens kurs i stedet for dagens egen.
     const fxToday = Object.entries(fxHistories)
       .filter(([cur, h]) => cur !== baseCurrency && (!h?.ok || !h.points?.length) && !h?.identity)
       .map(([cur]) => cur);
-    return { range, baseCurrency, points, missing, limitedBy, fxToday, approximate: true };
+    return { range, baseCurrency, points, missing, backfilled, fxToday, liveEnd, approximate: true };
   }
 
   // ---------- validering ----------
