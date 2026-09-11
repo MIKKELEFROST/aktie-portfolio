@@ -284,3 +284,112 @@ export function dailyRates(history, fallback) {
 export function dayKey(ms) {
   return new Date(ms).toISOString().slice(0, 10);
 }
+
+// ---------------------------------------------------------------------------
+// Analyse: tal om porteføljen som helhed, som ikke kan aflæses af listen.
+// Alt bygger på købsdatoerne – uden dem kan man ikke sige noget om tid.
+// ---------------------------------------------------------------------------
+
+const MS_PER_DAG = 86_400_000;
+const DAGE_PR_MÅNED = 365.25 / 12;
+
+// Hvor mange procent om året porteføljen har givet. Vægtet efter hvor længe
+// hver krone har været investeret: 100.000 kr. i tre år vejer tungere end
+// 10.000 kr. i en måned.
+function vægtetEjertid(poster) {
+  let vægt = 0;
+  let sum = 0;
+  for (const p of poster) {
+    if (!Number.isFinite(p.costBase) || !Number.isFinite(p.heldDays)) continue;
+    vægt += p.costBase;
+    sum += p.costBase * p.heldDays;
+  }
+  return vægt > 0 ? sum / vægt : null;
+}
+
+export function computeAnalytics({ positions = [], totals = {}, baseCurrency = 'DKK', now = Date.now() } = {}) {
+  const medKurs = positions.filter((p) => Number.isFinite(p.valueBase));
+  const medDato = medKurs.filter((p) => p.purchasedAt && Number.isFinite(p.heldDays));
+  const medKøbskurs = medKurs.filter((p) => Number.isFinite(p.costBase) && p.costBase > 0);
+
+  const invested = medKøbskurs.reduce((s, p) => s + p.costBase, 0) || null;
+  const value = Number.isFinite(totals.valueBase) ? totals.valueBase : medKurs.reduce((s, p) => s + p.valueBase, 0);
+  const gain = invested == null ? null : value - invested;
+  const gainPercent = invested ? (gain / invested) * 100 : null;
+
+  const førsteDato = medDato.map((p) => p.purchasedAt).sort()[0] || null;
+  const dageSiden = førsteDato ? heldDays(førsteDato, now) : null;
+  const måneder = dageSiden == null ? null : dageSiden / DAGE_PR_MÅNED;
+
+  // Gennemsnitligt indskud pr. måned. Første købsmåned tæller med, så en
+  // portefølje købt i denne måned ikke bliver til "uendeligt pr. måned".
+  const perMonth = invested != null && måneder != null ? invested / Math.max(1, måneder) : null;
+  const perDay = gain != null && dageSiden != null && dageSiden > 0 ? gain / dageSiden : null;
+
+  const snitEjertid = vægtetEjertid(medDato);
+  const annualizedPercent = annualized(gainPercent, snitEjertid, { minDays: 60 });
+
+  // Hvor længe der går, før pengene er fordoblet, hvis det fortsætter sådan.
+  const doublingYears = Number.isFinite(annualizedPercent) && annualizedPercent > 0
+    ? round(Math.log(2) / Math.log(1 + annualizedPercent / 100), 1)
+    : null;
+
+  const sorteretEfterAfkast = medKøbskurs.filter((p) => Number.isFinite(p.gainPercent)).sort((a, b) => b.gainPercent - a.gainPercent);
+  const efterVærdi = [...medKurs].sort((a, b) => b.valueBase - a.valueBase);
+  const længstEjet = [...medDato].sort((a, b) => b.heldDays - a.heldDays)[0] || null;
+  const top3 = efterVærdi.slice(0, 3).reduce((s, p) => s + p.valueBase, 0);
+
+  const kort = (p, ekstra = {}) => (p ? { symbol: p.symbol, name: p.name || p.symbol, ...ekstra } : null);
+
+  return {
+    baseCurrency,
+    since: førsteDato,
+    days: dageSiden,
+    months: måneder == null ? null : round(måneder, 1),
+    invested: invested == null ? null : round(invested),
+    value: round(value),
+    gain: gain == null ? null : round(gain),
+    gainPercent: gainPercent == null ? null : round(gainPercent, 2),
+    annualizedPercent,
+    // Hvor sikkert det årlige tal er: under et år er det for kort til at sige noget.
+    annualizedReliable: Number.isFinite(snitEjertid) && snitEjertid >= 365,
+    avgHeldDays: snitEjertid == null ? null : Math.round(snitEjertid),
+    perMonth: perMonth == null ? null : round(perMonth),
+    perDay: perDay == null ? null : round(perDay),
+    doublingYears,
+    positionsTotal: positions.length,
+    withDates: medDato.length,
+    withoutDates: positions.length - medDato.length,
+    // Andelen af det, porteføljen er værd, som ikke er dine egne indbetalinger.
+    gainShare: value > 0 && gain != null ? round((gain / value) * 100, 1) : null,
+    concentration: value > 0 ? round((top3 / value) * 100, 1) : null,
+    currencies: [...new Set(medKurs.map((p) => p.currency).filter(Boolean))].length,
+    accounts: [...new Set(positions.map((p) => p.accountId).filter(Boolean))].length,
+    biggest: kort(efterVærdi[0], { valueBase: round(efterVærdi[0]?.valueBase), weight: efterVærdi[0]?.weight ?? null }),
+    best: kort(sorteretEfterAfkast[0], { gainPercent: round(sorteretEfterAfkast[0]?.gainPercent, 2), gainBase: round(sorteretEfterAfkast[0]?.gainBase) }),
+    worst: sorteretEfterAfkast.length > 1 ? kort(sorteretEfterAfkast[sorteretEfterAfkast.length - 1], {
+      gainPercent: round(sorteretEfterAfkast[sorteretEfterAfkast.length - 1].gainPercent, 2),
+      gainBase: round(sorteretEfterAfkast[sorteretEfterAfkast.length - 1].gainBase),
+    }) : null,
+    longestHeld: kort(længstEjet, { heldDays: længstEjet?.heldDays ?? null, purchasedAt: længstEjet?.purchasedAt ?? null }),
+  };
+}
+
+// Fremskrivning: hvad bliver det til, hvis man bliver ved med at lægge det
+// samme til hver måned, og væksten fortsætter. Renter tilskrives månedligt.
+export function projectValue({ start = 0, perMonth = 0, annualPercent = 0, years = 10 } = {}) {
+  const måneder = Math.max(0, Math.round(years * 12));
+  const r = (1 + annualPercent / 100) ** (1 / 12) - 1;
+  const vokset = start * (1 + r) ** måneder;
+  // Ved 0 % vækst er formlen en division med nul; så er det bare indskuddene.
+  const bidrag = Math.abs(r) < 1e-9 ? perMonth * måneder : perMonth * (((1 + r) ** måneder - 1) / r);
+  const indbetalt = start + perMonth * måneder;
+  const slut = vokset + bidrag;
+  return {
+    years,
+    months: måneder,
+    value: round(slut),
+    contributed: round(indbetalt),
+    growth: round(slut - indbetalt),
+  };
+}
