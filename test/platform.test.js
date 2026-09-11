@@ -103,7 +103,7 @@ test('platform: hver profil har sin egen portefølje', async () => {
   }
 });
 
-test('platform: en portefølje ses først, når ejeren har sagt ja', async () => {
+test('platform: alle med en profil kan se hinandens porteføljer', async () => {
   const { server, browser } = await startPlatform();
   try {
     const far = browser();
@@ -113,31 +113,13 @@ test('platform: en portefølje ses først, når ejeren har sagt ja', async () =>
     const sønId = (await signup(søn, { email: 'søn@eksempel.dk', name: 'Søn', inviteCode: kode })).id;
     await far('POST', '/api/holdings', { symbol: 'NOVO-B.CO', quantity: 10, avgPrice: 200 });
 
-    // Sønnen finder faren.
-    const fundet = await søn('GET', '/api/people?q=far');
-    assert.equal(fundet.json.people.length, 1);
-    assert.equal(fundet.json.people[0].id, farId);
-    assert.equal(fundet.json.people[0].status, 'none');
-    assert.equal(fundet.json.people[0].email, undefined, 'e-mail deles ikke med andre');
+    // Sønnen finder faren på listen – uden at skulle søge først.
+    const alle = await søn('GET', '/api/people');
+    assert.equal(alle.json.people.length, 1, 'man er ikke selv med på listen');
+    assert.equal(alle.json.people[0].id, farId);
+    assert.equal(alle.json.people[0].email, undefined, 'e-mail deles ikke med andre');
 
-    // Uden accept: ingen adgang.
-    assert.equal((await søn('GET', `/api/users/${farId}/portfolio`)).status, 403);
-    assert.equal((await søn('GET', `/api/users/${farId}/holdings`)).status, 403);
-
-    const anmodning = await søn('POST', `/api/follows/${farId}`);
-    assert.equal(anmodning.status, 201);
-    assert.equal(anmodning.json.status, 'pending');
-    assert.equal((await søn('GET', `/api/users/${farId}/portfolio`)).status, 403, 'stadig nej mens den venter');
-
-    // Faren ser anmodningen og siger ja.
-    assert.equal((await far('GET', '/api/me')).json.pending, 1);
-    const indbakke = await far('GET', '/api/follows');
-    assert.equal(indbakke.json.followers.length, 1);
-    assert.equal(indbakke.json.followers[0].id, sønId);
-    assert.equal(indbakke.json.followers[0].status, 'pending');
-    assert.equal((await far('POST', `/api/follows/${sønId}/accept`)).status, 200);
-
-    // Nu må sønnen se det hele – aktier, antal og beløb.
+    // Og kan se porteføljen med det samme. Ingen anmodning, ingen godkendelse.
     const set = await søn('GET', `/api/users/${farId}/portfolio`);
     assert.equal(set.status, 200);
     assert.equal(set.json.person.name, 'Far');
@@ -147,44 +129,38 @@ test('platform: en portefølje ses først, når ejeren har sagt ja', async () =>
     assert.equal((await søn('GET', `/api/users/${farId}/holdings`)).json.holdings[0].quantity, 10);
     assert.equal((await søn('GET', `/api/users/${farId}/portfolio/history?range=1mo`)).status, 200);
 
-    // Men han kan ikke ændre noget hos faren: ruterne til en andens portefølje
-    // findes kun som GET, så alt andet afvises.
+    // Begge veje: faren kan lige så godt se sønnens.
+    assert.equal((await far('GET', `/api/users/${sønId}/portfolio`)).status, 200);
+
+    // Men ingen kan ændre en andens portefølje: ruterne findes kun som GET.
     assert.equal((await søn('POST', `/api/users/${farId}/holdings`, { symbol: 'AAPL', quantity: 1 })).status, 405);
     assert.equal((await søn('DELETE', `/api/users/${farId}/holdings`)).status, 405);
     assert.equal((await søn('PUT', `/api/users/${farId}/portfolio`, {})).status, 405);
-    // Og hans egne skrivninger rammer stadig hans egen portefølje.
+
+    // Og egne skrivninger rammer kun ens egen.
     await søn('POST', '/api/holdings', { symbol: 'AAPL', quantity: 3, avgPrice: 150 });
     assert.deepEqual((await far('GET', '/api/holdings')).json.holdings.map((h) => h.symbol), ['NOVO-B.CO']);
-
-    // Faren fortryder og fjerner følgeren.
-    assert.equal((await far('DELETE', `/api/followers/${sønId}`)).status, 200);
-    assert.equal((await søn('GET', `/api/users/${farId}/portfolio`)).status, 403, 'adgangen forsvinder igen');
   } finally {
     server.close();
   }
 });
 
-test('platform: uden login er alt lukket, og ukendte profiler afsløres ikke', async () => {
+test('platform: uden login er alt lukket', async () => {
   const { server, browser } = await startPlatform();
   try {
     const far = browser();
     const farId = (await signup(far, { email: 'far@eksempel.dk', name: 'Far' })).id;
 
     const gæst = browser();
-    for (const p of ['/api/portfolio', '/api/holdings', '/api/me', '/api/follows', '/api/people?q=far', `/api/users/${farId}/portfolio`]) {
+    for (const p of ['/api/portfolio', '/api/holdings', '/api/me', '/api/people', `/api/users/${farId}/portfolio`]) {
       assert.equal((await gæst('GET', p)).status, 401, p);
     }
 
-    // Logget ind, men en profil man ikke følger, og en der slet ikke findes,
-    // svarer ens – ellers kunne man afprøve sig frem til hvilke profiler der er.
+    // En profil, der ikke findes, er en 404 – der er ikke længere noget at skjule.
     const kode = (await far('GET', '/api/me')).json.inviteCode;
     const søn = browser();
     await signup(søn, { email: 'søn@eksempel.dk', name: 'Søn', inviteCode: kode });
-    const ukendt = await søn('GET', '/api/users/00000000-0000-4000-8000-000000000000/portfolio');
-    const ikkeFulgt = await søn('GET', `/api/users/${farId}/portfolio`);
-    assert.equal(ukendt.status, 403);
-    assert.equal(ikkeFulgt.status, 403);
-    assert.equal(ukendt.json.error, ikkeFulgt.json.error);
+    assert.equal((await søn('GET', '/api/users/00000000-0000-4000-8000-000000000000/portfolio')).status, 404);
   } finally {
     server.close();
   }
@@ -241,22 +217,22 @@ test('platform: kun ejeren kan lave en ny invitationskode', async () => {
   }
 });
 
-test('platform: søgning finder på navn og hel e-mail, ikke på stumper af den', async () => {
+test('platform: listen viser alle og kan filtreres på navn eller hel e-mail', async () => {
   const { server, browser } = await startPlatform();
   try {
     const far = browser();
     await signup(far, { email: 'far@eksempel.dk', name: 'Far Frost' });
     const kode = (await far('GET', '/api/me')).json.inviteCode;
-    const søn = browser();
-    await signup(søn, { email: 'søn@eksempel.dk', name: 'Søn Frost', inviteCode: kode });
+    for (const [navn, mail] of [['Søn Frost', 'søn@eksempel.dk'], ['Anna Berg', 'anna@eksempel.dk']]) {
+      await signup(browser(), { email: mail, name: navn, inviteCode: kode });
+    }
 
-    const navn = await søn('GET', '/api/people?q=frost');
-    assert.equal(navn.json.people.length, 1, 'man finder ikke sig selv');
-    assert.equal(navn.json.people[0].name, 'Far Frost');
+    const alle = (await far('GET', '/api/people')).json.people;
+    assert.deepEqual(alle.map((p) => p.name), ['Anna Berg', 'Søn Frost'], 'alle andre, sorteret efter navn');
 
-    assert.equal((await søn('GET', '/api/people?q=far@eksempel.dk')).json.people.length, 1, 'hel e-mail virker');
-    assert.equal((await søn('GET', '/api/people?q=eksempel.dk')).json.people.length, 0, 'stumper af e-mail gør ikke');
-    assert.equal((await søn('GET', '/api/people?q=f')).json.people.length, 0, 'ét bogstav lister ikke alle');
+    assert.deepEqual((await far('GET', '/api/people?q=frost')).json.people.map((p) => p.name), ['Søn Frost']);
+    assert.deepEqual((await far('GET', '/api/people?q=anna@eksempel.dk')).json.people.map((p) => p.name), ['Anna Berg'], 'hel e-mail virker');
+    assert.deepEqual((await far('GET', '/api/people?q=findes-ikke')).json.people, []);
   } finally {
     server.close();
   }

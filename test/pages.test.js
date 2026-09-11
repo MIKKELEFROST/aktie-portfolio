@@ -25,8 +25,6 @@ async function klientensRuter() {
 
 test('hver side i klienten kan også hentes direkte fra serveren', async () => {
   const ruter = await klientensRuter();
-  assert.ok(ruter.includes('/liste'), 'ønskelisten skal være med');
-
   const store = createStore(await mkdtemp(path.join(tmpdir(), 'aktie-sider-')));
   const config = { envPassword: '', sessionSecret: '', setupToken: 'x', baseCurrency: 'DKK', publicAccess: true, storageMode: 'file' };
   const app = createApp({ store, yahoo: createMockYahooClient(), config, logger: { warn() {}, error() {} } });

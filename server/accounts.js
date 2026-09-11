@@ -155,14 +155,15 @@ export function createAccounts(store) {
       });
     },
 
-    // Fritekst-søgning på navn og e-mail. E-mail skal matche helt, så listen over
-    // hvem der er tilmeldt, ikke kan afsøges bogstav for bogstav.
-    async search(query, { exclude = null, limit = 20 } = {}) {
+    // Alle profiler, eventuelt filtreret på navn eller hel e-mail. Alle på platformen
+    // er inviteret ind af en, der allerede er her, så listen er ikke hemmelig.
+    async browse(query, { exclude = null, limit = 200 } = {}) {
       const q = String(query ?? '').trim().toLowerCase();
-      if (q.length < 2) return [];
       const doc = await read();
       return doc.users
-        .filter((u) => u.id !== exclude && (u.name.toLowerCase().includes(q) || u.email === q))
+        .filter((u) => u.id !== exclude)
+        .filter((u) => !q || u.name.toLowerCase().includes(q) || u.email === q)
+        .sort((a, b) => a.name.localeCompare(b.name, 'da'))
         .slice(0, limit)
         .map((u) => publicProfile(u));
     },

@@ -8,7 +8,6 @@ import { computePortfolio, computeValueHistory, parseDanishNumber } from './port
 import { resolveSecurities } from './resolve.js';
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter, passwordVersion } from './auth.js';
 import { createAccounts, publicProfile, SignupError, normalizeEmail } from './accounts.js';
-import { createSocial, SocialError } from './social.js';
 import { sendJson, sendError, readJsonBody, parseCookies, cookieHeader, serveStatic, clientIp, isLoopback, safeDecode, HttpError } from './http-utils.js';
 import { timingSafeEqual } from 'node:crypto';
 import { YahooError } from './yahoo.js';
@@ -34,7 +33,6 @@ const HISTORY_RANGES = new Set(['5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '5
 const HOLDABLE_TYPES = new Set(['EQUITY', 'ETF', 'MUTUALFUND']);
 const MAX_HOLDINGS = 200;
 const MAX_ACCOUNTS = 20;
-const MAX_WATCHLIST = 100;
 const TYPE_NAMES = { INDEX: 'et indeks', CRYPTOCURRENCY: 'en kryptovaluta', CURRENCY: 'en valuta', FUTURE: 'en future', OPTION: 'en option' };
 
 export function createApp({ store, yahoo, config, logger = console, onPortfolioRequest = null }) {
@@ -50,7 +48,6 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   // Kræver en database; uden den er der kun browser-tilstanden.
   const platform = Boolean(config.platform) && !browserMode && Boolean(store);
   const accounts = platform ? createAccounts(store) : null;
-  const social = platform ? createSocial(store) : null;
   const openAccessAllowed = !platform && Boolean(config.publicAccess) && !browserMode && Boolean(store);
   const OPEN_CHECK_TTL = 10_000;
   let passwordExists = false;
@@ -407,48 +404,13 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     return { id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, addedAt: h.addedAt, updatedAt: h.updatedAt };
   }
 
-  // Henter kurser til ønskelisten og regner afstanden til ønskekursen.
-  async function withQuotes(list) {
-    const items = Array.isArray(list) ? list : [];
-    const symbols = items.map((w) => w.symbol);
-    const quotes = symbols.length ? await yahoo.getQuotes(symbols) : {};
-    return {
-      items: items.map((w) => {
-        const entry = quotes[w.symbol];
-        const q = entry?.ok ? entry.quote : null;
-        const price = q?.price ?? null;
-        // Negativ = kursen er over din ønskekurs, positiv = der er så langt ned.
-        const toTarget = price != null && w.target ? ((price - w.target) / w.target) * 100 : null;
-        return {
-          symbol: w.symbol,
-          name: q?.name || w.name || w.symbol,
-          currency: q?.currency || w.currency || null,
-          exchange: q?.exchange ?? null,
-          price,
-          previousClose: q?.previousClose ?? null,
-          changePercent: q?.changePercent ?? null,
-          marketOpen: q?.marketOpen ?? null,
-          target: w.target ?? null,
-          toTarget: toTarget === null ? null : Math.round(toTarget * 100) / 100,
-          atTarget: price != null && w.target ? price <= w.target : false,
-          note: w.note || '',
-          addedAt: w.addedAt,
-          stale: Boolean(entry?.stale),
-          error: entry?.ok ? null : entry?.error?.message || null,
-        };
-      }),
-    };
-  }
-
-  // Adgangskontrollen ét sted: man ser kun en andens portefølje med en accepteret
-  // anmodning. Findes profilen ikke, svares der det samme som ved manglende adgang,
-  // så man ikke kan afprøve sig frem til hvilke profil-id'er der findes.
+  // Alle med en profil kan se alle andres portefølje – man kommer kun ind på
+  // platformen med en invitationskode fra en, der allerede er her.
+  // Skrivning er en anden sag: ruterne til en andens portefølje findes kun som GET.
   async function viewable(req, targetId) {
-    const user = await requireUser(req);
+    await requireUser(req);
     const target = await accounts.byId(targetId);
-    if (!target || !(await social.canView(user.id, target.id))) {
-      throw new HttpError(403, 'Du følger ikke denne profil', { code: 'NOT_FOLLOWING' });
-    }
+    if (!target) throw new HttpError(404, 'Profilen findes ikke');
     return { person: publicProfile(target), ps: scope(target.id) };
   }
 
@@ -598,67 +560,6 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       sendJson(res, 200, await buildHistory(range, null, parseAccountFilter(url.searchParams.get('account')), await own(req)));
     },
 
-    // ---------- ønskeliste ----------
-
-    // Aktier man holder øje med uden at eje dem. Har man sat en ønskekurs,
-    // regnes afstanden ned til den, så man kan se hvor tæt man er.
-    async watchlist(req, res) {
-      const data = await (await own(req)).get();
-      sendJson(res, 200, await withQuotes(data.watchlist));
-    },
-
-    async addWatch(req, res) {
-      const body = await readJsonBody(req);
-      const symbol = parseSymbol(body.symbol);
-      const target = parseNumber(body.target, 'Ønskekurs', { min: 0, allowNull: true });
-      const note = parseNote(body.note);
-      const quote = (await yahoo.getQuotes([symbol]))[symbol];
-      if (!quote?.ok) throw new HttpError(quote?.error?.code === 'NOT_FOUND' ? 404 : 502, quote?.error?.message || 'Kunne ikke hente kursen', { code: quote?.error?.code });
-
-      let tilføjet;
-      const data = await (await own(req)).update((draft) => {
-        if (!Array.isArray(draft.watchlist)) draft.watchlist = [];
-        if (draft.watchlist.some((w) => w.symbol === symbol)) throw new HttpError(409, 'Den er allerede på din ønskeliste');
-        if (draft.watchlist.length >= MAX_WATCHLIST) throw new HttpError(409, `Der er plads til højst ${MAX_WATCHLIST} på ønskelisten`);
-        tilføjet = {
-          symbol,
-          name: quote.quote.name || symbol,
-          currency: quote.quote.currency || null,
-          target,
-          note,
-          addedAt: new Date().toISOString(),
-        };
-        draft.watchlist.push(tilføjet);
-      });
-      sendJson(res, 201, { item: tilføjet, count: data.watchlist.length });
-    },
-
-    async updateWatch(req, res, url, params) {
-      const symbol = parseSymbol(params.symbol);
-      const body = await readJsonBody(req);
-      let opdateret;
-      await (await own(req)).update((draft) => {
-        const w = (draft.watchlist || []).find((x) => x.symbol === symbol);
-        if (!w) throw new HttpError(404, 'Den står ikke på din ønskeliste');
-        if (body.target !== undefined) w.target = parseNumber(body.target, 'Ønskekurs', { min: 0, allowNull: true });
-        if (body.note !== undefined) w.note = parseNote(body.note);
-        opdateret = w;
-      });
-      sendJson(res, 200, { item: opdateret });
-    },
-
-    async removeWatch(req, res, url, params) {
-      const symbol = parseSymbol(params.symbol);
-      let fandtes = false;
-      await (await own(req)).update((draft) => {
-        const før = (draft.watchlist || []).length;
-        draft.watchlist = (draft.watchlist || []).filter((w) => w.symbol !== symbol);
-        fandtes = draft.watchlist.length < før;
-      });
-      if (!fandtes) throw new HttpError(404, 'Den står ikke på din ønskeliste');
-      sendJson(res, 200, { ok: true });
-    },
-
     // ---------- profiler ----------
 
     async signup(req, res) {
@@ -691,10 +592,8 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
     async me(req, res) {
       const user = await requireUser(req);
-      const mine = await social.followers(user.id);
       sendJson(res, 200, {
         user: publicProfile(user, { includeEmail: true }),
-        pending: mine.filter((e) => e.status === 'pending').length,
         inviteCode: user.isOwner ? await accounts.inviteCode() : null,
       });
     },
@@ -725,56 +624,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
     async people(req, res, url) {
       const user = await requireUser(req);
-      const found = await accounts.search(url.searchParams.get('q'), { exclude: user.id });
-      const withStatus = [];
-      for (const person of found) withStatus.push({ ...person, status: await social.status(user.id, person.id) });
-      sendJson(res, 200, { people: withStatus });
-    },
-
-    // Alt om hvem jeg følger, og hvem der følger mig – i ét kald, så siden kan tegnes på én gang.
-    async follows(req, res) {
-      const user = await requireUser(req);
-      const [outgoing, incoming] = await Promise.all([social.following(user.id), social.followers(user.id)]);
-      const profile = async (id) => publicProfile(await accounts.byId(id));
-      const following = [];
-      for (const e of outgoing) {
-        const person = await profile(e.targetId);
-        if (person) following.push({ ...person, status: e.status });
-      }
-      const followers = [];
-      for (const e of incoming) {
-        const person = await profile(e.followerId);
-        if (person) followers.push({ ...person, status: e.status });
-      }
-      sendJson(res, 200, { following, followers });
-    },
-
-    async requestFollow(req, res, url, params) {
-      const user = await requireUser(req);
-      const target = await accounts.byId(params.id);
-      if (!target) throw new HttpError(404, 'Profilen findes ikke');
-      const status = await social.request(user.id, target.id);
-      sendJson(res, 201, { status, person: publicProfile(target) });
-    },
-
-    async acceptFollow(req, res, url, params) {
-      const user = await requireUser(req);
-      await social.accept(params.id, user.id); // params.id er den, der bad om at følge mig
-      sendJson(res, 200, { ok: true });
-    },
-
-    // Jeg holder op med at følge en anden.
-    async unfollow(req, res, url, params) {
-      const user = await requireUser(req);
-      await social.remove(user.id, params.id);
-      sendJson(res, 200, { ok: true });
-    },
-
-    // Jeg fjerner en følger, eller afviser en anmodning.
-    async removeFollower(req, res, url, params) {
-      const user = await requireUser(req);
-      await social.remove(params.id, user.id);
-      sendJson(res, 200, { ok: true });
+      sendJson(res, 200, { people: await accounts.browse(url.searchParams.get('q'), { exclude: user.id }) });
     },
 
     // ---------- en andens portefølje ----------
@@ -997,18 +847,8 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const baseCurrency = body.settings?.baseCurrency ? parseCurrency(body.settings.baseCurrency) : undefined;
       const cash = body.settings?.cash !== undefined ? parseNumber(body.settings.cash, 'Kontanter', { min: 0, allowNull: true }) ?? 0 : undefined;
       const settings = body.settings && typeof body.settings === 'object' ? body.settings : {};
-      // Ønskelisten er med i sikkerhedskopien; er den ikke i filen, ryddes den.
-      const watchlist = (Array.isArray(body.watchlist) ? body.watchlist : []).slice(0, MAX_WATCHLIST).map((raw) => ({
-        symbol: parseSymbol(raw?.symbol),
-        name: String(raw?.name || raw?.symbol || '').slice(0, 120),
-        currency: raw?.currency ? parseCurrency(raw.currency) : null,
-        target: parseNumber(raw?.target, 'Ønskekurs', { min: 0, allowNull: true }),
-        note: parseNote(raw?.note),
-        addedAt: typeof raw?.addedAt === 'string' && raw.addedAt.length <= 40 && !Number.isNaN(Date.parse(raw.addedAt)) ? raw.addedAt : now,
-      }));
       const data = await (await own(req)).update((draft) => {
         draft.holdings = holdings;
-        draft.watchlist = watchlist;
         draft.settings.accounts = accounts;
         if (baseCurrency) draft.settings.baseCurrency = baseCurrency;
         if (cash !== undefined) draft.settings.cash = cash;
@@ -1036,17 +876,12 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         ['POST', /^\/api\/auth\/logout-all$/, api.logoutAll],
       ];
 
-  const socialRoutes = platform
+  const profileRoutes = platform
     ? [
         ['GET', /^\/api\/me$/, api.me],
         ['PUT', /^\/api\/me$/, api.updateMe],
         ['POST', /^\/api\/invite\/rotate$/, api.rotateInvite],
         ['GET', /^\/api\/people$/, api.people],
-        ['GET', /^\/api\/follows$/, api.follows],
-        ['POST', /^\/api\/follows\/(?<id>[^/]+)\/accept$/, api.acceptFollow],
-        ['POST', /^\/api\/follows\/(?<id>[^/]+)$/, api.requestFollow],
-        ['DELETE', /^\/api\/follows\/(?<id>[^/]+)$/, api.unfollow],
-        ['DELETE', /^\/api\/followers\/(?<id>[^/]+)$/, api.removeFollower],
         ['GET', /^\/api\/users\/(?<id>[^/]+)\/portfolio\/history$/, api.personHistory],
         ['GET', /^\/api\/users\/(?<id>[^/]+)\/portfolio$/, api.personPortfolio],
         ['GET', /^\/api\/users\/(?<id>[^/]+)\/holdings$/, api.personHoldings],
@@ -1057,7 +892,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     ['GET', /^\/api\/health$/, (req, res) => sendJson(res, 200, { ok: true }), { public: true }],
     ['GET', /^\/api\/auth\/status$/, api.status, { public: true }],
     ...authRoutes,
-    ...socialRoutes,
+    ...profileRoutes,
     ['POST', /^\/api\/auth\/logout$/, api.logout, { public: true }],
     ['GET', /^\/api\/portfolio$/, api.portfolio],
     ['GET', /^\/api\/portfolio\/history$/, api.history],
@@ -1071,10 +906,6 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     ['PUT', /^\/api\/holdings\/(?<id>[^/]+)$/, api.updateHolding],
     ['POST', /^\/api\/holdings\/(?<id>[^/]+)\/trade$/, api.trade],
     ['DELETE', /^\/api\/holdings\/(?<id>[^/]+)$/, api.deleteHolding],
-    ['GET', /^\/api\/watchlist$/, api.watchlist],
-    ['POST', /^\/api\/watchlist$/, api.addWatch],
-    ['PUT', /^\/api\/watchlist\/(?<symbol>[^/]+)$/, api.updateWatch],
-    ['DELETE', /^\/api\/watchlist\/(?<symbol>[^/]+)$/, api.removeWatch],
     ['GET', /^\/api\/settings$/, api.getSettings],
     ['PUT', /^\/api\/settings$/, api.updateSettings],
     ['GET', /^\/api\/backup$/, api.backup],
@@ -1097,7 +928,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   // I browser-tilstand findes intet lager på serveren – disse ruter giver ingen mening.
-  const STORE_ROUTES = /^\/api\/(portfolio|holdings|settings|watchlist|backup|restore|auth\/(setup|login|change-password|logout-all))(\/|$)/;
+  const STORE_ROUTES = /^\/api\/(portfolio|holdings|settings|backup|restore|auth\/(setup|login|change-password|logout-all))(\/|$)/;
   // Ved åben adgang findes der intet login at bruge – men /api/auth/setup skal være åben,
   // for det er dén vej, man lukker siden med en adgangskode.
   const AUTH_ROUTES_WHEN_OPEN = /^\/api\/auth\/(login|change-password|logout-all|logout)$/;
@@ -1173,7 +1004,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         res.destroy();
         return;
       }
-      if ((err instanceof SignupError || err instanceof SocialError) && !res.headersSent) {
+      if (err instanceof SignupError && !res.headersSent) {
         if (url.pathname.startsWith('/api/')) return sendError(res, err.status, err.message);
       }
       if (err instanceof HttpError) {

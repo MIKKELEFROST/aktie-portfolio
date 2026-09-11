@@ -152,11 +152,8 @@
     canSetPassword: false, // åben adgang uden adgangskode: siden kan lukkes herfra
     me: null, // min profil på platformen: { id, name, email, isOwner }
     viewing: null, // ser jeg en andens portefølje? { id, name }
-    people: { q: '', results: [], loading: false, searched: false },
-    follows: { following: [], followers: [] },
+    people: { q: '', results: [], loading: false, loaded: false },
     inviteCode: null,
-    watchlist: { items: [], loaded: false, loading: false },
-    wlSearch: { q: '', results: [], loading: false, searched: false },
     account: storageGet('account', 'all'), // 'all' | 'none' | depot-id
     localImport: null, // data fundet i browserens lager, som kan overføres til kontoen
     allHoldings: [], // alle beholdninger uanset depot-filter (til tilføj/køb til og "Uden depot"-chip)
@@ -657,8 +654,8 @@
   // Routing
   // ======================================================================
 
-  const ROUTES = { '/': 'overview', '/beholdninger': 'holdings', '/indstillinger': 'settings', '/folk': 'people', '/liste': 'watchlist' };
-  const TITLES = { overview: 'Overblik', holdings: 'Beholdninger', settings: 'Indstillinger', people: 'Folk', person: 'Profil', watchlist: 'Ønskeliste' };
+  const ROUTES = { '/': 'overview', '/beholdninger': 'holdings', '/indstillinger': 'settings', '/folk': 'people' };
+  const TITLES = { overview: 'Overblik', holdings: 'Beholdninger', settings: 'Indstillinger', people: 'Folk', person: 'Profil' };
   const PERSON_PATH = /^\/profil\/([^/]+)$/;
 
   const personIdFromPath = () => PERSON_PATH.exec(location.pathname)?.[1] || null;
@@ -684,7 +681,6 @@
 
   // Sørger for, at siden har de data, den viser. Kaldes ved hver tegning, men
   // henter kun når noget rent faktisk mangler.
-  let followsLoaded = false;
   function routeData(route) {
     if (route === 'person') {
       const id = personIdFromPath();
@@ -692,11 +688,7 @@
       return;
     }
     if (state.viewing) stopViewing();
-    if (route === 'people' && state.access === 'platform' && !followsLoaded) {
-      followsLoaded = true;
-      loadFollows();
-    }
-    if (route === 'watchlist' && !state.watchlist.loaded && !state.watchlist.loading) loadWatchlist();
+    if (route === 'people' && state.access === 'platform' && !state.people.loaded && !state.people.loading) loadPeople('');
   }
 
   // ======================================================================
@@ -723,7 +715,6 @@
     if (route === 'overview') page.innerHTML = renderOverview();
     else if (route === 'holdings') page.innerHTML = renderHoldings();
     else if (route === 'people') page.innerHTML = renderPeople();
-    else if (route === 'watchlist') page.innerHTML = renderWatchlist();
     else if (route === 'person') page.innerHTML = renderPerson();
     else page.innerHTML = renderSettings();
     if (route === 'overview') afterRenderOverview();
@@ -1334,43 +1325,32 @@
     try {
       const data = await api('GET', '/api/me');
       state.me = data.user;
-      state.pendingRequests = data.pending || 0;
       state.inviteCode = data.inviteCode || null;
     } catch {
       /* ikke logget ind eller ikke en platform – siden virker uden */
     }
   }
 
-  async function loadFollows() {
+  let peopleTimer = null;
+
+  async function loadPeople(q = '') {
+    state.people.loading = true;
     try {
-      state.follows = await api('GET', '/api/follows');
-      state.pendingRequests = state.follows.followers.filter((f) => f.status === 'pending').length;
-      render();
+      const data = await api('GET', q.trim() ? `/api/people?q=${encodeURIComponent(q.trim())}` : '/api/people');
+      if (state.people.q !== q) return;
+      state.people = { q, results: data.people, loading: false, loaded: true };
     } catch (err) {
+      state.people = { q, results: [], loading: false, loaded: true };
       toast(err.message, 'error');
     }
+    render();
   }
 
-  let peopleTimer = null;
+  // Filtreringen sker på serveren, men først når man holder pause i tastningen.
   function searchPeopleSoon(q) {
     state.people.q = q;
     clearTimeout(peopleTimer);
-    if (q.trim().length < 2) {
-      state.people = { q, results: [], loading: false, searched: false };
-      return render();
-    }
-    state.people.loading = true;
-    peopleTimer = setTimeout(async () => {
-      try {
-        const data = await api('GET', `/api/people?q=${encodeURIComponent(q.trim())}`);
-        if (state.people.q !== q) return;
-        state.people = { q, results: data.people, loading: false, searched: true };
-      } catch (err) {
-        state.people = { q, results: [], loading: false, searched: true };
-        toast(err.message, 'error');
-      }
-      render();
-    }, 300);
+    peopleTimer = setTimeout(() => loadPeople(q), 250);
   }
 
   // Skifter til en andens portefølje (eller tilbage til ens egen).
@@ -1394,213 +1374,29 @@
     loadPortfolio();
   }
 
-  async function followAction(method, path, ok) {
-    try {
-      await api(method, path);
-      await loadFollows();
-      if (state.people.q.trim().length >= 2) searchPeopleSoon(state.people.q);
-      if (ok) toast(ok, 'success');
-    } catch (err) {
-      toast(err.message, 'error');
-    }
-  }
-
-  // ---------- Ønskeliste ----------
-
-  async function loadWatchlist({ silent = false } = {}) {
-    state.watchlist.loading = true;
-    if (!silent) render();
-    try {
-      const data = await api('GET', '/api/watchlist');
-      state.watchlist = { items: data.items, loaded: true, loading: false };
-    } catch (err) {
-      state.watchlist.loading = false;
-      if (!silent) toast(err.message, 'error');
-    }
-    render();
-  }
-
-  let wlTimer = null;
-  function searchWatchSoon(q) {
-    state.wlSearch.q = q;
-    clearTimeout(wlTimer);
-    if (q.trim().length < 1) {
-      state.wlSearch = { q, results: [], loading: false, searched: false };
-      return render();
-    }
-    state.wlSearch.loading = true;
-    wlTimer = setTimeout(async () => {
-      try {
-        const data = await api('GET', `/api/search?q=${encodeURIComponent(q.trim())}`);
-        if (state.wlSearch.q !== q) return;
-        state.wlSearch = { q, results: data.results.slice(0, 8), loading: false, searched: true };
-      } catch (err) {
-        state.wlSearch = { q, results: [], loading: false, searched: true };
-        toast(err.message, 'error');
-      }
-      render();
-    }, 250);
-  }
-
-  async function addToWatchlist(symbol) {
-    try {
-      await api('POST', '/api/watchlist', { symbol });
-      state.wlSearch = { q: '', results: [], loading: false, searched: false };
-      toast('Tilføjet til ønskelisten', 'success');
-      await loadWatchlist({ silent: true });
-    } catch (err) {
-      toast(err.message, 'error');
-    }
-  }
-
-  async function removeFromWatchlist(symbol) {
-    try {
-      await api('DELETE', `/api/watchlist/${encodeURIComponent(symbol)}`);
-      state.watchlist.items = state.watchlist.items.filter((w) => w.symbol !== symbol);
-      render();
-      toast('Fjernet fra ønskelisten', 'success');
-    } catch (err) {
-      toast(err.message, 'error');
-    }
-  }
-
-  async function setWatchTarget(symbol) {
-    const nu = state.watchlist.items.find((w) => w.symbol === symbol);
-    const svar = await promptDialog({
-      title: 'Ønskekurs',
-      text: `Hvilken kurs vil du købe ${nu?.name || symbol} til? Lad feltet stå tomt for at fjerne ønskekursen.`,
-      value: isNum(nu?.target) ? fmtRaw(nu.target) : '',
-      placeholder: isNum(nu?.price) ? fmtPrice(nu.price) : '0,00',
-      suffix: nu?.currency || '',
-    });
-    if (svar === null) return;
-    const tal = svar.trim() ? parseInput(svar) : null;
-    if (svar.trim() && (!isNum(tal) || tal < 0)) return toast('Ønskekursen skal være et tal, f.eks. 250,50', 'error');
-    try {
-      await api('PUT', `/api/watchlist/${encodeURIComponent(symbol)}`, { target: tal });
-      await loadWatchlist({ silent: true });
-      toast(tal === null ? 'Ønskekursen er fjernet' : 'Ønskekursen er gemt', 'success');
-    } catch (err) {
-      toast(err.message, 'error');
-    }
-  }
-
-  function renderWatchlist() {
-    const { items, loaded } = state.watchlist;
-    const w = state.wlSearch;
-    const nået = items.filter((x) => x.atTarget);
-
-    const søgeresultater = w.loading
-      ? '<p class="muted">Søger…</p>'
-      : w.results.length
-        ? `<ul class="wl-results">${w.results.map((r) => {
-            const har = items.some((x) => x.symbol === r.symbol);
-            return `<li><span class="stock-avatar">${esc(initials(r.symbol))}</span><span class="wl-res-name"><b>${esc(r.name)}</b><br><span class="muted small">${esc(r.symbol)}${r.exchange ? ` · ${esc(r.exchange)}` : ''}</span></span>${har ? '<span class="chip">På listen</span>' : `<button class="btn btn-sm btn-primary" data-action="watch-add" data-symbol="${esc(r.symbol)}">Tilføj</button>`}</li>`;
-          }).join('')}</ul>`
-        : w.searched ? `<p class="muted">Ingen aktier matcher "${esc(w.q)}".</p>` : '';
-
-    const rækker = items.map((x) => `
-      <div class="wl-row${x.atTarget ? ' is-hit' : ''}">
-        <div class="wl-name">
-          <b>${esc(x.name)}</b>
-          <span class="muted small">${esc(x.symbol)}${x.currency ? ` · ${esc(x.currency)}` : ''}${x.exchange ? ` · ${esc(x.exchange)}` : ''}</span>
-          ${x.note ? `<span class="muted small">${esc(x.note)}</span>` : ''}
-        </div>
-        <div class="wl-price">
-          ${x.error ? `<span class="muted">${esc(x.error)}</span>` : `
-            <b class="amount">${isNum(x.price) ? `${fmtPrice(x.price)} ${esc(x.currency || '')}` : '–'}</b>
-            <span class="${signClass(x.changePercent)} small">${arrow(x.changePercent)}${fmtPct(x.changePercent)}</span>`}
-        </div>
-        <div class="wl-target">
-          ${isNum(x.target)
-            ? `<button class="btn btn-ghost btn-sm" data-action="watch-target" data-symbol="${esc(x.symbol)}">Ønske: <b class="amount">${fmtPrice(x.target)}</b></button>
-               <span class="small ${x.atTarget ? 'pos' : 'muted'}">${x.atTarget ? '✓ Kursen er nået' : `${fmtPct(x.toTarget, { sign: false })} over`}</span>`
-            : `<button class="btn btn-ghost btn-sm" data-action="watch-target" data-symbol="${esc(x.symbol)}">Sæt ønskekurs</button>`}
-        </div>
-        <button class="btn btn-ghost btn-icon" data-action="watch-remove" data-symbol="${esc(x.symbol)}" title="Fjern fra ønskelisten" aria-label="Fjern ${esc(x.name)} fra ønskelisten">${icon('trash')}</button>
-      </div>`).join('');
-
-    return `
-      ${pageHeader('Ønskeliste', `<span>Aktier du holder øje med${items.length ? ` · ${items.length}` : ''}</span>`, headerActions({ add: false }))}
-      ${nået.length ? `<div class="banner info">${icon('bell')}<div><b>${nået.length === 1 ? '1 aktie er nået sin ønskekurs' : `${nået.length} aktier er nået deres ønskekurs`}:</b> ${nået.map((x) => esc(x.name)).join(', ')}.</div></div>` : ''}
-
-      <div class="card">
-        <div class="card-header"><h2>${icon('search')}Tilføj en aktie</h2></div>
-        <div class="card-body">
-          <div class="input-group" style="max-width:420px"><input class="input" id="wl-search" type="search" placeholder="Søg efter aktie eller ETF…" value="${esc(w.q)}" aria-label="Søg efter aktie"></div>
-          ${søgeresultater}
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-header"><h2>${icon('star')}På listen <span class="hint">${items.length}</span></h2></div>
-        <div class="card-body">
-          ${!loaded ? '<p class="muted">Henter…</p>' : items.length ? rækker : '<p class="muted">Din ønskeliste er tom. Søg efter en aktie ovenfor – du kan sætte en ønskekurs og få den markeret, når kursen er nået.</p>'}
-        </div>
-      </div>`;
-  }
-
   // ---------- Folk: find, følg, godkend ----------
 
   const personInitials = (name) => String(name || '?').split(' ').filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
 
-  function personRow(person, actions) {
-    return `<div class="person-row">
-      <span class="avatar" aria-hidden="true">${esc(personInitials(person.name))}</span>
-      <div class="person-name">${esc(person.name)}${person.isOwner ? ' <span class="hint">ejer</span>' : ''}</div>
-      <div class="person-actions">${actions}</div>
-    </div>`;
-  }
-
-  function followButton(person) {
-    if (person.status === 'accepted') return `<a class="btn btn-sm btn-primary" href="/profil/${esc(person.id)}" data-link>Se portefølje</a><button class="btn btn-sm" data-action="unfollow" data-id="${esc(person.id)}">Følg ikke mere</button>`;
-    if (person.status === 'pending') return `<span class="hint">Afventer svar</span><button class="btn btn-sm" data-action="unfollow" data-id="${esc(person.id)}">Fortryd</button>`;
-    return `<button class="btn btn-sm btn-primary" data-action="follow" data-id="${esc(person.id)}">Anmod om at følge</button>`;
-  }
-
   function renderPeople() {
-    const { following, followers } = state.follows;
-    const anmodninger = followers.filter((f) => f.status === 'pending');
-    const mineFølgere = followers.filter((f) => f.status === 'accepted');
-    const jegFølger = following.filter((f) => f.status === 'accepted');
-    const sendte = following.filter((f) => f.status === 'pending');
-    const p = state.people;
+    const { results, loading, loaded, q } = state.people;
+    const liste = results.map((person) => `
+      <a class="person-row person-link" href="/profil/${esc(person.id)}" data-link>
+        <span class="avatar" aria-hidden="true">${esc(personInitials(person.name))}</span>
+        <span class="person-name">${esc(person.name)}${person.isOwner ? ' <span class="hint">ejer</span>' : ''}</span>
+        <span class="person-go" aria-hidden="true">Se portefølje →</span>
+      </a>`).join('');
 
     return `
-      ${pageHeader('Folk', '<span>Find andre og følg deres portefølje</span>', headerActions({ add: false }))}
-
-      ${anmodninger.length ? `<div class="card">
-        <div class="card-header"><h2>${icon('lock')}Vil følge dig <span class="hint">${anmodninger.length}</span></h2></div>
-        <div class="card-body">
-          <p class="muted" style="margin-top:0">Siger du ja, kan personen se hele din portefølje – aktier, antal og beløb. Du kan fjerne adgangen igen når som helst.</p>
-          ${anmodninger.map((f) => personRow(f, `<button class="btn btn-sm btn-primary" data-action="accept-follow" data-id="${esc(f.id)}">Godkend</button><button class="btn btn-sm" data-action="reject-follow" data-id="${esc(f.id)}">Afvis</button>`)).join('')}
-        </div>
-      </div>` : ''}
-
+      ${pageHeader('Folk', '<span>Se hvad de andre har i deres portefølje</span>', headerActions({ add: false }))}
       <div class="card">
-        <div class="card-header"><h2>${icon('search')}Find en profil</h2></div>
+        <div class="card-header"><h2>${icon('users')}Profiler${loaded ? ` <span class="hint">${results.length}</span>` : ''}</h2></div>
         <div class="card-body">
-          <div class="input-group" style="max-width:360px"><input class="input" id="people-search" type="search" placeholder="Navn eller hele e-mailen…" value="${esc(p.q)}" aria-label="Søg efter profil"></div>
-          ${p.loading ? '<p class="muted">Søger…</p>' : p.results.length
-            ? p.results.map((person) => personRow(person, followButton(person))).join('')
-            : p.searched ? `<p class="muted">Ingen profiler matcher "${esc(p.q)}". Søger du på e-mail, skal den skrives helt.</p>` : '<p class="muted">Skriv mindst to bogstaver af et navn, eller hele e-mailadressen.</p>'}
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-header"><h2>${icon('list')}Jeg følger <span class="hint">${jegFølger.length}</span></h2></div>
-        <div class="card-body">
-          ${jegFølger.length ? jegFølger.map((f) => personRow(f, followButton(f))).join('') : '<p class="muted">Du følger ingen endnu.</p>'}
-          ${sendte.length ? `<p class="muted" style="margin-bottom:6px">Sendt, men ikke besvaret endnu:</p>${sendte.map((f) => personRow(f, followButton(f))).join('')}` : ''}
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-header"><h2>${icon('eye')}Følger mig <span class="hint">${mineFølgere.length}</span></h2></div>
-        <div class="card-body">
-          ${mineFølgere.length
-            ? mineFølgere.map((f) => personRow(f, `<button class="btn btn-sm" data-action="reject-follow" data-id="${esc(f.id)}">Fjern adgang</button>`)).join('')
-            : '<p class="muted">Ingen følger dig endnu. De skal selv finde dig og sende en anmodning.</p>'}
+          <div class="input-group" style="max-width:360px;margin-bottom:8px"><input class="input" id="people-search" type="search" placeholder="Søg efter navn…" value="${esc(q)}" aria-label="Søg efter profil"></div>
+          ${loading && !loaded ? '<p class="muted">Henter…</p>'
+            : results.length ? liste
+            : q ? `<p class="muted">Ingen profiler matcher "${esc(q)}".</p>`
+            : '<p class="muted">Der er ingen andre profiler endnu. Del din invitationskode fra Indstillinger, så kan de andre komme med.</p>'}
         </div>
       </div>`;
   }
@@ -1780,35 +1576,6 @@
 
   function setError(id, msg) {
     $(id).textContent = msg || '';
-  }
-
-  // Spørger om én værdi. Returnerer teksten, eller null hvis der blev annulleret.
-  function promptDialog({ title, text = '', value = '', placeholder = '', suffix = '' }) {
-    return new Promise((resolve) => {
-      const dlg = $('#dlg-prompt');
-      const input = $('#prompt-input');
-      $('#prompt-title').textContent = title;
-      $('#prompt-text').textContent = text;
-      $('#prompt-suffix').textContent = suffix;
-      input.value = value;
-      input.placeholder = placeholder;
-      let done = false;
-      const finish = (v) => {
-        if (done) return;
-        done = true;
-        dlg.removeEventListener('close', onClose);
-        resolve(v);
-      };
-      const onClose = () => finish(dlg.returnValue === 'ok' ? input.value : null);
-      dlg.addEventListener('close', onClose);
-      dlg.returnValue = '';
-      $('#form-prompt').onsubmit = (e) => {
-        e.preventDefault();
-        dlg.close('ok');
-      };
-      dlg.showModal();
-      focusSoon('#prompt-input', 30);
-    });
   }
 
   function confirmDialog({ title, text, okLabel = 'Slet', danger = true }) {
@@ -2626,27 +2393,6 @@
       case 'delete':
         e.stopPropagation();
         return deleteHolding(el.dataset.id);
-      case 'watch-add':
-        addToWatchlist(el.dataset.symbol);
-        break;
-      case 'watch-remove':
-        removeFromWatchlist(el.dataset.symbol);
-        break;
-      case 'watch-target':
-        setWatchTarget(el.dataset.symbol);
-        break;
-      case 'follow':
-        followAction('POST', `/api/follows/${encodeURIComponent(el.dataset.id)}`, 'Anmodningen er sendt');
-        break;
-      case 'unfollow':
-        followAction('DELETE', `/api/follows/${encodeURIComponent(el.dataset.id)}`);
-        break;
-      case 'accept-follow':
-        followAction('POST', `/api/follows/${encodeURIComponent(el.dataset.id)}/accept`, 'Godkendt – nu kan personen se din portefølje');
-        break;
-      case 'reject-follow':
-        followAction('DELETE', `/api/followers/${encodeURIComponent(el.dataset.id)}`, 'Adgangen er fjernet');
-        break;
       case 'copy-invite':
         navigator.clipboard?.writeText(state.inviteCode || '').then(
           () => toast('Invitationskoden er kopieret', 'success'),
@@ -2751,13 +2497,6 @@
     else if (e.target.dataset.importSymbol !== undefined) {
       imp.rows[Number(e.target.dataset.importSymbol)].symbol = e.target.value.trim().toUpperCase();
       updateImportCount();
-    }
-    else if (id === 'wl-search') {
-      const felt = e.target;
-      const pos = felt.selectionStart;
-      searchWatchSoon(felt.value);
-      const igen = $('#wl-search');
-      if (igen && igen !== felt) { igen.focus(); igen.setSelectionRange(pos, pos); }
     }
     else if (id === 'people-search') {
       const felt = e.target;
