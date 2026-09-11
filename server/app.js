@@ -280,7 +280,11 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         delete histories[h.symbol];
       }
     }
-    const { points, backfilled } = computeValueHistory({ holdings, histories, fxRates, fxHistories });
+    // Perioden der blev bedt om – ikke den, Yahoo tilfældigvis leverede. Et køb
+    // få dage før første kurs hører stadig til her.
+    const dageTilbage = rangeDays(hentRange);
+    const windowStart = Number.isFinite(dageTilbage) ? dayKey(Date.now() - dageTilbage * 86_400_000) : null;
+    const { points, backfilled, events } = computeValueHistory({ holdings, histories, fxRates, fxHistories, windowStart });
 
     // Yahoos dagsserier halter af og til efter de løbende kurser, og så sluttede
     // kurven et andet sted end tallet lige over den. Sidste punkt sættes derfor
@@ -305,7 +309,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     const fxToday = Object.entries(fxHistories)
       .filter(([cur, h]) => cur !== baseCurrency && (!h?.ok || !h.points?.length) && !h?.identity)
       .map(([cur]) => cur);
-    return { range, baseCurrency, points, missing, backfilled, fxToday, liveEnd, ownedFrom: kortereEndValgt ? købtFra : null, approximate: true };
+    return { range, baseCurrency, points, missing, backfilled, events, fxToday, liveEnd, ownedFrom: kortereEndValgt ? købtFra : null, approximate: true };
   }
 
   // ---------- validering ----------

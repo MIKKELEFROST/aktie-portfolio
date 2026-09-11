@@ -436,10 +436,20 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 .chart-box .chart-msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; text-align: center; padding: 20px; }
 .chart-tip {
   position: absolute; pointer-events: none; transform: translate(-50%, -100%);
-  background: var(--text); color: var(--bg); padding: 6px 9px; border-radius: 6px; font-size: 12px; white-space: nowrap;
+  background: var(--text); color: var(--bg); padding: 6px 9px; border-radius: 6px; font-size: 12px;
   box-shadow: var(--shadow); z-index: 2;
+  /* Købslinjer kan være lange (fondsnavne), så tippet må bryde og have en bredde. */
+  max-width: min(270px, 78vw); white-space: normal;
 }
 .chart-tip b { display: block; font-size: 13px; }
+.tip-event {
+  display: block; margin-top: 5px; padding-top: 5px; line-height: 1.35;
+  border-top: 1px solid color-mix(in srgb, currentColor 28%, transparent);
+}
+.chart-legend i.dot {
+  width: 9px; height: 9px; border: 2px solid var(--chart-line); border-radius: 50%;
+  background: var(--surface); vertical-align: middle;
+}
 .chart-legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 8px; flex-wrap: wrap; }
 .chart-legend i { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--chart-line); vertical-align: middle; margin-right: 5px; }
 .chart-legend i.dashed { border-top-style: dashed; border-color: var(--chart-invested); }
