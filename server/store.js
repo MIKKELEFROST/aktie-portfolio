@@ -12,7 +12,6 @@ export function defaultPortfolio(baseCurrency = 'DKK') {
     version: DATA_VERSION,
     settings: { baseCurrency },
     holdings: [],
-    watchlist: [], // aktier man følger med i uden at eje dem
   };
 }
 
@@ -177,7 +176,7 @@ export function migrate(data, baseCurrency) {
   if (!data.settings || typeof data.settings !== 'object') data.settings = {};
   if (!data.settings.baseCurrency) data.settings.baseCurrency = baseCurrency;
   if (!Array.isArray(data.holdings)) data.holdings = [];
-  if (!Array.isArray(data.watchlist)) data.watchlist = [];
+  delete data.watchlist; // ønskelisten er fjernet igen; gamle data ryddes op
   if (!Array.isArray(data.settings.accounts)) data.settings.accounts = [];
   for (const h of data.holdings) if (h && h.accountId === undefined) h.accountId = null;
   data.version = DATA_VERSION;

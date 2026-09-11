@@ -20,8 +20,6 @@
   <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></symbol>
   <symbol id="i-eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M17.9 17.9A10 10 0 0 1 12 20C5 20 1 12 1 12a18 18 0 0 1 5.1-6M9.9 4.2A9 9 0 0 1 12 4c7 0 11 8 11 8a18 18 0 0 1-2.2 3.2M14.1 14.1a3 3 0 1 1-4.2-4.2M1 1l22 22"/></symbol>
-  <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></symbol>
-  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></symbol>
   <symbol id="i-users" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
   <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></symbol>
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
@@ -52,7 +50,6 @@
     <nav class="nav">
       <a href="/" data-link data-nav="/"><svg class="icon"><use href="#i-grid"/></svg><span>Overblik</span></a>
       <a href="/beholdninger" data-link data-nav="/beholdninger"><svg class="icon"><use href="#i-list"/></svg><span>Beholdninger</span></a>
-      <a href="/liste" data-link data-nav="/liste"><svg class="icon"><use href="#i-star"/></svg><span>Ønskeliste</span></a>
       <a href="/folk" data-link data-nav="/folk" class="only-platform"><svg class="icon"><use href="#i-users"/></svg><span>Folk</span></a>
       <a href="/indstillinger" data-link data-nav="/indstillinger"><svg class="icon"><use href="#i-settings"/></svg><span>Indstillinger</span></a>
     </nav>
@@ -82,7 +79,6 @@
       <a href="/" data-link data-nav="/"><svg class="icon"><use href="#i-grid"/></svg>Overblik</a>
       <a href="/beholdninger" data-link data-nav="/beholdninger"><svg class="icon"><use href="#i-list"/></svg><span class="tab-long">Beholdninger</span><span class="tab-short">Aktier</span></a>
       <button class="tab-add" data-action="add"><svg class="icon"><use href="#i-plus"/></svg>Tilføj</button>
-      <a href="/liste" data-link data-nav="/liste"><svg class="icon"><use href="#i-star"/></svg><span class="tab-long">Ønskeliste</span><span class="tab-short">Ønsker</span></a>
       <a href="/folk" data-link data-nav="/folk" class="only-platform"><svg class="icon"><use href="#i-users"/></svg>Folk</a>
       <a href="/indstillinger" data-link data-nav="/indstillinger"><svg class="icon"><use href="#i-settings"/></svg><span class="tab-long">Indstillinger</span><span class="tab-short">Mere</span></a>
     </nav>
@@ -232,20 +228,6 @@
 </dialog>
 
 <!-- Bekræft -->
-<dialog id="dlg-prompt">
-  <form method="dialog" id="form-prompt" novalidate>
-    <div class="dialog-head"><h2 id="prompt-title">Værdi</h2><button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Luk"><svg class="icon"><use href="#i-x"/></svg></button></div>
-    <div class="dialog-body">
-      <p class="dialog-intro" id="prompt-text"></p>
-      <div class="field"><div class="input-group"><input class="input n" id="prompt-input" inputmode="decimal" autocomplete="off"><span class="addon" id="prompt-suffix"></span></div></div>
-    </div>
-    <div class="dialog-foot">
-      <button type="button" class="btn" data-close>Annullér</button>
-      <button type="submit" class="btn btn-primary" id="prompt-ok">Gem</button>
-    </div>
-  </form>
-</dialog>
-
 <dialog id="dlg-confirm">
   <form method="dialog">
     <div class="dialog-head"><h2 id="confirm-title">Er du sikker?</h2></div>

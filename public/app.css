@@ -716,7 +716,11 @@ body.platform .only-platform { display: flex !important; }
   background: var(--accent-soft, rgba(37, 99, 235, 0.12)); color: var(--accent, #2563eb);
 }
 .person-name { flex: 1 1 140px; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
-.person-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.person-go { color: var(--accent); font-size: 13px; font-weight: 500; white-space: nowrap; }
+/* Hele rækken er et link ind til profilen. */
+.person-link { color: inherit; text-decoration: none; border-radius: 8px; }
+.person-link:hover { background: var(--surface-2); text-decoration: none; }
+.person-link:hover .person-go { text-decoration: underline; }
 
 .invite-box { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .invite-code {
@@ -748,9 +752,7 @@ body.viewing-person [data-action="add"] { display: none !important; }
   /* Små tekstlinks skal stadig kunne rammes med en tommelfinger. */
   .card-header a { display: inline-flex; align-items: center; min-height: 44px; }
   .topbar .brand { min-height: 44px; }
-  .person-row { padding: 14px 0; }
-  .person-actions { width: 100%; }
-  .person-actions .btn { flex: 1; justify-content: center; }
+  .person-row { padding: 14px 8px; }
   /* Tallene i grafen må ikke lægge sig oven i kurven. */
   .chart-summary { gap: 6px 10px; }
 }
@@ -760,33 +762,4 @@ body.viewing-person [data-action="add"] { display: none !important; }
   /* Står det sidste nøgletal alene på en række, får det hele bredden. */
   .grid-kpi > :last-child:nth-child(even) { grid-column: 1 / -1; }
 }
-
-/* ---------- Ønskeliste ---------- */
-.wl-results { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 2px; }
-.wl-results li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--border); }
-.wl-results li:first-child { border-top: 0; }
-.wl-res-name { flex: 1; min-width: 0; overflow: hidden; }
-.wl-res-name b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.wl-row {
-  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center; gap: 6px 12px;
-  padding: 12px 0; border-top: 1px solid var(--border);
-}
-.wl-row:first-child { border-top: 0; }
-.wl-row.is-hit { background: color-mix(in srgb, var(--pos) 8%, transparent); border-radius: 8px; padding-inline: 10px; }
-.wl-name { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.wl-name b, .wl-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wl-price { text-align: right; display: flex; flex-direction: column; gap: 1px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.wl-target { text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; white-space: nowrap; }
-.wl-target .btn { padding: 2px 6px; min-height: 0; }
-
-/* På telefonen får hver post to rækker, så intet klemmes sammen. */
-@media (max-width: 559px) {
-  .wl-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'navn pris' 'ønske fjern'; }
-  .wl-name { grid-area: navn; }
-  .wl-price { grid-area: pris; }
-  .wl-target { grid-area: ønske; align-items: flex-start; text-align: left; }
-  .wl-target .btn { padding-inline: 0; min-height: 36px; }
-  .wl-row > .btn-icon { grid-area: fjern; justify-self: end; }
 }

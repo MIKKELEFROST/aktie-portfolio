@@ -22,7 +22,6 @@ Et personligt, selv-hostet dashboard til din aktieportefølje. Du logger ind med
 - **Login** med adgangskode, "husk mig", brute-force-bremse, skift adgangskode og "log ud overalt".
 - **Mørkt tema**, mobilvenligt layout (bundmenu + kort), "skjul beløb"-knap til toget, dansk talformat.
 - **Sikkerhedskopi**: download/gendan som JSON. Serveren gemmer desuden de 5 seneste versioner automatisk.
-- **Ønskeliste**: hold øje med aktier du ikke ejer, med en valgfri ønskekurs.
 - **Ingen afhængigheder**: kun Node.js. Intet build-step, intet framework. Data i en JSON-fil – eller i Supabase/Upstash Redis på Vercel.
 
 ## Kom i gang
@@ -70,21 +69,18 @@ Hvert push til `main` deployer automatisk. Bemærk: på Vercel er der ingen bagg
 
 Sådan vælges lageret, i den rækkefølge: findes `SUPABASE_URL`/`SUPABASE_KEY`, bruges Supabase; ellers `KV_REST_API_URL`/`KV_REST_API_TOKEN` (eller `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN`) → Redis; ellers JSON-filen i `DATA_DIR`. Det gælder også lokalt og i Docker.
 
-## Ønskeliste
-
-Aktier man overvejer, men ikke ejer, hører til under *Ønskeliste*. Søg en aktie frem, tilføj den, og sæt eventuelt en **ønskekurs**: den kurs du gerne vil købe til. Listen viser dagens kurs, dagens bevægelse og hvor langt der er ned til dit ønske – og markerer posten, når kursen er nået. Ønskelisten er din egen, følger med i sikkerhedskopien, og indgår ikke i porteføljens værdi eller afkast.
-
-## Profiler og at følge hinanden
+## Profiler
 
 Med en database har hver bruger sin egen profil og sin egen portefølje.
 
-- **Tilmelding.** Den allerførste profil oprettes uden invitationskode – der er endnu intet at beskytte – og bliver *ejer*. Ejeren får en kode, som står under *Indstillinger → Konto* og kan kopieres eller skiftes ud. Alle senere profiler skal bruge den kode. Uden kode kan ingen tilmelde sig, selvom de kender adressen.
+- **Tilmelding kræver en invitationskode.** Den allerførste profil oprettes uden – der er endnu intet at beskytte – og bliver *ejer*. Ejeren får en kode, som står under *Indstillinger → Konto* og kan kopieres eller skiftes ud. Alle senere profiler skal bruge den. Uden kode kan ingen tilmelde sig, selvom de kender adressen.
 - **Log ind.** Med e-mail og adgangskode. Er man ikke logget ind, sendes man til log ind / tilmeld-siden; intet andet er tilgængeligt.
-- **Følg andre.** Under *Folk* søger man på navn (mindst to bogstaver) eller på en hel e-mailadresse – stumper af en e-mail giver intet, så listen over hvem der er tilmeldt, ikke kan afsøges. Man sender en anmodning, og **først når modtageren godkender**, kan man se vedkommendes portefølje.
-- **Hvad en følger ser.** Det hele: aktier, antal, gennemsnitskurs, værdi og afkast – de samme tal som ejeren selv ser. Men kun til at kigge på; der findes ingen vej til at ændre en andens portefølje.
-- **Fortryd.** Både den, der følger, og den, der bliver fulgt, kan afbryde når som helst. Adgangen forsvinder med det samme.
+- **Alle på platformen kan se hinandens porteføljer.** Under *Folk* står alle profiler, og et klik åbner den pågældendes dashboard: aktier, antal, gennemsnitskurs, værdi og afkast – de samme tal, som personen selv ser. Der er ingen anmodning og ingen godkendelse. Adgangen styres ved invitationskoden: er man først inde, er alt åbent.
+- **Kun til at kigge på.** Ruterne til en andens portefølje findes kun som GET, så ingen kan ændre noget hos en anden.
 
 E-mailadresser deles aldrig med andre brugere – de bruges kun til at logge ind og til at finde hinanden.
+
+Vil man ikke dele sin portefølje med de andre, skal man have sin egen installation (eget Vercel-projekt og egen database).
 
 ## Konfiguration
 
@@ -141,7 +137,6 @@ server/
   index.js          start, konfiguration, cache-opvarmning, .env
   app.js            routing, auth, API
   accounts.js       brugerprofiler, tilmelding og invitationskode
-  social.js         følge-anmodninger og hvem der må se hvad
   storage.js        vælger Supabase-, Redis- eller fil-lager ud fra miljøet
   resolve.js        finder Yahoo-symbol ud fra ISIN eller navn
   store-redis.js    Upstash Redis-lager (REST, compare-and-set, backups)
