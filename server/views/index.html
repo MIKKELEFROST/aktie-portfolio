@@ -122,6 +122,11 @@
           </div>
         </div>
         <div class="field">
+          <label for="add-date" id="add-date-label">Købt den <span class="muted">(valgfri)</span></label>
+          <input class="input" id="add-date" type="date" autocomplete="off">
+          <span class="help">Bruges til at vise, hvor længe du har ejet den, og hvad afkastet svarer til pr. år.</span>
+        </div>
+        <div class="field">
           <label for="add-note">Note <span class="muted">(valgfri)</span></label>
           <input class="input" id="add-note" maxlength="200" placeholder="F.eks. Aktiesparekonto">
         </div>
@@ -156,6 +161,10 @@
       <div class="field hidden">
         <label for="edit-account">Depot</label>
         <select class="input" id="edit-account"></select>
+      </div>
+      <div class="field">
+        <label for="edit-date">Købt den <span class="muted">(valgfri)</span></label>
+        <input class="input" id="edit-date" type="date" autocomplete="off">
       </div>
       <div class="field">
         <label for="edit-note">Note</label>
@@ -211,7 +220,7 @@
       <div id="import-depots"></div>
       <div class="table-wrap">
         <table class="holdings import-table">
-          <thead><tr><th></th><th>Værdipapir</th><th>Symbol</th><th class="n">Antal</th><th class="n">Gns. købskurs</th><th>Depot</th></tr></thead>
+          <thead><tr><th></th><th>Værdipapir</th><th>Symbol</th><th class="n">Antal</th><th class="n">Gns. købskurs</th><th>Købt den</th><th>Depot</th></tr></thead>
           <tbody id="import-rows"></tbody>
         </table>
       </div>

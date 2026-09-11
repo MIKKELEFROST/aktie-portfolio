@@ -534,7 +534,7 @@
           skipped++;
           continue;
         }
-        await api('POST', '/api/holdings', { symbol: h.symbol, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', name: h.name, accountId });
+        await api('POST', '/api/holdings', { symbol: h.symbol, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', purchasedAt: h.purchasedAt || null, name: h.name, accountId });
         added++;
       }
 
@@ -881,6 +881,19 @@
   }
 
   // ---------- Overblik ----------
+
+  // "3 år og 2 md." læses lettere end "1157 dage".
+  function ejertid(dage) {
+    if (!isNum(dage)) return '';
+    if (dage < 1) return 'i dag';
+    if (dage === 1) return '1 dag';
+    if (dage < 45) return `${dage} dage`;
+    const måneder = Math.round(dage / 30.44);
+    if (måneder < 24) return `${måneder} md.`;
+    const år = Math.floor(måneder / 12);
+    const rest = måneder % 12;
+    return rest ? `${år} år og ${rest} md.` : `${år} år`;
+  }
 
   const AFKAST_TOOLTIP = 'Kursafkast i forhold til din gns. købskurs, omregnet til basisvalutaen med dagens valutakurs. Valutaudsving siden købet indgår ikke.';
 
@@ -1547,8 +1560,10 @@
             <dt>Investeret</dt><dd class="amount">${fmtAmount(p.costBase)}</dd>
             <dt>Værdi</dt><dd class="amount">${fmtAmount(p.valueBase)}</dd>
             <dt>Afkast</dt><dd class="${signClass(p.gainBase)}">${isNum(p.gainBase) ? `<span class="amount">${fmtAmount(p.gainBase, state.baseCurrency, { sign: true })}</span> (${fmtPct(p.gainPercent)})` : '<span class="muted">– tilføj købskurs under Redigér</span>'}</dd>
+            ${isNum(p.annualizedPercent) ? `<dt title="Afkastet omregnet til, hvad det svarer til pr. år">Afkast pr. år</dt><dd class="${signClass(p.annualizedPercent)}">${fmtPct(p.annualizedPercent)}</dd>` : ''}
             <dt>I dag</dt><dd class="${signClass(p.dayChangeBase)}"><span class="amount">${fmtAmount(p.dayChangeBase, state.baseCurrency, { sign: true })}</span></dd>
             <dt>Andel af portefølje</dt><dd>${fmtPct(p.weight, { sign: false })}</dd>
+            <dt>Købt den</dt><dd>${p.purchasedAt ? `${esc(fmtDate(p.purchasedAt, { year: true }))}${isNum(p.heldDays) ? ` <span class="muted">· ${esc(ejertid(p.heldDays))}</span>` : ''}` : '<span class="muted">ikke angivet</span>'}</dd>
           </dl>
           ${fx}
           ${isNum(p.gainBase) ? `<div class="muted small" style="margin-top:6px">${esc(AFKAST_TOOLTIP)}</div>` : ''}
@@ -1640,6 +1655,7 @@
     $('#add-qty').value = '';
     $('#add-price').value = '';
     $('#add-note').value = '';
+    $('#add-date').value = '';
     setError('#add-error', '');
     showAddStep('search');
     openDialog('#dlg-add');
@@ -1725,6 +1741,7 @@
     $('#add-price-label').textContent = buy ? 'Købskurs for dette køb' : 'Gns. købskurs';
     $('#add-price-help').textContent = buy ? 'Kursen du købte til denne gang.' : 'Valgfri. Uden købskurs vises værdi, men ikke afkast.';
     $('#add-note').closest('.field').classList.toggle('hidden', buy);
+    $('#add-date').closest('.field').classList.toggle('hidden', buy);
     $('#add-submit').textContent = buy ? 'Læg til beholdning' : 'Tilføj';
     updateAddSummary();
   }
@@ -1813,7 +1830,7 @@
         await afterMutation();
         return;
       }
-      const data = await api('POST', '/api/holdings', { symbol: add.selected.symbol, quantity: qty, avgPrice: price ?? null, note: $('#add-note').value, name: add.selected.name, accountId });
+      const data = await api('POST', '/api/holdings', { symbol: add.selected.symbol, quantity: qty, avgPrice: price ?? null, note: $('#add-note').value, purchasedAt: $('#add-date').value || null, name: add.selected.name, accountId });
       $('#dlg-add').close();
       toast(`${data.holding.name} er tilføjet${accountId ? ` i ${accountName(accountId)}` : ''}`, 'success');
       if (data.warning) toast(data.warning);
@@ -1838,6 +1855,7 @@
     $('#edit-price').value = fmtRaw(p.avgPrice);
     $('#edit-price-addon').textContent = p.currency || '';
     $('#edit-note').value = p.note || '';
+    $('#edit-date').value = p.purchasedAt || '';
     fillAccountSelect($('#edit-account'), p.accountId || '');
     setError('#edit-error', '');
     updateEditSummary();
@@ -1865,7 +1883,7 @@
     if (!isNum(qty) || qty <= 0) return setError('#edit-error', 'Antal skal være større end 0.');
     if (priceRaw && (!isNum(price) || price < 0)) return setError('#edit-error', 'Købskursen skal være et tal.');
     try {
-      const body = { quantity: qty, avgPrice: priceRaw ? price : null, note: $('#edit-note').value };
+      const body = { quantity: qty, avgPrice: priceRaw ? price : null, note: $('#edit-note').value, purchasedAt: $('#edit-date').value || null };
       if (accounts().length) body.accountId = $('#edit-account').value || null;
       await api('PUT', `/api/holdings/${encodeURIComponent(edit.id)}`, body);
       $('#dlg-edit').close();
@@ -2032,6 +2050,7 @@
         <td><input class="input import-sym" data-import-symbol="${i}" value="${esc(row.symbol)}" placeholder="fx MU" spellcheck="false"></td>
         <td class="n">${fmtQty(row.quantity)}</td>
         <td class="n">${fmtPrice(row.avgPrice)} <span class="muted small">${esc(row.currency)}</span></td>
+        <td class="muted small">${row.purchasedAt ? esc(fmtDate(row.purchasedAt, { year: true })) : '–'}</td>
         <td class="muted small">${esc(imp.depots.find((d) => d.code === row.depot)?.name || '')}</td>
       </tr>`;
     }).join('');
@@ -2082,10 +2101,10 @@
         const match = existing.find((h) => sameSlot(h, symbol, accountId));
         try {
           if (match) {
-            await api('PUT', `/api/holdings/${encodeURIComponent(match.id)}`, { quantity: row.quantity, avgPrice: row.avgPrice });
+            await api('PUT', `/api/holdings/${encodeURIComponent(match.id)}`, { quantity: row.quantity, avgPrice: row.avgPrice, ...(row.purchasedAt ? { purchasedAt: row.purchasedAt } : {}) });
             updated++;
           } else {
-            await api('POST', '/api/holdings', { symbol, quantity: row.quantity, avgPrice: row.avgPrice, name: row.name, accountId });
+            await api('POST', '/api/holdings', { symbol, quantity: row.quantity, avgPrice: row.avgPrice, purchasedAt: row.purchasedAt || null, name: row.name, accountId });
             added++;
           }
         } catch (err) {
