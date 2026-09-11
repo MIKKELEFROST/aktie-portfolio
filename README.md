@@ -22,7 +22,8 @@ Et personligt, selv-hostet dashboard til din aktieportefølje. Du logger ind med
 - **Login** med adgangskode, "husk mig", brute-force-bremse, skift adgangskode og "log ud overalt".
 - **Mørkt tema**, mobilvenligt layout (bundmenu + kort), "skjul beløb"-knap til toget, dansk talformat.
 - **Sikkerhedskopi**: download/gendan som JSON. Serveren gemmer desuden de 5 seneste versioner automatisk.
-- **Ingen afhængigheder**: kun Node.js. Intet build-step, intet framework. Data i en JSON-fil – eller i Upstash Redis på Vercel.
+- **Analyse**: månedligt gennemsnit, afkast pr. år, fremskrivning og tal om porteføljen.
+- **Ingen afhængigheder**: kun Node.js. Intet build-step, intet framework. Data i en JSON-fil – eller i Supabase/Upstash Redis på Vercel.
 
 ## Kom i gang
 
@@ -48,23 +49,48 @@ Dashboardet kører på port 3000, og dine data ligger i Docker-volumen `aktie-da
 
 ### Vercel (gratis hosting fra GitHub)
 
-Appen kan køre som én serverless-funktion på [Vercel](https://vercel.com) med data i Upstash Redis:
+Appen kan køre som én serverless-funktion på [Vercel](https://vercel.com):
 
 1. **Importér repoet** i Vercel: *Add New → Project → Import* `aktie-portfolio`. Framework: *Other*. Deploy.
-   Uden trin 2–3 kører siden i *browser-tilstand*: den virker med det samme, men data ligger kun i den enkelte browser.
-2. **Database** (giver login og synkronisering mellem enheder): I projektet → *Storage → Create Database* → vælg en Redis-database, fx Upstash → *Connect to Project*. Vercel sætter selv `KV_REST_API_URL` og `KV_REST_API_TOKEN`.
-3. **Miljøvariabler** under *Settings → Environment Variables*:
-   - `DASHBOARD_PASSWORD` – din adgangskode, mindst 8 tegn. Påkrævet, fordi hver serverless-instans er sin egen proces og derfor ikke kan dele en midlertidig opsætningsnøgle.
-   - `SESSION_SECRET` – en lang tilfældig streng, fx fra `openssl rand -hex 32`. Valgfri, men uden den logges du ud, når databasen nulstilles.
-4. **Redeploy** (*Deployments → ⋯ → Redeploy*). Åbn projektets URL og log ind.
+   Uden trin 2 kører siden i *browser-tilstand*: den virker med det samme, men data ligger kun i den enkelte browser.
+2. **Vælg en database** – så følger porteføljen med til alle dine enheder. Enten:
+   - **Upstash Redis** (færrest klik): I projektet → *Storage → Create Database* → vælg en Redis-database, fx Upstash → *Connect to Project*. Vercel sætter selv `KV_REST_API_URL` og `KV_REST_API_TOKEN`.
+   - **Supabase** (Postgres): opret et projekt på [supabase.com](https://supabase.com), kør SQL'en i [`docs/database.md`](docs/database.md), og sæt `SUPABASE_URL` og `SUPABASE_KEY` under *Settings → Environment Variables*.
+3. **Redeploy** (*Deployments → ⋯ → Redeploy*), og åbn projektets URL.
 
-Har du allerede brugt siden i browser-tilstand, spørger den efter login, om dine hidtidige aktier skal overføres til kontoen. Depoter matches på navn, og aktier der allerede findes i samme depot springes over, så en gentagelse ikke dublerer noget. En kopi bliver liggende i browseren som sikkerhedsnet.
+Med en database kører siden som **platform**: er man ikke logget ind, lander man på log ind / tilmeld. Se afsnittet nedenfor.
 
-**Uden database virker siden også** – i *browser-tilstand*: der er intet login, og dine aktier gemmes kun i din egen browser (localStorage), mens serveren leverer kurser og beregninger. Det er nemt, men data følger ikke med til andre enheder, og rydder du browserdata, er de væk – så brug *Indstillinger → Download sikkerhedskopi*. Trin 2–3 ovenfor giver login, synkronisering mellem alle enheder og serverside-backup.
+`SESSION_SECRET` er valgfri (en lang tilfældig streng, fx fra `openssl rand -hex 32`), men uden den logges alle ud, når databasen nulstilles. `PLATFORM=0` slår profilerne fra og kører i stedet ét dashboard med én fælles adgangskode fra `DASHBOARD_PASSWORD`.
+
+Har du allerede brugt siden i browser-tilstand, spørger den, om dine hidtidige aktier skal overføres til databasen. Depoter matches på navn, og aktier der allerede findes i samme depot springes over, så en gentagelse ikke dublerer noget. En kopi bliver liggende i browseren som sikkerhedsnet.
+
+**Uden database virker siden også** – i *browser-tilstand*: dine aktier gemmes kun i din egen browser (localStorage), mens serveren leverer kurser og beregninger. Det er nemt, men data følger ikke med til andre enheder, og rydder du browserdata, er de væk – så brug *Indstillinger → Download sikkerhedskopi*.
 
 Hvert push til `main` deployer automatisk. Bemærk: på Vercel er der ingen baggrunds-opvarmning af kurser, så første visning efter en pause tager 1–2 sekunder. Yahoo kan desuden afvise flere kald fra cloud-IP'er end fra en hjemme-PC; appen viser i så fald seneste kendte kurser tydeligt markeret.
 
-Sådan vælges lageret: findes `KV_REST_API_URL`/`KV_REST_API_TOKEN` (eller `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN`), bruges Redis – ellers JSON-filen i `DATA_DIR`. Det gælder også lokalt og i Docker.
+Sådan vælges lageret, i den rækkefølge: findes `SUPABASE_URL`/`SUPABASE_KEY`, bruges Supabase; ellers `KV_REST_API_URL`/`KV_REST_API_TOKEN` (eller `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN`) → Redis; ellers JSON-filen i `DATA_DIR`. Det gælder også lokalt og i Docker.
+
+## Analyse
+
+Under *Analyse* regnes der på porteføljen som helhed – det kræver købsdatoer, ellers kan tid ikke indgå:
+
+- **Investeret pr. måned**: hvad du i gennemsnit har lagt til side hver måned siden dit første køb.
+- **Afkast pr. år**: vægtet efter hvor længe hver krone har været investeret, så 100.000 kr. i tre år tæller tungere end 10.000 kr. i en måned. Er den vægtede ejertid under et år, står der, at tallet svinger for meget til at bygge på.
+- **Fremskrivning**: bliver du ved med at lægge det samme til side hver måned, og fortsætter væksten, hvad er det så blevet til om 5, 10, 15, 20 eller 30 år? Beløb og vækstprocent kan ændres; er der mindre end et års historik, foreslås 7 % i stedet for dit eget tal. Renter tilskrives månedligt. Det er et regnestykke, ikke en forudsigelse – og skat indgår ikke.
+- **Om din portefølje**: største position, højest og lavest afkast, længst ejede papir, hvor stor en del af værdien der er afkast, hvad porteføljen i snit har tjent om dagen, og hvornår pengene er fordoblet ved samme vækst.
+
+## Profiler
+
+Med en database har hver bruger sin egen profil og sin egen portefølje.
+
+- **Tilmelding kræver en invitationskode.** Den allerførste profil oprettes uden – der er endnu intet at beskytte – og bliver *ejer*. Ejeren får en kode, som står under *Indstillinger → Konto* og kan kopieres eller skiftes ud. Alle senere profiler skal bruge den. Uden kode kan ingen tilmelde sig, selvom de kender adressen.
+- **Log ind.** Med e-mail og adgangskode. Er man ikke logget ind, sendes man til log ind / tilmeld-siden; intet andet er tilgængeligt.
+- **Alle på platformen kan se hinandens porteføljer.** Under *Folk* står alle profiler, og et klik åbner den pågældendes dashboard: aktier, antal, gennemsnitskurs, værdi og afkast – de samme tal, som personen selv ser. Der er ingen anmodning og ingen godkendelse. Adgangen styres ved invitationskoden: er man først inde, er alt åbent.
+- **Kun til at kigge på.** Ruterne til en andens portefølje findes kun som GET, så ingen kan ændre noget hos en anden.
+
+E-mailadresser deles aldrig med andre brugere – de bruges kun til at logge ind og til at finde hinanden.
+
+Vil man ikke dele sin portefølje med de andre, skal man have sin egen installation (eget Vercel-projekt og egen database).
 
 ## Konfiguration
 
@@ -85,12 +111,15 @@ Alle indstillinger er valgfrie miljøvariabler. Læg dem i en `.env`-fil i proje
 | `WARM_CACHE` | `1` | Genhent kurser i baggrunden mens en børs er åben, så siden loader øjeblikkeligt |
 | `YAHOO_MOCK` | `0` | `1` = brug indbyggede testkurser i stedet for Yahoo (til udvikling) |
 | `STORAGE` | *(auto)* | `browser` = tving browser-tilstand (intet login, data i brugerens browser). På Vercel vælges den automatisk, når der ingen database er |
+| `SUPABASE_URL` + `SUPABASE_KEY` | *(tom)* | Supabase-projekt. Når de findes, gemmes data dér. Kræver tabellerne og funktionerne i [`docs/database.md`](docs/database.md) |
 | `KV_REST_API_URL` + `KV_REST_API_TOKEN` | *(tom)* | Upstash Redis (sættes automatisk af Vercel). Når de findes, gemmes data i Redis i stedet for `DATA_DIR` |
+| `PLATFORM` | `1` | Profiler med hver sin portefølje (kræver en database). `0` = ét dashboard med én fælles adgangskode |
+| `PUBLIC_ACCESS` | *(auto)* | Kun uden profiler (`PLATFORM=0`): `1` = ingen login; alle med adressen ser og redigerer den samme portefølje |
 
 ## Sådan virker det
 
 - **Kurser** hentes server-side fra Yahoo Finance' uofficielle endpoints (dem finance.yahoo.com selv bruger). Der er intet officielt API, så det kan i princippet ændre sig. Al Yahoo-kode ligger i `server/yahoo.js`. Kurser kan være op til 15 min. forsinkede.
-- **Beholdninger** gemmes som *antal* + *gns. købskurs* pr. aktie (i aktiens egen valuta) – præcis som din bank viser det. Der er bevidst ikke en fuld handelslog.
+- **Beholdninger** gemmes som *antal* + *gns. købskurs* pr. aktie (i aktiens egen valuta) – præcis som din bank viser det. Der er bevidst ikke en fuld handelslog. En **købsdato** kan skrives ind (valgfri, sættes automatisk ved import fra banken) og bruges til at vise ejertid og afkast pr. år.
 - **Afkast** = kursafkast i forhold til din gns. købskurs, omregnet til basisvalutaen med *dagens* valutakurs. Valutaudsving siden købet indgår ikke. Det står også i dashboardet.
 - **Grafen** beregnes ud fra din nuværende beholdning og historiske lukkekurser (markeret "ca.").
 - **Data** ligger som JSON i `DATA_DIR`. Filen skrives atomisk, og de 5 seneste versioner gemmes i `DATA_DIR/backups/`. Der sendes intet til andre end Yahoo Finance (kun aktiesymboler).
@@ -117,9 +146,11 @@ vercel.json         rewrites + funktionsopsætning til Vercel
 server/
   index.js          start, konfiguration, cache-opvarmning, .env
   app.js            routing, auth, API
-  storage.js        vælger fil- eller Redis-lager ud fra miljøet
+  accounts.js       brugerprofiler, tilmelding og invitationskode
+  storage.js        vælger Supabase-, Redis- eller fil-lager ud fra miljøet
   resolve.js        finder Yahoo-symbol ud fra ISIN eller navn
   store-redis.js    Upstash Redis-lager (REST, compare-and-set, backups)
+  store-supabase.js Supabase-lager (PostgREST, compare-and-set, backups)
   views/            index.html og login.html (serveres kun efter login-tjek)
   yahoo.js          Yahoo Finance-klient med cache
   yahoo-mock.js     falske kurser til udvikling/test

@@ -20,6 +20,8 @@
   <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></symbol>
   <symbol id="i-eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M17.9 17.9A10 10 0 0 1 12 20C5 20 1 12 1 12a18 18 0 0 1 5.1-6M9.9 4.2A9 9 0 0 1 12 4c7 0 11 8 11 8a18 18 0 0 1-2.2 3.2M14.1 14.1a3 3 0 1 1-4.2-4.2M1 1l22 22"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="m7 14 4-4 3 3 5-6"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
   <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></symbol>
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
   <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
@@ -49,6 +51,8 @@
     <nav class="nav">
       <a href="/" data-link data-nav="/"><svg class="icon"><use href="#i-grid"/></svg><span>Overblik</span></a>
       <a href="/beholdninger" data-link data-nav="/beholdninger"><svg class="icon"><use href="#i-list"/></svg><span>Beholdninger</span></a>
+      <a href="/analyse" data-link data-nav="/analyse"><svg class="icon"><use href="#i-spark"/></svg><span>Analyse</span></a>
+      <a href="/folk" data-link data-nav="/folk" class="only-platform"><svg class="icon"><use href="#i-users"/></svg><span>Folk</span></a>
       <a href="/indstillinger" data-link data-nav="/indstillinger"><svg class="icon"><use href="#i-settings"/></svg><span>Indstillinger</span></a>
     </nav>
     <div class="sidebar-footer">
@@ -73,11 +77,14 @@
 
     <main class="content" id="page"></main>
 
+    <!-- Fem pladser er, hvad der er plads til på en telefon. Folk, Indstillinger
+         og de småting, der før lå i toplinjen, samles under "Mere". -->
     <nav class="tabbar" aria-label="Navigation">
       <a href="/" data-link data-nav="/"><svg class="icon"><use href="#i-grid"/></svg>Overblik</a>
-      <a href="/beholdninger" data-link data-nav="/beholdninger"><svg class="icon"><use href="#i-list"/></svg>Beholdninger</a>
+      <a href="/beholdninger" data-link data-nav="/beholdninger"><svg class="icon"><use href="#i-list"/></svg>Aktier</a>
       <button class="tab-add" data-action="add"><svg class="icon"><use href="#i-plus"/></svg>Tilføj</button>
-      <a href="/indstillinger" data-link data-nav="/indstillinger"><svg class="icon"><use href="#i-settings"/></svg>Indstillinger</a>
+      <a href="/analyse" data-link data-nav="/analyse"><svg class="icon"><use href="#i-spark"/></svg>Analyse</a>
+      <button data-action="more" aria-haspopup="dialog"><svg class="icon"><use href="#i-more"/></svg>Mere</button>
     </nav>
   </div>
 </div>
@@ -119,6 +126,11 @@
           </div>
         </div>
         <div class="field">
+          <label for="add-date" id="add-date-label">Købt den <span class="muted">(valgfri)</span></label>
+          <input class="input" id="add-date" type="date" autocomplete="off">
+          <span class="help">Bruges til at vise, hvor længe du har ejet den, og hvad afkastet svarer til pr. år.</span>
+        </div>
+        <div class="field">
           <label for="add-note">Note <span class="muted">(valgfri)</span></label>
           <input class="input" id="add-note" maxlength="200" placeholder="F.eks. Aktiesparekonto">
         </div>
@@ -154,6 +166,23 @@
         <label for="edit-account">Depot</label>
         <select class="input" id="edit-account"></select>
       </div>
+      <div class="field" id="edit-date-field">
+        <label for="edit-date">Købt den <span class="muted">(valgfri)</span></label>
+        <input class="input" id="edit-date" type="date" autocomplete="off">
+        <button type="button" class="btn btn-ghost btn-sm lots-toggle" id="edit-lots-on">Købt ad flere omgange?</button>
+      </div>
+      <div class="lots hidden" id="edit-lots">
+        <div class="lots-head">
+          <h3>Dine køb</h3>
+          <button type="button" class="btn btn-ghost btn-sm" id="edit-lots-off">Brug samlet antal</button>
+        </div>
+        <div class="lot-head-row" aria-hidden="true">
+          <span class="lot-head-date">Dato</span><span>Antal</span><span>Kurs</span><span class="lot-head-spacer"></span>
+        </div>
+        <div id="edit-lot-rows"></div>
+        <button type="button" class="btn btn-sm" id="edit-lot-add">+ Tilføj køb</button>
+        <p class="lots-sum" id="edit-lots-sum"></p>
+      </div>
       <div class="field">
         <label for="edit-note">Note</label>
         <input class="input" id="edit-note" maxlength="200">
@@ -170,6 +199,11 @@
 </dialog>
 
 <!-- Køb til / sælg -->
+<dialog id="dlg-more" class="sheet">
+  <div class="dialog-head"><h2>Mere</h2><button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Luk"><svg class="icon"><use href="#i-x"/></svg></button></div>
+  <div class="dialog-body"><nav class="sheet-nav" id="more-nav" aria-label="Flere handlinger"></nav></div>
+</dialog>
+
 <dialog id="dlg-trade">
   <form method="dialog" id="form-trade" novalidate>
     <div class="dialog-head"><h2 id="dlg-trade-title">Køb til</h2><button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Luk"><svg class="icon"><use href="#i-x"/></svg></button></div>
@@ -187,6 +221,10 @@
           <label for="trade-price">Kurs</label>
           <div class="input-group"><input class="input n" id="trade-price" inputmode="decimal" autocomplete="off"><span class="addon" id="trade-price-addon">DKK</span></div>
         </div>
+      </div>
+      <div class="field" id="trade-date-field">
+        <label for="trade-date">Købsdato <span class="muted">(valgfri)</span></label>
+        <input class="input" id="trade-date" type="date" autocomplete="off">
       </div>
       <div class="form-summary" id="trade-summary"></div>
       <a href="#" id="trade-sell-all" class="small hidden" style="display:inline-block;margin:-6px 0 12px">Sælg alt</a>
@@ -208,7 +246,7 @@
       <div id="import-depots"></div>
       <div class="table-wrap">
         <table class="holdings import-table">
-          <thead><tr><th></th><th>Værdipapir</th><th>Symbol</th><th class="n">Antal</th><th class="n">Gns. købskurs</th><th>Depot</th></tr></thead>
+          <thead><tr><th></th><th>Værdipapir</th><th>Symbol</th><th class="n">Antal</th><th class="n">Gns. købskurs</th><th>Købt den</th><th>Depot</th></tr></thead>
           <tbody id="import-rows"></tbody>
         </table>
       </div>
@@ -249,6 +287,22 @@
     <div class="dialog-foot">
       <button type="button" class="btn" data-close>Annullér</button>
       <button type="submit" class="btn btn-primary">Gem ny adgangskode</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-setup">
+  <form method="dialog" id="form-setup-pw" novalidate>
+    <div class="dialog-head"><h2>Opret adgangskode</h2><button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Luk"><svg class="icon"><use href="#i-x"/></svg></button></div>
+    <div class="dialog-body">
+      <p class="dialog-intro">Din side er lige nu åben: alle der kender adressen, kan se og ændre din portefølje. Opretter du en adgangskode, skal der logges ind – på alle enheder, også denne.</p>
+      <div class="field"><label for="setup-new">Adgangskode</label><input class="input" id="setup-new" type="password" autocomplete="new-password"><span class="help">Mindst 8 tegn. En sætning er nem at huske og svær at gætte.</span></div>
+      <div class="field"><label for="setup-repeat">Gentag adgangskode</label><input class="input" id="setup-repeat" type="password" autocomplete="new-password"></div>
+      <div class="form-error" id="setup-error"></div>
+    </div>
+    <div class="dialog-foot">
+      <button type="button" class="btn" data-close>Annullér</button>
+      <button type="submit" class="btn btn-primary">Opret og luk siden</button>
     </div>
   </form>
 </dialog>

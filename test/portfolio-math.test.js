@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computePortfolio, computeValueHistory, round } from '../server/portfolio-math.js';
+import { computePortfolio, computeValueHistory, firstPurchaseDate, narrowRange, rangeDays, round } from '../server/portfolio-math.js';
 
 const quote = (symbol, currency, price, change, extra = {}) => ({
   ok: true,
@@ -133,14 +133,15 @@ test('computeValueHistory: summerer på tværs af serier med forward fill', () =
     },
     fxRates: { DKK: { ok: true, rate: 1 }, USD: { ok: true, rate: 7 } },
   });
-  assert.deepEqual(history, [
-    { date: '2026-01-01', value: 2 * 10 + 100 * 7 },
-    { date: '2026-01-02', value: 2 * 11 + 100 * 7 },
-    { date: '2026-01-03', value: 2 * 12 + 110 * 7 },
+  assert.deepEqual(history.points, [
+    { date: '2026-01-01', value: 2 * 10 + 100 * 7, invested: 0 },
+    { date: '2026-01-02', value: 2 * 11 + 100 * 7, invested: 0 },
+    { date: '2026-01-03', value: 2 * 12 + 110 * 7, invested: 0 },
   ]);
+  assert.deepEqual(history.backfilled, [], 'begge serier starter samme dag');
 });
 
-test('computeValueHistory: dage før alle serier har data udelades', () => {
+test('computeValueHistory: en kortere serie regnes med til sin første kurs', () => {
   const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
   const history = computeValueHistory({
     holdings: [{ symbol: 'A', quantity: 1 }, { symbol: 'B', quantity: 1 }],
@@ -150,7 +151,13 @@ test('computeValueHistory: dage før alle serier har data udelades', () => {
     },
     fxRates: { DKK: { ok: true, rate: 1 } },
   });
-  assert.deepEqual(history, [{ date: '2026-01-02', value: 16 }]);
+  // B begynder først dag 2. Dag 1 regnes med B's første kurs (5), så hele
+  // perioden kan tegnes i stedet for at blive skåret af.
+  assert.deepEqual(history.points, [
+    { date: '2026-01-01', value: 10 + 5, invested: 0 },
+    { date: '2026-01-02', value: 11 + 5, invested: 0 },
+  ]);
+  assert.deepEqual(history.backfilled, [{ symbol: 'B', from: '2026-01-02' }], 'det fortælles hvem der blev fyldt bagud');
 });
 
 test('round', () => {
@@ -205,5 +212,345 @@ test('computeValueHistory: rækkefølge af beholdninger påvirker ikke resultate
   const ab = computeValueHistory({ holdings: [{ symbol: 'A', quantity: 1 }, { symbol: 'B', quantity: 1 }], histories, fxRates: fx });
   const ba = computeValueHistory({ holdings: [{ symbol: 'B', quantity: 1 }, { symbol: 'A', quantity: 1 }], histories, fxRates: fx });
   assert.deepEqual(ab, ba);
-  assert.deepEqual(ab, [{ date: '2026-01-02', value: 15 }, { date: '2026-01-03', value: 17 }]);
+  assert.deepEqual(ab.points, [
+    { date: '2026-01-01', value: 10 + 5, invested: 0 }, // A fyldt bagud med sin første kurs
+    { date: '2026-01-02', value: 10 + 5, invested: 0 },
+    { date: '2026-01-03', value: 11 + 6, invested: 0 },
+  ]);
+});
+
+test('computeValueHistory: hver dag omregnes med sin egen valutakurs', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const fælles = {
+    holdings: [{ symbol: 'A', quantity: 10 }],
+    histories: { A: { currency: 'USD', points: [{ t: day(1), close: 100 }, { t: day(2), close: 100 }, { t: day(3), close: 100 }] } },
+    fxRates: { USD: { ok: true, rate: 7 } },
+  };
+
+  // Uden historik bruges dagens kurs hele vejen: kursen står stille, så værdien gør også.
+  const fast = computeValueHistory(fælles);
+  assert.deepEqual(fast.points.map((p) => p.value), [7000, 7000, 7000]);
+
+  // Med historik følger værdien valutaen, selv om aktiekursen står stille.
+  const historisk = computeValueHistory({
+    ...fælles,
+    fxHistories: { USD: { ok: true, points: [{ t: day(1), rate: 6 }, { t: day(2), rate: 7 }, { t: day(3), rate: 8 }] } },
+  });
+  assert.deepEqual(historisk.points.map((p) => p.value), [6000, 7000, 8000]);
+
+  // Mangler en dag i valutaserien, bruges seneste kendte kurs.
+  const huller = computeValueHistory({
+    ...fælles,
+    fxHistories: { USD: { ok: true, points: [{ t: day(1), rate: 6 }, { t: day(3), rate: 8 }] } },
+  });
+  assert.deepEqual(huller.points.map((p) => p.value), [6000, 6000, 8000]);
+
+  // Fejler valutaserien, falder den tilbage til dagens kurs i stedet for at fejle.
+  const fejlet = computeValueHistory({ ...fælles, fxHistories: { USD: { ok: false, error: { message: 'nede' } } } });
+  assert.deepEqual(fejlet.points.map((p) => p.value), [7000, 7000, 7000]);
+});
+
+test('computeValueHistory: kurven starter ved første køb, ikke ved periodens start', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [{ symbol: 'A', quantity: 2, purchasedAt: '2026-01-03' }],
+    histories: {
+      A: { currency: 'DKK', points: [{ t: day(1), close: 10 }, { t: day(2), close: 11 }, { t: day(3), close: 12 }, { t: day(4), close: 13 }] },
+    },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  assert.deepEqual(history.points, [
+    { date: '2026-01-03', value: 24, invested: 0 },
+    { date: '2026-01-04', value: 26, invested: 0 },
+  ], 'de to dage før købet hører ikke til');
+  assert.equal(history.ownedFrom, '2026-01-03');
+});
+
+test('computeValueHistory: uden købsdato klippes der ikke – vi ved ikke hvornår det begyndte', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [{ symbol: 'A', quantity: 1, purchasedAt: '2026-01-03' }, { symbol: 'B', quantity: 1 }],
+    histories: {
+      A: { currency: 'DKK', points: [{ t: day(1), close: 10 }, { t: day(3), close: 12 }] },
+      B: { currency: 'DKK', points: [{ t: day(1), close: 5 }, { t: day(3), close: 6 }] },
+    },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  assert.equal(history.points.length, 2);
+  assert.equal(history.points[0].date, '2026-01-01');
+  assert.equal(history.ownedFrom, null);
+});
+
+test('computeValueHistory: ældste køb bestemmer starten, ikke det nyeste', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [{ symbol: 'A', quantity: 1, purchasedAt: '2026-01-02' }, { symbol: 'B', quantity: 1, purchasedAt: '2026-01-04' }],
+    histories: {
+      A: { currency: 'DKK', points: [{ t: day(1), close: 10 }, { t: day(2), close: 11 }, { t: day(4), close: 12 }] },
+      B: { currency: 'DKK', points: [{ t: day(1), close: 5 }, { t: day(2), close: 5 }, { t: day(4), close: 6 }] },
+    },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  assert.equal(history.points[0].date, '2026-01-02');
+  assert.equal(history.ownedFrom, '2026-01-02');
+});
+
+test('computeValueHistory: er alt købt i dag, står grafen ikke tom', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [{ symbol: 'A', quantity: 1, purchasedAt: '2030-01-01' }],
+    histories: { A: { currency: 'DKK', points: [{ t: day(1), close: 10 }, { t: day(2), close: 11 }, { t: day(3), close: 12 }] } },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  assert.equal(history.points.length, 2, 'de sidste to dage beholdes');
+  assert.equal(history.points[1].date, '2026-01-03');
+});
+
+test('computeValueHistory: bagudfyldning måles mod kurvens start, ikke periodens', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [{ symbol: 'A', quantity: 1, purchasedAt: '2026-01-03' }, { symbol: 'B', quantity: 1, purchasedAt: '2026-01-03' }],
+    histories: {
+      A: { currency: 'DKK', points: [{ t: day(1), close: 10 }, { t: day(3), close: 12 }, { t: day(4), close: 13 }] },
+      // B's kurser begynder dag 2 – men kurven begynder dag 3, så gættet ses ikke.
+      B: { currency: 'DKK', points: [{ t: day(2), close: 5 }, { t: day(3), close: 6 }, { t: day(4), close: 7 }] },
+    },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  assert.deepEqual(history.backfilled, [], 'B dækker hele den viste periode');
+});
+
+test('narrowRange: en kort ejertid henter ikke ugebarer', () => {
+  const nu = Date.parse('2026-09-11T10:00:00Z');
+  // Købt for en måned siden: alle længere perioder snævres ind til 1mo, så
+  // Yahoo svarer med dagsbarer i stedet for uger.
+  for (const r of ['3mo', '6mo', 'ytd', '1y', '5y', 'max']) {
+    assert.equal(narrowRange(r, '2026-08-13', nu), '1mo', `${r} skulle blive til 1mo`);
+  }
+  // 1M er allerede kortest – den skal stå.
+  assert.equal(narrowRange('1mo', '2026-08-13', nu), '1mo');
+});
+
+test('narrowRange: en lang ejertid henter som der blev bedt om', () => {
+  const nu = Date.parse('2026-09-11T10:00:00Z');
+  for (const r of ['1mo', '3mo', '6mo', 'ytd', '1y', '5y', 'max']) {
+    assert.equal(narrowRange(r, '2021-01-01', nu), r);
+  }
+});
+
+test('narrowRange: uden købsdato røres perioden ikke', () => {
+  const nu = Date.parse('2026-09-11T10:00:00Z');
+  assert.equal(narrowRange('max', null, nu), 'max');
+  assert.equal(narrowRange('1y', '', nu), '1y');
+});
+
+test('narrowRange: ejet i over fem år henter stadig hele historikken', () => {
+  const nu = Date.parse('2026-09-11T10:00:00Z');
+  assert.equal(narrowRange('max', '2010-01-01', nu), 'max');
+  assert.equal(narrowRange('5y', '2010-01-01', nu), '5y');
+});
+
+test('rangeDays: ÅTD måles fra nytår, max er uendelig', () => {
+  const nu = Date.parse('2026-09-11T10:00:00Z');
+  assert.equal(rangeDays('ytd', nu), 254);
+  assert.equal(rangeDays('max', nu), Infinity);
+  assert.equal(rangeDays('6mo', nu), 186);
+});
+
+test('firstPurchaseDate: ældste dato, men kun når alle har en', () => {
+  assert.equal(firstPurchaseDate([{ purchasedAt: '2024-05-01' }, { purchasedAt: '2023-01-09' }]), '2023-01-09');
+  assert.equal(firstPurchaseDate([{ purchasedAt: '2024-05-01' }, { purchasedAt: null }]), null);
+  assert.equal(firstPurchaseDate([]), null);
+});
+
+test('computeValueHistory: et køb midt i perioden giver et hop, ikke antal fra dag ét', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [{
+      symbol: 'A',
+      quantity: 30,
+      purchasedAt: '2026-01-02',
+      lots: [
+        { date: '2026-01-02', quantity: 10, price: 100 },
+        { date: '2026-01-04', quantity: 20, price: 100 },
+      ],
+    }],
+    histories: { A: { currency: 'DKK', points: [{ t: day(1), close: 100 }, { t: day(2), close: 100 }, { t: day(3), close: 100 }, { t: day(4), close: 100 }, { t: day(5), close: 100 }] } },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  assert.deepEqual(history.points, [
+    { date: '2026-01-02', value: 1000, invested: 1000 },
+    { date: '2026-01-03', value: 1000, invested: 1000 },
+    { date: '2026-01-04', value: 3000, invested: 3000 },
+    { date: '2026-01-05', value: 3000, invested: 3000 },
+  ], 'de 20 ekstra må først tælle med fra 4. januar');
+});
+
+test('computeValueHistory: kursændring før næste køb rammer kun det, man allerede ejede', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [{
+      symbol: 'A',
+      quantity: 30,
+      purchasedAt: '2026-01-01',
+      lots: [
+        { date: '2026-01-01', quantity: 10, price: 100 },
+        { date: '2026-01-03', quantity: 20, price: 110 },
+      ],
+    }],
+    histories: { A: { currency: 'DKK', points: [{ t: day(1), close: 100 }, { t: day(2), close: 110 }, { t: day(3), close: 110 }] } },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  // Dag 2: kun de 10 første er med, så +10 pr. stk. er 100 kr. – ikke 300.
+  assert.deepEqual(history.points, [
+    { date: '2026-01-01', value: 1000, invested: 1000 },
+    { date: '2026-01-02', value: 1100, invested: 1000 },
+    { date: '2026-01-03', value: 3300, invested: 1000 + 2200 },
+  ]);
+});
+
+test('computeValueHistory: uden købsdato tæller hele beholdningen med hele vejen', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [{ symbol: 'A', quantity: 10, avgPrice: 50 }],
+    histories: { A: { currency: 'DKK', points: [{ t: day(1), close: 100 }, { t: day(2), close: 101 }] } },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  assert.deepEqual(history.points, [
+    { date: '2026-01-01', value: 1000, invested: 500 },
+    { date: '2026-01-02', value: 1010, invested: 500 },
+  ]);
+});
+
+test('computeValueHistory: et køb uden kurs tæller i antallet, men ikke i det investerede', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [{
+      symbol: 'A',
+      quantity: 20,
+      lots: [
+        { date: '2026-01-01', quantity: 10, price: 100 },
+        { date: '2026-01-01', quantity: 10, price: null },
+      ],
+    }],
+    histories: { A: { currency: 'DKK', points: [{ t: day(1), close: 100 }] } },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  assert.equal(history.points[0].value, 2000, 'begge portioner ejes');
+  assert.equal(history.points[0].invested, 1000, 'kun det, vi kender kursen på');
+});
+
+test('computeValueHistory: det investerede følger med i en anden valuta', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [{ symbol: 'A', quantity: 10, avgPrice: 20, purchasedAt: '2026-01-01' }],
+    histories: { A: { currency: 'USD', points: [{ t: day(1), close: 25 }] } },
+    fxRates: { USD: { ok: true, rate: 7 } },
+  });
+  assert.equal(history.points[0].value, 10 * 25 * 7);
+  assert.equal(history.points[0].invested, 10 * 20 * 7);
+});
+
+test('computeValueHistory: køb samme dag samles i én begivenhed', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [
+      { symbol: 'A', quantity: 10, lots: [{ date: '2026-01-02', quantity: 10, price: 100 }] },
+      { symbol: 'B', quantity: 5, name: 'Bravo Fonden', lots: [{ date: '2026-01-02', quantity: 5, price: 200 }] },
+    ],
+    histories: {
+      A: { currency: 'DKK', points: [{ t: day(1), close: 100 }, { t: day(2), close: 100 }] },
+      B: { currency: 'DKK', points: [{ t: day(1), close: 200 }, { t: day(2), close: 200 }] },
+    },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  assert.equal(history.events.length, 1, 'to køb samme dag er ét punkt på kurven');
+  const ev = history.events[0];
+  assert.equal(ev.date, '2026-01-02');
+  assert.equal(ev.items.length, 2);
+  assert.equal(ev.amountBase, 10 * 100 + 5 * 200);
+  const b = ev.items.find((i) => i.symbol === 'B');
+  assert.equal(b.name, 'Bravo Fonden', 'navnet skal med, ikke kun symbolet');
+  assert.equal(b.quantity, 5);
+  assert.equal(b.price, 200);
+});
+
+test('computeValueHistory: begivenheder i fremmed valuta regnes også om', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [{ symbol: 'A', quantity: 10, lots: [{ date: '2026-01-01', quantity: 10, price: 20 }] }],
+    histories: { A: { currency: 'USD', points: [{ t: day(1), close: 25 }] } },
+    fxRates: { USD: { ok: true, rate: 7 } },
+  });
+  const i = history.events[0].items[0];
+  assert.equal(i.currency, 'USD');
+  assert.equal(i.amount, 200, 'det man betalte, i papirets egen valuta');
+  assert.equal(i.amountBase, 1400);
+});
+
+test('computeValueHistory: begivenheder uden for den viste periode tages ikke med', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [{
+      symbol: 'A',
+      quantity: 20,
+      lots: [
+        { date: '2020-05-05', quantity: 10, price: 50 },
+        { date: '2026-01-02', quantity: 10, price: 100 },
+      ],
+    }],
+    histories: { A: { currency: 'DKK', points: [{ t: day(1), close: 100 }, { t: day(2), close: 100 }, { t: day(3), close: 100 }] } },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  // Købet i 2020 ligger før kurvens første dag og hører ikke til her.
+  assert.deepEqual(history.events.map((e) => e.date), ['2026-01-02']);
+});
+
+test('computeValueHistory: uden købsdato er der ingen begivenheder at vise', () => {
+  const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
+  const history = computeValueHistory({
+    holdings: [{ symbol: 'A', quantity: 10, avgPrice: 50 }],
+    histories: { A: { currency: 'DKK', points: [{ t: day(1), close: 100 }, { t: day(2), close: 100 }] } },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  assert.deepEqual(history.events, []);
+});
+
+test('computeValueHistory: over 80 købsdage udelades markørerne', () => {
+  const start = Date.parse('2024-01-01T08:00:00Z');
+  const lots = [];
+  const points = [];
+  for (let i = 0; i < 90; i++) {
+    const d = new Date(start + i * 86_400_000).toISOString().slice(0, 10);
+    lots.push({ date: d, quantity: 1, price: 100 });
+    points.push({ t: start + i * 86_400_000, close: 100 });
+  }
+  const history = computeValueHistory({
+    holdings: [{ symbol: 'A', quantity: 90, lots }],
+    histories: { A: { currency: 'DKK', points } },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  assert.deepEqual(history.events, [], '90 prikker ville være støj');
+  assert.equal(history.points.length, 90, 'kurven er der stadig');
+});
+
+test('computeValueHistory: et køb i en weekend mister ikke sin markør', () => {
+  // Lørdag 3. januar 2026 er der ingen børsdag; kurven begynder mandag 5.
+  const history = computeValueHistory({
+    holdings: [{ symbol: 'A', quantity: 10, purchasedAt: '2026-01-03', lots: [{ date: '2026-01-03', quantity: 10, price: 100 }] }],
+    histories: {
+      A: {
+        currency: 'DKK',
+        points: [
+          { t: Date.parse('2026-01-01T08:00:00Z') },
+          { t: Date.parse('2026-01-02T08:00:00Z') },
+          { t: Date.parse('2026-01-05T08:00:00Z') },
+          { t: Date.parse('2026-01-06T08:00:00Z') },
+        ].map((p) => ({ ...p, close: 100 })),
+      },
+    },
+    fxRates: { DKK: { ok: true, rate: 1 } },
+  });
+  assert.equal(history.points[0].date, '2026-01-05', 'kurven begynder først, når børsen gør');
+  assert.deepEqual(history.events.map((e) => e.date), ['2026-01-03'], 'købet skal stadig kunne ses');
 });

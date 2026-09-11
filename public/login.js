@@ -3,7 +3,11 @@
   const $ = (id) => document.getElementById(id);
   const formLogin = $('form-login');
   const formSetup = $('form-setup');
+  const formPlatformLogin = $('form-platform-login');
+  const formSignup = $('form-signup');
+  const tabs = $('auth-tabs');
   const loading = $('login-loading');
+  const forms = [formLogin, formSetup, formPlatformLogin, formSignup];
 
   function nextUrl() {
     const next = new URLSearchParams(location.search).get('next') || '/';
@@ -36,8 +40,12 @@
 
   function show(form) {
     loading.classList.add('hidden');
-    formLogin.classList.toggle('hidden', form !== formLogin);
-    formSetup.classList.toggle('hidden', form !== formSetup);
+    for (const f of forms) f.classList.toggle('hidden', f !== form);
+    for (const tab of tabs.querySelectorAll('.auth-tab')) {
+      const active = (tab.dataset.tab === 'signup') === (form === formSignup);
+      tab.classList.toggle('is-active', active);
+      tab.setAttribute('aria-selected', String(active));
+    }
     const first = form.querySelector('input');
     if (first) first.focus();
   }
@@ -51,12 +59,79 @@
     try {
       const status = await api('/api/auth/status');
       if (status.authenticated) return location.replace(nextUrl());
+      if (status.access === 'platform') return initPlatform(status);
+      tabs.classList.add('hidden');
       $('setup-token-field').classList.toggle('hidden', !status.setupTokenRequired);
       show(status.setupRequired ? formSetup : formLogin);
     } catch (err) {
       loading.textContent = 'Kunne ikke kontakte serveren. Prøv at genindlæse siden.';
     }
   }
+
+  // Den allerførste profil er den, der opretter platformen: ingen kode, og
+  // vedkommende bliver ejer og får en invitationskode at dele ud af.
+  function initPlatform(status) {
+    const first = Boolean(status.firstProfile);
+    $('su-invite-field').classList.toggle('hidden', first);
+    if (first) {
+      $('signup-title').textContent = 'Velkommen 👋';
+      $('signup-intro').textContent = 'Der er ingen profiler endnu. Opret den første, så er siden din.';
+      tabs.classList.add('hidden');
+      return show(formSignup);
+    }
+    tabs.classList.remove('hidden');
+    show(new URLSearchParams(location.search).has('opret') ? formSignup : formPlatformLogin);
+  }
+
+  tabs.addEventListener('click', (e) => {
+    const tab = e.target.closest('.auth-tab');
+    if (tab) show(tab.dataset.tab === 'signup' ? formSignup : formPlatformLogin);
+  });
+
+  formPlatformLogin.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const error = $('pl-error');
+    const button = $('pl-submit');
+    error.textContent = '';
+    const email = $('pl-email').value.trim();
+    const password = $('pl-password').value;
+    if (!email || !password) { error.textContent = 'Udfyld både e-mail og adgangskode.'; return; }
+    setBusy(button, true, 'Log ind');
+    try {
+      await api('/api/auth/login', { email, password, remember: $('pl-remember').checked });
+      location.replace(nextUrl());
+    } catch (err) {
+      error.textContent = err.message;
+      $('pl-password').select();
+      if (err.status === 429 && err.retryAfter) startCountdown(button, err.retryAfter, 'Log ind');
+    } finally {
+      if (!countdownTimer) setBusy(button, false, 'Log ind');
+    }
+  });
+
+  formSignup.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const error = $('su-error');
+    const button = $('su-submit');
+    error.textContent = '';
+    const name = $('su-name').value.trim();
+    const email = $('su-email').value.trim();
+    const password = $('su-password').value;
+    const inviteCode = $('su-invite-field').classList.contains('hidden') ? undefined : $('su-invite').value.trim().toUpperCase();
+    if (!name) { error.textContent = 'Skriv dit navn.'; return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { error.textContent = 'Skriv en gyldig e-mailadresse.'; return; }
+    if (password.length < 8) { error.textContent = 'Adgangskoden skal være mindst 8 tegn.'; return; }
+    if (inviteCode !== undefined && !inviteCode) { error.textContent = 'Skriv invitationskoden, du har fået.'; return; }
+    setBusy(button, true, 'Opret profil');
+    try {
+      await api('/api/auth/signup', { name, email, password, inviteCode });
+      location.replace('/');
+    } catch (err) {
+      error.textContent = err.message;
+    } finally {
+      setBusy(button, false, 'Opret profil');
+    }
+  });
 
   formLogin.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -79,15 +154,14 @@
   });
 
   let countdownTimer = null;
-  function startCountdown(button, seconds) {
+  function startCountdown(button, seconds, label = 'Log ind') {
     clearInterval(countdownTimer);
     let left = seconds;
     const tick = () => {
       if (left <= 0) {
         clearInterval(countdownTimer);
         countdownTimer = null;
-        setBusy(button, false, 'Log ind');
-        $('login-error').textContent = '';
+        setBusy(button, false, label);
         return;
       }
       button.disabled = true;

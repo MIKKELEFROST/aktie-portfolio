@@ -82,9 +82,50 @@ class JsonFile {
 export function createStore(dataDir, { baseCurrency = 'DKK' } = {}) {
   const portfolioFile = new JsonFile(path.join(dataDir, 'portfolio.json'), () => defaultPortfolio(baseCurrency), { backups: 5 });
   const authFile = new JsonFile(path.join(dataDir, 'auth.json'), () => ({ passwordHash: null, sessionSecret: null }));
+  // Én portefølje-fil pr. bruger, plus delte dokumenter (brugere, følge-relationer).
+  const userFiles = new Map();
+  const docFiles = new Map();
+
+  const portfolioOf = (userId) => {
+    const key = String(userId);
+    if (!userFiles.has(key)) {
+      userFiles.set(key, new JsonFile(path.join(dataDir, 'portfolios', `${safeName(key)}.json`), () => defaultPortfolio(baseCurrency), { backups: 5 }));
+    }
+    return userFiles.get(key);
+  };
+
+  const docOf = (name, defaults) => {
+    if (!docFiles.has(name)) docFiles.set(name, new JsonFile(path.join(dataDir, `${safeName(name)}.json`), defaults, { backups: 3 }));
+    return docFiles.get(name);
+  };
 
   return {
     dataDir,
+
+    async getUserPortfolio(userId) {
+      return migrate(await portfolioOf(userId).load(), baseCurrency);
+    },
+
+    updateUserPortfolio(userId, fn) {
+      return portfolioOf(userId).update(async (draft) => {
+        const migrated = migrate(draft, baseCurrency);
+        const result = await fn(migrated);
+        return result === undefined ? migrated : result;
+      });
+    },
+
+    async deleteUserPortfolio(userId) {
+      const file = portfolioOf(userId);
+      await file.update(() => defaultPortfolio(baseCurrency));
+    },
+
+    async getDoc(name, defaults) {
+      return docOf(name, defaults).load();
+    },
+
+    updateDoc(name, defaults, fn) {
+      return docOf(name, defaults).update(fn);
+    },
 
     async getPortfolio() {
       const data = await portfolioFile.load();
@@ -124,12 +165,18 @@ export function newId() {
   return randomUUID();
 }
 
+// Nøgler bliver til filnavne, så alt uden for [a-z0-9-_] erstattes.
+export function safeName(name) {
+  return String(name).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80) || 'x';
+}
+
 // Fremtidssikring: opgraderer ældre datafiler til nuværende form.
 export function migrate(data, baseCurrency) {
   if (!data || typeof data !== 'object') return defaultPortfolio(baseCurrency);
   if (!data.settings || typeof data.settings !== 'object') data.settings = {};
   if (!data.settings.baseCurrency) data.settings.baseCurrency = baseCurrency;
   if (!Array.isArray(data.holdings)) data.holdings = [];
+  delete data.watchlist; // ønskelisten er fjernet igen; gamle data ryddes op
   if (!Array.isArray(data.settings.accounts)) data.settings.accounts = [];
   for (const h of data.holdings) if (h && h.accountId === undefined) h.accountId = null;
   data.version = DATA_VERSION;

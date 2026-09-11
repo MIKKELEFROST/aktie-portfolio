@@ -124,7 +124,7 @@ a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
-h1 { font-size: 22px; }
+h1 { font-size: clamp(20px, 5.2vw, 22px); }
 h2 { font-size: 15px; }
 h3 { font-size: 14px; }
 p { margin: 0; }
@@ -154,13 +154,14 @@ body.private .amount { filter: blur(7px); user-select: none; transition: filter 
 
 .app { display: flex; min-height: 100vh; }
 
+/* Mobil er udgangspunktet: sidebjælken findes først, når der er plads til den. */
 .sidebar {
+  display: none;
   position: fixed;
   inset: 0 auto 0 0;
   width: var(--sidebar-w);
   background: var(--sidebar-bg);
   color: var(--sidebar-text);
-  display: flex;
   flex-direction: column;
   padding: 20px 14px;
   gap: 8px;
@@ -200,15 +201,51 @@ body.private .amount { filter: blur(7px); user-select: none; transition: filter 
 .sidebar-footer .nav a { font-size: 13px; }
 .sidebar-status { padding: 6px 10px; font-size: 11px; color: var(--sidebar-text); opacity: 0.75; line-height: 1.4; }
 
-.main { flex: 1; margin-left: var(--sidebar-w); min-width: 0; }
-.content { max-width: 1280px; margin: 0 auto; padding: 28px 28px 80px; }
+.main { flex: 1; margin-left: 0; min-width: 0; }
+.content {
+  max-width: 1280px; margin: 0 auto;
+  /* Sidepolstring følger skærmen og respekterer hak/afrundede hjørner. */
+  padding: 14px max(14px, env(safe-area-inset-left)) calc(var(--tabbar-h) + 28px) max(14px, env(safe-area-inset-right));
+}
 
-.topbar { display: none; }
-.tabbar { display: none; }
+/* Toplinje og fanebjælke: telefonens navigation. */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  position: sticky; top: 0; z-index: 20; height: var(--topbar-h);
+  background: var(--sidebar-bg); color: var(--sidebar-text-strong);
+  padding: 0 max(12px, env(safe-area-inset-left)) 0 max(12px, env(safe-area-inset-right));
+}
+.topbar .brand { border: none; padding: 0; margin: 0; }
+.topbar .btn-ghost { color: var(--sidebar-text); }
+
+.tabbar {
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+  min-height: var(--tabbar-h);
+  background: var(--surface); border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.tabbar a, .tabbar button {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  min-height: var(--tabbar-h); padding: 6px 2px;
+  font-size: 10px; line-height: 1.1; text-align: center;
+  color: var(--muted); border: none; background: transparent;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+/* "Mere" er en knap, ikke et link – begge skal kunne være den aktive fane. */
+.tabbar a.active, .tabbar button.active { color: var(--accent); }
+.tabbar a.active svg, .tabbar button.active svg { transform: translateY(-1px); }
+.tabbar .tab-add .icon {
+  width: 38px; height: 38px; padding: 9px; border-radius: 50%;
+  background: var(--accent); color: #fff; margin-top: -16px;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.4);
+}
+/* Fem pladser, så hvert navn kan stå der helt. */
 
 /* ---------- sidehoved ---------- */
 
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
 .page-header .sub { color: var(--muted); font-size: 13px; margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .page-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
@@ -244,15 +281,18 @@ body.private .amount { filter: blur(7px); user-select: none; transition: filter 
 
 .card {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 18px 20px; min-width: 0;
+  padding: 14px 16px; min-width: 0;
 }
+@media (min-width: 768px) { .card { padding: 18px 20px; } }
 .card-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .card-header h2 { display: flex; align-items: center; gap: 8px; }
 .card-header .hint { font-size: 12px; color: var(--muted); }
 
-.grid { display: grid; gap: 16px; }
-.grid-kpi { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 16px; }
-.grid-2 { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); margin-bottom: 16px; }
+.grid { display: grid; gap: 12px; }
+/* Nøgletal: det vigtigste fylder hele bredden på en telefon, resten deles to og to. */
+.grid-kpi { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 12px; }
+.grid-kpi .kpi-hero { grid-column: 1 / -1; }
+.grid-2 { grid-template-columns: minmax(0, 1fr); margin-bottom: 12px; }
 .grid > * { min-width: 0; }
 .stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .stack > * { min-width: 0; }
@@ -260,8 +300,8 @@ body.private .amount { filter: blur(7px); user-select: none; transition: filter 
 /* KPI */
 .kpi { padding: 16px 20px; }
 .kpi-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }
-.kpi-value { font-size: 26px; font-weight: 600; margin-top: 6px; letter-spacing: -0.02em; line-height: 1.2; }
-.kpi-hero .kpi-value { font-size: 32px; }
+.kpi-value { font-size: clamp(19px, 5vw, 26px); font-weight: 600; margin-top: 6px; letter-spacing: -0.02em; line-height: 1.2; }
+.kpi-hero .kpi-value { font-size: clamp(28px, 8.5vw, 32px); }
 .kpi-sub { margin-top: 6px; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pill {
   display: inline-flex; align-items: center; gap: 3px;
@@ -286,8 +326,8 @@ body.private .amount { filter: blur(7px); user-select: none; transition: filter 
 
 /* ---------- tabel ---------- */
 
-.table-wrap { overflow-x: auto; margin: 0 -20px -18px; padding: 0 20px; border-radius: 0 0 var(--radius) var(--radius); }
-table.holdings { width: 100%; border-collapse: collapse; font-size: 13px; }
+.table-wrap { overflow-x: auto; margin: 0 -16px -14px; padding: 0 16px; border-radius: 0 0 var(--radius) var(--radius); }
+table.holdings { display: none; width: 100%; border-collapse: collapse; font-size: 13px; }
 table.holdings th, table.holdings td { padding: 10px 10px; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--border); white-space: nowrap; }
 table.holdings th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--surface); z-index: 1; }
 table.holdings th.n, table.holdings td.n { text-align: right; }
@@ -299,6 +339,7 @@ table.holdings tbody tr { cursor: pointer; }
 table.holdings tbody tr:hover { background: var(--surface-2); }
 table.holdings tbody tr.error-row { opacity: 0.85; }
 table.holdings tfoot td { font-weight: 600; border-bottom: none; border-top: 2px solid var(--border-strong); background: var(--surface); }
+table.holdings .col-avg, table.holdings .col-share { display: none; }
 table.holdings td:first-child, table.holdings th:first-child { padding-left: 4px; }
 table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px; }
 
@@ -328,7 +369,25 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 .row-actions .btn { padding: 5px 7px; }
 
 /* Mobil-kort til beholdningsliste */
-.holding-cards { display: none; }
+.holding-cards { display: flex; flex-direction: column; }
+/* Ét kort pr. aktie på telefonen. To spalter: navn til venstre, tal til højre,
+   og begge sider klipper af i stedet for at knække et enkelt ord ned på ny linje. */
+.hcard {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px;
+  padding: 13px 0; border-bottom: 1px solid var(--border); cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.hcard:last-child { border-bottom: none; }
+.hcard:active { background: var(--surface-2); }
+.hcard .l1 { font-weight: 600; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.hcard .l1, .hcard .l2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hcard .l2 { font-size: 12px; color: var(--muted); }
+.hcard .r1 { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hcard .r2 { text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hcard .l3, .hcard .r3 { font-size: 12px; color: var(--muted); min-width: 0; }
+.hcard .l3 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hcard .r3 { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hcard-total { display: flex; justify-content: space-between; padding: 13px 0 4px; font-weight: 600; border-top: 2px solid var(--border-strong); }
 
 /* Tom tilstand */
 .empty { text-align: center; padding: 40px 20px; color: var(--muted); }
@@ -344,7 +403,7 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 
 .alloc-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--border); margin: 6px 0 12px; }
 .alloc-bar span { display: block; height: 100%; min-width: 2px; }
-.alloc-legend { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 14px; font-size: 12px; }
+.alloc-legend { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px 14px; font-size: 12px; }
 .alloc-legend li { display: flex; align-items: center; gap: 7px; list-style: none; min-width: 0; }
 .alloc-legend ul, ul.alloc-legend { margin: 0; padding: 0; }
 .alloc-legend .swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
@@ -354,7 +413,7 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 
 /* ---------- bevægelser ---------- */
 
-.movers { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.movers { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 .movers h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-bottom: 8px; }
 .movers ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .movers li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
@@ -369,15 +428,25 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 .range-pills { display: flex; gap: 2px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 2px; }
 .range-pills button { border: none; background: transparent; padding: 3px 9px; border-radius: 6px; font-size: 12px; font-weight: 500; color: var(--muted); }
 .range-pills button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
-.chart-box { position: relative; height: 240px; min-width: 0; }
+.chart-box { position: relative; height: clamp(200px, 42vw, 260px); min-width: 0; }
 .chart-box svg { width: 100%; height: 100%; display: block; overflow: visible; }
 .chart-box .chart-msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; text-align: center; padding: 20px; }
 .chart-tip {
   position: absolute; pointer-events: none; transform: translate(-50%, -100%);
-  background: var(--text); color: var(--bg); padding: 6px 9px; border-radius: 6px; font-size: 12px; white-space: nowrap;
+  background: var(--text); color: var(--bg); padding: 6px 9px; border-radius: 6px; font-size: 12px;
   box-shadow: var(--shadow); z-index: 2;
+  /* Købslinjer kan være lange (fondsnavne), så tippet må bryde og have en bredde. */
+  max-width: min(270px, 78vw); white-space: normal;
 }
 .chart-tip b { display: block; font-size: 13px; }
+.tip-event {
+  display: block; margin-top: 5px; padding-top: 5px; line-height: 1.35;
+  border-top: 1px solid color-mix(in srgb, currentColor 28%, transparent);
+}
+.chart-legend i.dot {
+  width: 9px; height: 9px; border: 2px solid var(--chart-line); border-radius: 50%;
+  background: var(--surface); vertical-align: middle;
+}
 .chart-legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 8px; flex-wrap: wrap; }
 .chart-legend i { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--chart-line); vertical-align: middle; margin-right: 5px; }
 .chart-legend i.dashed { border-top-style: dashed; border-color: var(--chart-invested); }
@@ -398,12 +467,44 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 .input-group { display: flex; align-items: stretch; }
 .input-group .input { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
 .input-group .addon { display: flex; align-items: center; padding: 0 11px; border: 1px solid var(--border-strong); border-left: none; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; background: var(--surface-2); color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
-.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.field-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.dialog-intro { margin: 0 0 16px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .form-error { color: var(--neg); font-size: 13px; margin: -6px 0 12px; min-height: 0; }
 .form-error:empty { display: none; }
 .form-summary { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; margin-bottom: 14px; display: flex; justify-content: space-between; gap: 10px; }
 .form-summary b { font-variant-numeric: tabular-nums; }
-.checkbox { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+/* ---------- de enkelte køb (mobil først: dato på egen linje) ---------- */
+.lots {
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); padding: 12px; margin-bottom: 14px;
+}
+.lots-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.lots-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.lots-toggle { margin-top: 6px; align-self: flex-start; padding-left: 0; padding-right: 0; }
+.lot-row, .lot-head-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.lot-head-row { font-size: 11px; color: var(--muted); text-align: right; margin-bottom: 4px; display: none; }
+.lot-head-date { display: none; }
+.lot-head-spacer { width: 40px; }
+/* Dato på egen linje: en stiplet streg holder hvert køb samlet som ét. */
+.lot-row { padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px dashed var(--border); }
+.lot-row:last-of-type { border-bottom: none; }
+.lot-row .lot-date { grid-column: 1 / -1; }
+.lot-row .input { padding: 8px 10px; }
+.lots-sum { margin: 10px 0 0; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* Antal og gns. kurs følger købene, når listen er i brug – de tastes ikke. */
+.input.derived { background: var(--surface-2); color: var(--muted); border-style: dashed; }
+
+.lot-list { margin-top: 14px; }
+.lot-list h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.lot-list ul { list-style: none; margin: 0; padding: 0; }
+.lot-list li {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px;
+  padding: 7px 0; border-top: 1px solid var(--border); font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* .field sætter kolonne-retning; et afkrydsningsfelt skal stå ved siden af sin tekst. */
+.checkbox { display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 13px; }
 .checkbox input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
 .segmented { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; margin-bottom: 14px; }
 .segmented button { border: none; background: var(--surface); padding: 7px 16px; font-weight: 500; color: var(--muted); }
@@ -423,6 +524,29 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 .dialog-foot { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 8px 20px 18px; }
 .dialog-foot .left { margin-right: auto; }
 
+/* "Mere"-arket: en bundskuffe på telefon, en almindelig dialog på store skærme. */
+.sheet-nav { display: grid; gap: 2px; margin-bottom: 6px; }
+.sheet-item {
+  display: flex; align-items: center; gap: 14px; width: 100%;
+  padding: 13px 12px; border: none; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text); text-align: left; font-size: 15px; min-height: 56px;
+}
+.sheet-item:hover { background: var(--surface-2); text-decoration: none; }
+.sheet-item .icon { width: 20px; height: 20px; color: var(--muted); flex: none; }
+.sheet-item.active { background: var(--accent-soft); color: var(--accent); }
+.sheet-item.active .icon { color: var(--accent); }
+.sheet-item.danger, .sheet-item.danger .icon { color: var(--danger); }
+.sheet-label { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.sheet-hint { font-size: 12px; color: var(--muted); font-weight: 400; }
+.sheet-item.active .sheet-hint { color: inherit; opacity: 0.8; }
+
+@media (max-width: 767px) {
+  dialog.sheet {
+    width: 100vw; max-width: 100vw; margin: auto 0 0; border-radius: 16px 16px 0 0;
+    border-bottom: none; padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
 .search-results { list-style: none; margin: 6px 0 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); max-height: 280px; overflow-y: auto; }
 .search-results:empty { display: none; }
 .search-results li { display: flex; align-items: center; gap: 10px; padding: 9px 12px; cursor: pointer; border-bottom: 1px solid var(--border); }
@@ -440,12 +564,21 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 .panel-backdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); z-index: 30; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
 .panel-backdrop.show { opacity: 1; pointer-events: auto; }
 .panel {
-  position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100vw);
-  background: var(--surface); border-left: 1px solid var(--border); z-index: 31;
-  transform: translateX(100%); transition: transform 0.22s ease; overflow-y: auto;
+  position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: 100%;
+  max-height: min(90vh, 720px);
+  background: var(--surface); border-top: 1px solid var(--border); z-index: 31;
+  border-radius: 18px 18px 0 0;
+  transform: translateY(100%); transition: transform 0.22s ease; overflow-y: auto;
   display: flex; flex-direction: column;
+  padding-bottom: env(safe-area-inset-bottom);
 }
-.panel.show { transform: translateX(0); }
+.panel.show { transform: translateY(0); }
+/* Greb øverst, så det er tydeligt at arket kan trækkes væk. */
+.panel::before {
+  content: ''; position: sticky; top: 0; z-index: 1;
+  display: block; width: 36px; height: 4px; margin: 8px auto 0;
+  border-radius: 999px; background: var(--border-strong); flex: none;
+}
 .panel-head { padding: 18px 20px 12px; border-bottom: 1px solid var(--border); display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .panel-head h2 { font-size: 18px; }
 .panel-body { padding: 16px 20px 28px; display: flex; flex-direction: column; gap: 18px; }
@@ -459,12 +592,29 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 .range52 i { position: absolute; top: -4px; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); border: 2px solid var(--surface); transform: translateX(-50%); }
 .range52-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
 .panel-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+/* På telefonen er arket lavt, og knapperne endte under skærmkanten. De bliver
+   siddende nederst, så man altid kan nå Køb til, Sælg, Redigér og Slet. */
+@media (max-width: 767px) {
+  .panel-body { padding-bottom: 12px; }
+  .panel-actions {
+    position: sticky; bottom: 0; z-index: 2;
+    margin: 0 -20px -12px; padding: 12px 20px calc(12px + env(safe-area-inset-bottom));
+    background: var(--surface); border-top: 1px solid var(--border);
+  }
+  /* Uden det her skærer knapperne den sidste linje midt over, så den ligner
+     en fejl i stedet for noget, der fortsætter nedenfor. En blød overgang
+     viser, at der er mere at rulle til. */
+  .panel-actions::before {
+    content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: 20px;
+    background: linear-gradient(to top, var(--surface), transparent); pointer-events: none;
+  }
+}
 .panel-actions .btn { justify-content: center; }
 .panel-actions .span2 { grid-column: 1 / -1; }
 
 /* ---------- indstillinger ---------- */
 
-.settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.settings-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .settings-grid .card p.muted { margin-bottom: 12px; }
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .setting-row:last-child { border-bottom: none; }
@@ -483,11 +633,21 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 
 /* ---------- toast ---------- */
 
-.toasts { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
-.toast { background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 8px; font-size: 13px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 10px; animation: toast-in 0.2s ease; max-width: 360px; }
+.toasts {
+  position: fixed; left: 14px; right: 14px; bottom: calc(var(--tabbar-h) + 12px + env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; gap: 8px; z-index: 50;
+  /* En besked må aldrig sluge et tryk på det, den ligger oven på. Kun dens egen
+     knap tager imod klik. */
+  pointer-events: none;
+}
+@media (min-width: 768px) {
+  .toasts { left: auto; right: 20px; bottom: 20px; }
+}
+.toast { background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 8px; font-size: 13px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 10px; animation: toast-in 0.2s ease; }
+@media (min-width: 768px) { .toast { max-width: 360px; } }
 .toast.error { background: var(--neg); color: #fff; }
 .toast.success { background: var(--pos); color: #fff; }
-.toast button { background: transparent; border: none; color: inherit; font-weight: 600; text-decoration: underline; padding: 0; }
+.toast button { background: transparent; border: none; color: inherit; font-weight: 600; text-decoration: underline; padding: 0; pointer-events: auto; }
 @keyframes toast-in { from { transform: translateY(8px); opacity: 0; } }
 
 /* Menu (⋯) */
@@ -503,72 +663,87 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
    Responsivt
    ========================================================================== */
 
-@media (max-width: 1100px) {
-  .grid-kpi { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .grid-2 { grid-template-columns: minmax(0, 1fr); }
-  .settings-grid { grid-template-columns: minmax(0, 1fr); }
+/* Bredere skærme lægges ovenpå. Alt herunder er tilføjelser til mobil-grundlaget. */
+
+/* Lidt mere plads: to spalter hvor det giver mening. */
+@media (min-width: 480px) {
+  /* Først her står dato, antal og kurs på samme linje, så overskrifterne
+     faktisk peger på de felter, de hører til. */
+  .lot-head-row { display: grid; }
+  .lot-row, .lot-head-row { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1fr) auto; }
+  .lot-row .lot-date { grid-column: auto; }
+  .lot-head-date { display: block; text-align: left; }
+  /* Én linje pr. køb – så er stregen mellem dem overflødig. */
+  .lot-row { padding-bottom: 0; border-bottom: none; }
+  .alloc-legend { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .movers { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .field-row { grid-template-columns: 1fr 1fr; }
 }
 
-/* Tablet: sidebar kun med ikoner */
-@media (max-width: 1023px) and (min-width: 768px) {
+/* Tablet og opefter: sidebjælke i stedet for fanebjælke, og rigtig tabel. */
+@media (min-width: 768px) {
   :root { --sidebar-w: 72px; }
-  .sidebar { padding: 16px 12px; }
+  .sidebar { display: flex; padding: 16px 12px; }
   .brand { justify-content: center; padding: 0 0 14px; }
-  .brand span, .nav a span, .sidebar-status, .sidebar .btn-primary span { display: none; }
+  .brand > span, .nav a span, .sidebar-status, .sidebar .btn-primary span { display: none; }
   .nav a { justify-content: center; padding: 10px; }
   .sidebar .btn-primary { padding: 10px; }
+
+  .main { margin-left: var(--sidebar-w); }
+  .content { padding: 24px 24px 60px; }
+  .topbar, .tabbar { display: none; }
+
+  .grid { gap: 16px; }
+  .grid-kpi, .grid-2 { margin-bottom: 16px; }
+  .page-header { margin-bottom: 20px; }
+
+  .table-wrap { margin: 0 -20px -18px; padding: 0 20px; }
+
+  /* Detaljer glider ind fra siden i stedet for op nedefra. */
+  .panel {
+    top: 0; right: 0; bottom: 0; left: auto; width: min(440px, 100vw); max-height: none;
+    border-left: 1px solid var(--border); border-top: none; border-radius: 0;
+    transform: translateX(100%);
+  }
+  .panel.show { transform: translateX(0); }
+  .panel::before { display: none; }
 }
 
-/* Mobil */
-@media (max-width: 767px) {
-  .sidebar { display: none; }
-  .main { margin-left: 0; }
-  .content { padding: 16px 14px calc(var(--tabbar-h) + 24px); }
+/* Tabellen har ni kolonner og vil have omkring 1180 px. Først her er der plads
+   til den; indtil da er kortene både pænere og til at læse. */
+@media (min-width: 1240px) {
+  table.holdings { display: table; }
+  .holding-cards { display: none; }
+}
 
-  .topbar {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    position: sticky; top: 0; z-index: 20; height: var(--topbar-h);
-    background: var(--sidebar-bg); color: var(--sidebar-text-strong); padding: 0 12px;
-  }
-  .topbar .brand { border: none; padding: 0; margin: 0; }
-  .topbar .btn-ghost { color: var(--sidebar-text); }
+/* De to kolonner, der også står i detaljepanelet, kommer til, når de kan være
+   der – i stedet for at rækken bliver klippet af i kanten. */
+@media (min-width: 1360px) {
+  table.holdings .col-share { display: table-cell; }
+}
+@media (min-width: 1500px) {
+  table.holdings .col-avg { display: table-cell; }
+}
 
-  .tabbar {
-    display: grid; grid-template-columns: repeat(4, 1fr);
-    position: fixed; left: 0; right: 0; bottom: 0; height: var(--tabbar-h);
-    background: var(--surface); border-top: 1px solid var(--border); z-index: 20;
-    padding-bottom: env(safe-area-inset-bottom);
-  }
-  .tabbar a, .tabbar button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; font-size: 11px; color: var(--muted); border: none; background: transparent; }
-  .tabbar a.active { color: var(--accent); }
-  .tabbar .tab-add .icon { width: 36px; height: 36px; padding: 8px; border-radius: 50%; background: var(--accent); color: #fff; margin-top: -18px; box-shadow: 0 4px 10px rgba(37,99,235,0.4); }
+/* Plads til navnene i sidebjælken. */
+@media (min-width: 1024px) {
+  :root { --sidebar-w: 232px; }
+  .sidebar { padding: 20px 14px; }
+  .brand { justify-content: flex-start; padding: 4px 10px 18px; }
+  /* Kun det ydre span: "display: initial" er inline og ville gøre undertitlen
+     til en fortsættelse af navnet i stedet for sin egen linje. */
+  .brand > span, .nav a span, .sidebar-status, .sidebar .btn-primary span { display: initial; }
+  .nav a { justify-content: flex-start; padding: 9px 10px; }
+  .sidebar .btn-primary { padding: 9px 14px; }
+  .content { padding: 28px 28px 80px; }
+}
 
-  .page-header { margin-bottom: 14px; }
-  h1 { font-size: 20px; }
-  .kpi-hero .kpi-value { font-size: 26px; }
-  .kpi-value { font-size: 20px; }
-  .card { padding: 14px 16px; }
-  .table-wrap { margin: 0 -16px -14px; padding: 0 16px; }
-
-  /* Tabel → kort */
-  table.holdings { display: none; }
-  .holding-cards { display: flex; flex-direction: column; }
-  .hcard { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 12px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
-  .hcard:last-child { border-bottom: none; }
-  .hcard .l1 { font-weight: 600; display: flex; align-items: center; gap: 6px; }
-  .hcard .l2 { font-size: 12px; color: var(--muted); }
-  .hcard .r1 { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .hcard .r2 { text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; }
-  .hcard-total { display: flex; justify-content: space-between; padding: 12px 0 4px; font-weight: 600; border-top: 2px solid var(--border-strong); }
-
-  .movers { grid-template-columns: minmax(0, 1fr); }
-  .alloc-legend { grid-template-columns: minmax(0, 1fr); }
-  .panel { width: 100vw; top: auto; max-height: 90vh; border-left: none; border-top: 1px solid var(--border); border-radius: 16px 16px 0 0; transform: translateY(100%); }
-  .panel.show { transform: translateY(0); }
-  .toasts { left: 14px; right: 14px; bottom: calc(var(--tabbar-h) + 12px); }
-  .toast { max-width: none; }
-  .field-row { grid-template-columns: 1fr; }
-  .chart-box { height: 200px; }
+/* Fuld bredde: nøgletal på én række og to spalter i indholdet. */
+@media (min-width: 1100px) {
+  .grid-kpi { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .grid-kpi .kpi-hero { grid-column: auto; }
+  .grid-2 { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+  .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media print {
@@ -579,7 +754,8 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 
 /* ---------- tilføjelser ---------- */
 .stale, td.stale, td.stale .sub, .stale .pos, .stale .neg { color: var(--muted) !important; }
-body.browser-mode .only-server { display: none !important; }
+body.browser-mode .only-server,
+body.open-access .only-server { display: none !important; } /* intet login at logge ud af */
 dialog.dialog-wide { width: min(860px, calc(100vw - 32px)); }
 .dialog-body .table-wrap { margin: 0; padding: 0; }
 #import-cash-row { margin: 14px 0 4px; }
@@ -616,8 +792,25 @@ table.holdings th:focus-visible { outline-offset: -2px; }
 .chip-btn:hover { border-color: var(--accent); color: var(--accent); }
 .kpi-label[title] { cursor: help; }
 dialog { max-height: calc(100dvh - 24px); overflow-y: auto; }
+dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
+/* Dialogen kan scrolle. Knapperne skal blive nederst, så "Gem" ikke ender
+   under skærmkanten, når der kommer et felt mere. */
 @media (max-width: 767px) {
-  dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
+  .dialog-foot {
+    position: sticky; bottom: 0; z-index: 2;
+    background: var(--surface); border-top: 1px solid var(--border);
+    padding-bottom: calc(14px + env(safe-area-inset-bottom));
+  }
+  /* Samme bløde overgang som i detaljepanelet: indholdet skal se ud til at
+     fortsætte nedenunder, ikke til at være skåret over. */
+  .dialog-foot::before {
+    content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: 18px;
+    background: linear-gradient(to top, var(--surface), transparent); pointer-events: none;
+  }
+  .dialog-head { position: sticky; top: 0; z-index: 2; background: var(--surface); }
+}
+@media (min-width: 768px) {
+  dialog { width: min(var(--dialog-w, 520px), calc(100vw - 32px)); max-height: calc(100dvh - 64px); }
 }
 @media (prefers-reduced-motion: reduce) {
   .panel, .panel-backdrop, .toast, .switch .track, .switch .track::before, .amount { transition: none !important; animation: none !important; }
@@ -626,6 +819,103 @@ dialog { max-height: calc(100dvh - 24px); overflow-y: auto; }
 .chart-summary { flex-wrap: wrap; }
 .chart-summary .big { white-space: nowrap; }
 .card-header { flex-wrap: wrap; }
-@media (max-width: 767px) {
-  .page-actions .btn-icon { display: none; } /* findes allerede i topbaren */
+/* Ikonknapperne står i toplinjen på mobil, så de skal ikke gentages i sidehovedet.
+   Kun sidehovedets egne – toplinjens bruger samme klasse og skal blive. */
+.page-header .page-actions .btn-icon { display: none; }
+@media (min-width: 768px) { .page-header .page-actions .btn-icon { display: inline-flex; } }
+
+/* ---------- Platform: profiler og følgere ---------- */
+.only-platform { display: none !important; }
+body.platform .only-platform { display: flex !important; }
+
+.person-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.person-row:first-of-type { border-top: 0; }
+.avatar {
+  flex: none; width: 36px; height: 36px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 13px; font-weight: 700;
+  background: var(--accent-soft, rgba(37, 99, 235, 0.12)); color: var(--accent, #2563eb);
 }
+.person-name { flex: 1 1 140px; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.person-go { color: var(--accent); font-size: 13px; font-weight: 500; white-space: nowrap; }
+/* Hele rækken er et link ind til profilen. */
+.person-link { color: inherit; text-decoration: none; border-radius: 8px; }
+.person-link:hover { background: var(--surface-2); text-decoration: none; }
+.person-link:hover .person-go { text-decoration: underline; }
+
+.invite-box { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.invite-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px; font-weight: 700;
+  letter-spacing: 0.06em; padding: 6px 10px; border-radius: 8px;
+  background: var(--surface-2, rgba(148, 163, 184, 0.14)); user-select: all;
+}
+body.viewing-person [data-action="add"] { display: none !important; }
+
+/* Forklaringer under grafen — hvad kurven er, og hvad der mangler. */
+.chart-notes { margin-top: 10px; display: grid; gap: 6px; }
+.chart-notes p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.chart-notes b { color: var(--text); font-weight: 600; }
+
+/* ---------- Mobil: berøringsflader og rytme ---------- */
+@media (max-width: 767px) {
+  .btn { min-height: 44px; }
+  .btn-sm { min-height: 40px; }
+  .btn-icon { min-width: 44px; }
+  .input, .select-inline, select, input[type="text"], input[type="password"], input[type="email"], input[type="search"] {
+    min-height: 44px;
+    font-size: 16px; /* under 16px zoomer iOS ind ved fokus */
+  }
+  .setting-row { flex-wrap: wrap; padding: 14px 0; }
+  .setting-row > :last-child { margin-left: auto; }
+  /* Trykflader på telefon: 44 px, som resten af knapperne. */
+  .range-pills button { min-height: 44px; padding-inline: 11px; }
+  .chip-btn { min-height: 44px; padding-inline: 14px; }
+  /* Knapper med kun et ikon skal kunne rammes – ikke 36 px brede. */
+  .btn-sm.btn-icon, .setting-row .btn-icon, .setting-row .btn-sm[aria-label] { min-width: 44px; min-height: 42px; }
+  .card-header h2 { font-size: 15px; }
+  .card-header .input-group { flex: 1 1 100%; max-width: none; }
+  /* Små tekstlinks skal stadig kunne rammes med en tommelfinger. */
+  .card-header a { display: inline-flex; align-items: center; min-height: 44px; }
+  .topbar .brand { min-height: 44px; }
+  .person-row { padding: 14px 8px; }
+  /* Tallene i grafen må ikke lægge sig oven i kurven. */
+  .chart-summary { gap: 6px 10px; }
+}
+/* "Tilføj aktie" står allerede som knap i fanebjælken på mobil. */
+@media (max-width: 767px) {
+  .page-header .page-actions .btn-primary { display: none; }
+  /* Står det sidste nøgletal alene på en række, får det hele bredden. */
+  .grid-kpi > :last-child:nth-child(even) { grid-column: 1 / -1; }
+}
+
+/* Fra 1024 px har knappen i sidebjælken sin tekst, og så er den i
+   sidehovedet den samme knap to gange ved siden af hinanden. */
+@media (min-width: 1024px) {
+  .page-header .page-actions .btn-primary { display: none; }
+}
+
+/* ---------- Analyse ---------- */
+
+/* Tre kort under hinanden i fuld bredde lader den meste af pladsen stå tom.
+   Fra 1024 px står de to og to, og det længste får sin egen spalte. */
+.fact-grid { align-items: start; }
+@media (min-width: 1024px) {
+  .fact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fact-grid > :first-child { grid-row: span 2; }
+}
+.plan-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0 16px; }
+@media (min-width: 560px) { .plan-grid { grid-template-columns: 1fr 1fr; } }
+
+.plan-result {
+  margin-top: 6px; padding: 16px; border-radius: var(--radius);
+  background: var(--surface-2); border: 1px solid var(--border);
+  display: grid; gap: 14px;
+}
+@media (min-width: 560px) { .plan-result { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; } }
+.plan-value { font-size: clamp(26px, 8vw, 34px); font-weight: 600; letter-spacing: -0.02em; margin-top: 4px; }
+
+.fact-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+/* Linjelængden holdes læsbar. Uden loftet blev en sætning op mod 180 tegn lang
+   på en bred skærm – og resten af kortet stod tomt. */
+.fact-list li { display: flex; align-items: flex-start; gap: 10px; line-height: 1.5; font-size: 14px; max-width: 78ch; }
+.fact-list .icon { flex: none; width: 17px; height: 17px; margin-top: 2px; color: var(--muted); }
+.fact-list b { font-weight: 600; }

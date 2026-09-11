@@ -24,19 +24,24 @@
     { key: 'ytd', label: 'ÅTD' },
     { key: '1y', label: '1Å' },
     { key: '5y', label: '5Å' },
+    { key: 'max', label: 'Alt' },
   ];
 
   const nf = (opts) => new Intl.NumberFormat('da-DK', opts);
   const fmtNum = (n, min = 2, max = 2) => (isNum(n) ? nf({ minimumFractionDigits: min, maximumFractionDigits: max }).format(n) : '–');
 
   // Beløb i basisvaluta: "1.234.567 kr." – decimaler kan slås til i indstillinger.
+  // Fast mellemrum mellem tal og enhed. Med et alm. mellemrum kunne linjen
+  // brydes efter tallet, så "%" eller "kr." stod alene på næste linje.
+  const NBSP = '\u00a0';
+
   function fmtAmount(n, currency = state.baseCurrency, { decimals = null, sign = false } = {}) {
     if (!isNum(n)) return '–';
     const d = decimals ?? (state.settings.showDecimals ? 2 : 0);
     const abs = nf({ minimumFractionDigits: d, maximumFractionDigits: d }).format(Math.abs(n));
     const sym = CURRENCY_SYMBOLS[currency] || currency;
     const prefix = n < 0 ? '−' : sign && n > 0 ? '+' : '';
-    return `${prefix}${abs} ${sym}`;
+    return `${prefix}${abs}${NBSP}${sym}`;
   }
 
   // Kurs i aktiens egen valuta: 2 decimaler, flere for små kurser.
@@ -50,7 +55,7 @@
     if (!isNum(n)) return '–';
     const abs = fmtNum(Math.abs(n), 1, 2);
     const prefix = n < 0 ? '−' : sign && n > 0 ? '+' : '';
-    return `${prefix}${abs} %`;
+    return `${prefix}${abs}${NBSP}%`;
   }
 
   // Til input-felter: fuld præcision, uden tusindtalspunkter (parseInput læser komma som decimal)
@@ -83,8 +88,8 @@
   // Kompakt aksemærkat: 1,28 mio. / 128.000
   function fmtCompact(n) {
     if (!isNum(n)) return '';
-    if (Math.abs(n) >= 1e9) return `${fmtNum(n / 1e9, 1, 2)} mia.`;
-    if (Math.abs(n) >= 1e6) return `${fmtNum(n / 1e6, 1, 2)} mio.`;
+    if (Math.abs(n) >= 1e9) return `${fmtNum(n / 1e9, 1, 2)}${NBSP}mia.`;
+    if (Math.abs(n) >= 1e6) return `${fmtNum(n / 1e6, 1, 2)}${NBSP}mio.`;
     return fmtNum(n, 0, 0);
   }
 
@@ -146,7 +151,16 @@
     lastAttempt: 0,
     lastManual: 0,
     usesEnvPassword: false,
-    storage: 'server', // 'server' (fil/redis med login) eller 'browser' (localStorage, intet login)
+    storage: 'server', // 'server' (database eller fil) eller 'browser' (localStorage)
+    access: 'login', // 'login' = adgangskode kræves | 'open' = åben adgang for alle med adressen | 'browser'
+    canSetPassword: false, // åben adgang uden adgangskode: siden kan lukkes herfra
+    me: null, // min profil på platformen: { id, name, email, isOwner }
+    viewing: null, // ser jeg en andens portefølje? { id, name }
+    people: { q: '', results: [], loading: false, loaded: false },
+    analytics: { data: null, loaded: false, loading: false },
+    // Fremskrivningens felter. null = "brug det, analysen fandt".
+    plan: { years: 10, perMonth: null, growth: null },
+    inviteCode: null,
     account: storageGet('account', 'all'), // 'all' | 'none' | depot-id
     localImport: null, // data fundet i browserens lager, som kan overføres til kontoen
     allHoldings: [], // alle beholdninger uanset depot-filter (til tilføj/køb til og "Uden depot"-chip)
@@ -259,8 +273,72 @@
 
   const localErr = (status, message, extra = {}) => Object.assign(new Error(message), { status, data: extra });
   const round6 = (n) => Math.round(n * 1e6) / 1e6;
-  const pubHolding = (h) => ({ id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, addedAt: h.addedAt || null, updatedAt: h.updatedAt || null });
+  const pubHolding = (h) => ({ id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, purchasedAt: h.purchasedAt ?? null, weightedAt: h.weightedAt ?? null, lots: Array.isArray(h.lots) ? h.lots : null, addedAt: h.addedAt || null, updatedAt: h.updatedAt || null });
   const newLocalId = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
+
+  function localDate(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const d = String(value).trim().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || Number.isNaN(Date.parse(`${d}T12:00:00Z`))) throw localErr(400, 'Købsdatoen skal skrives som åååå-mm-dd');
+    if (Date.parse(`${d}T12:00:00Z`) > Date.now() + 86400000) throw localErr(400, 'Købsdatoen kan ikke ligge i fremtiden');
+    return d;
+  }
+
+  function localLots(value) {
+    if (value === null || value === undefined) return null;
+    if (!Array.isArray(value)) throw localErr(400, 'Købene skal være en liste');
+    if (value.length > 100) throw localErr(400, 'Der kan højst registreres 100 køb pr. aktie');
+    return value
+      .map((raw) => ({
+        id: typeof raw?.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newLocalId(),
+        date: localDate(raw?.date),
+        quantity: localQty(raw?.quantity),
+        price: localPrice(raw?.price),
+      }))
+      .sort((a, b) => String(a.date || '9999').localeCompare(String(b.date || '9999')));
+  }
+
+  // Samme regnestykke som på serveren: antal, gennemsnitskurs, første køb og
+  // den dato, pengene i gennemsnit blev sat ind.
+  const harKurs = (l) => l.price !== null && l.price !== undefined && l.price !== '' && isNum(Number(l.price));
+
+  function localApplyLots(h) {
+    const lots = (Array.isArray(h.lots) ? h.lots : []).filter((l) => Number(l.quantity) > 0);
+    if (!lots.length) {
+      delete h.lots;
+      delete h.weightedAt;
+      return h;
+    }
+    let quantity = 0;
+    let cost = 0;
+    let medKurs = 0;
+    for (const l of lots) {
+      quantity += Number(l.quantity);
+      if (harKurs(l)) { cost += Number(l.quantity) * Number(l.price); medKurs += Number(l.quantity); }
+    }
+    const medDato = lots.filter((l) => l.date);
+    const vægt = (l) => (medKurs > 0 && harKurs(l) ? Number(l.quantity) * Number(l.price) : Number(l.quantity));
+    const samlet = medDato.reduce((sum, l) => sum + vægt(l), 0);
+    h.quantity = round6(quantity);
+    h.avgPrice = medKurs > 0 ? round6(cost / medKurs) : null;
+    h.purchasedAt = medDato.length === lots.length ? (medDato.map((l) => l.date).sort()[0] || null) : null;
+    h.weightedAt = h.purchasedAt;
+    if (samlet > 0 && h.purchasedAt) {
+      const ms = medDato.reduce((sum, l) => sum + Date.parse(`${l.date}T12:00:00Z`) * (vægt(l) / samlet), 0);
+      if (isNum(ms)) h.weightedAt = new Date(ms).toISOString().slice(0, 10);
+    }
+    return h;
+  }
+
+  // Ved salg skrumper alle køb forholdsmæssigt – gennemsnitsmetoden, som på serveren.
+  function localReduceLots(lots, solgt) {
+    const liste = (lots || []).filter((l) => Number(l.quantity) > 0);
+    const ialt = liste.reduce((sum, l) => sum + Number(l.quantity), 0);
+    if (solgt <= 0) return liste;
+    if (solgt >= ialt - 1e-9) return [];
+    const andel = (ialt - solgt) / ialt;
+    return liste.map((l) => ({ ...l, quantity: round6(Number(l.quantity) * andel) })).filter((l) => l.quantity > 0);
+  }
 
   function localQty(value) {
     const n = typeof value === 'number' ? value : parseInput(value);
@@ -284,7 +362,7 @@
     const data = localLoad();
     const now = new Date().toISOString();
 
-    if (p === '/api/auth/status') return { authenticated: true, setupRequired: false, setupTokenRequired: false, usesEnvPassword: false, storage: 'browser' };
+    if (p === '/api/auth/status') return { authenticated: true, setupRequired: false, setupTokenRequired: false, usesEnvPassword: false, access: 'browser', storage: 'browser' };
     if (p.startsWith('/api/auth/')) return { ok: true };
     const account = url.searchParams.get('account') || '';
     if (p === '/api/portfolio' && method === 'GET') return serverApi('POST', '/api/compute', { holdings: data.holdings, settings: data.settings, account });
@@ -309,7 +387,8 @@
         warning = `Kunne ikke hente kurs lige nu (${err.message}). Aktien er tilføjet alligevel.`;
       }
       if (quote?.type && !HOLDABLE.includes(quote.type)) throw localErr(400, "Kun aktier, ETF'er og fonde kan tilføjes");
-      const holding = { id: newLocalId(), symbol, name: quote ? quote.name : String(body.name || symbol).slice(0, 120), currency: quote ? quote.currency : null, quantity, avgPrice, note: String(body.note || '').trim().slice(0, 200), accountId, addedAt: now, updatedAt: now };
+      const lots = localLots(body.lots);
+      const holding = localApplyLots({ id: newLocalId(), symbol, name: quote ? quote.name : String(body.name || symbol).slice(0, 120), currency: quote ? quote.currency : null, quantity, avgPrice, note: String(body.note || '').trim().slice(0, 200), accountId, purchasedAt: localDate(body.purchasedAt), ...(lots ? { lots } : {}), addedAt: now, updatedAt: now });
       data.holdings.push(holding);
       localSave(data);
       return { holding: pubHolding(holding), warning };
@@ -322,20 +401,34 @@
       if (m[2] && method === 'POST') {
         const type = body.type === 'sell' ? 'sell' : 'buy';
         const q = localQty(body.quantity);
+        const date = localDate(body.date);
         if (type === 'buy') {
           const price = localPrice(body.price, { allowNull: false });
           const oldQty = Number(h.quantity) || 0;
-          const newQty = oldQty + q;
-          if (h.avgPrice != null && oldQty > 0) h.avgPrice = round6((oldQty * h.avgPrice + q * price) / newQty);
-          else if (oldQty === 0) h.avgPrice = price;
-          h.quantity = round6(newQty);
+          const førerKøb = Array.isArray(h.lots) && h.lots.length > 0;
+          if (førerKøb || date) {
+            const lots = førerKøb ? [...h.lots] : (oldQty > 0 ? [{ id: newLocalId(), date: h.purchasedAt ?? null, quantity: oldQty, price: h.avgPrice ?? null }] : []);
+            if (lots.length >= 100) throw localErr(409, 'Der kan højst registreres 100 køb pr. aktie');
+            lots.push({ id: newLocalId(), date, quantity: q, price });
+            h.lots = localLots(lots);
+            localApplyLots(h);
+          } else {
+            const newQty = oldQty + q;
+            if (h.avgPrice != null && oldQty > 0) h.avgPrice = round6((oldQty * h.avgPrice + q * price) / newQty);
+            else if (oldQty === 0) h.avgPrice = price;
+            h.quantity = round6(newQty);
+          }
         } else {
-          if (q > h.quantity + 1e-9) throw localErr(400, `Du ejer kun ${fmtQty(h.quantity)} stk.`);
+          if (q > h.quantity + 1e-9) throw localErr(400, `Du ejer kun ${fmtQty(h.quantity)}\u00a0stk.`);
           const newQty = round6(h.quantity - q);
           if (newQty <= 0) {
             data.holdings = data.holdings.filter((x) => x !== h);
             localSave(data);
             return { removed: true, holding: pubHolding({ ...h, quantity: 0 }) };
+          }
+          if (Array.isArray(h.lots) && h.lots.length) {
+            h.lots = localReduceLots(h.lots, q);
+            localApplyLots(h);
           }
           h.quantity = newQty;
         }
@@ -347,11 +440,14 @@
         if (body.quantity !== undefined) h.quantity = localQty(body.quantity);
         if (body.avgPrice !== undefined) h.avgPrice = localPrice(body.avgPrice);
         if (body.note !== undefined) h.note = String(body.note ?? '').trim().slice(0, 200);
+        if (body.purchasedAt !== undefined) h.purchasedAt = localDate(body.purchasedAt);
+        if (body.lots !== undefined) h.lots = localLots(body.lots) || [];
         if (body.accountId !== undefined) {
           const accountId = localAccountId(body.accountId, data.settings.accounts);
           if (data.holdings.some((x) => x !== h && sameSlot(x, h.symbol, accountId))) throw localErr(409, `${h.name || h.symbol} findes allerede i det depot – brug "Køb til" dér i stedet`);
           h.accountId = accountId;
         }
+        localApplyLots(h);
         h.updatedAt = now;
         localSave(data);
         return { holding: pubHolding(h) };
@@ -395,7 +491,8 @@
         const slot = `${symbol}@${accountId ?? ''}`;
         if (seen.has(slot)) throw localErr(400, `Symbolet ${symbol} optræder flere gange i samme depot (linje ${i + 1})`);
         seen.add(slot);
-        return { id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newLocalId(), symbol, accountId, name: String(raw.name || symbol).slice(0, 120), currency: raw.currency ? String(raw.currency).toUpperCase().slice(0, 3) : null, quantity: localQty(raw.quantity), avgPrice: localPrice(raw.avgPrice), note: String(raw.note || '').trim().slice(0, 200), addedAt: typeof raw.addedAt === 'string' ? raw.addedAt : now, updatedAt: now };
+        const lots = localLots(raw.lots);
+        return localApplyLots({ id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newLocalId(), symbol, accountId, name: String(raw.name || symbol).slice(0, 120), currency: raw.currency ? String(raw.currency).toUpperCase().slice(0, 3) : null, quantity: localQty(raw.quantity), avgPrice: localPrice(raw.avgPrice), note: String(raw.note || '').trim().slice(0, 200), purchasedAt: localDate(raw.purchasedAt), ...(lots ? { lots } : {}), addedAt: typeof raw.addedAt === 'string' ? raw.addedAt : now, updatedAt: now });
       });
       data.holdings = holdings;
       data.settings.accounts = restoredAccounts;
@@ -440,13 +537,16 @@
     state.lastAttempt = Date.now();
     if (!silent) setRefreshing(true);
     try {
-      const data = await api('GET', `/api/portfolio${accountQuery()}`);
+      // Ser man en andens portefølje, hentes deres – uden ens eget depot-filter.
+      const v = state.viewing;
+      const data = await api('GET', v ? `/api/users/${encodeURIComponent(v.id)}/portfolio` : `/api/portfolio${accountQuery()}`);
       if (seq !== portfolioSeq) return; // overhalet af en nyere hentning
+      if (v && data.person) state.viewing = { id: v.id, name: data.person.name };
       state.portfolio = data;
       state.pending = null;
       state.settings = data.settings || {};
       // Et valgt depot, der ikke findes længere (slettet fra en anden enhed) → tilbage til "Alle".
-      if (state.account !== 'all' && state.account !== 'none' && !accounts().some((a) => a.id === state.account)) {
+      if (!state.viewing && state.account !== 'all' && state.account !== 'none' && !accounts().some((a) => a.id === state.account)) {
         setAccount('all', { reload: true });
         return;
       }
@@ -458,7 +558,8 @@
       if (seq !== portfolioSeq) return;
       state.loadError = err.message;
       state.failures += 1;
-      if (!silent || !state.portfolio) toast(err.message, 'error');
+      if (state.viewing) state.viewingDenied = true; // stop med at prøve igen
+      else if (!silent || !state.portfolio) toast(err.message, 'error');
     } finally {
       if (seq === portfolioSeq) {
         state.loading = false;
@@ -523,7 +624,7 @@
           skipped++;
           continue;
         }
-        await api('POST', '/api/holdings', { symbol: h.symbol, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', name: h.name, accountId });
+        await api('POST', '/api/holdings', { symbol: h.symbol, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', purchasedAt: h.purchasedAt || null, name: h.name, accountId });
         added++;
       }
 
@@ -615,6 +716,7 @@
     clearInterval(refreshTimer);
     refreshTimer = setInterval(() => {
       if (!state.autoRefresh || document.hidden || state.importing) return;
+      if (state.viewingDenied) return; // en profil man ikke må se, prøves ikke igen
       if (Date.now() - state.lastAttempt >= refreshInterval()) {
         loadPortfolio({ silent: true });
         const h = state.history[state.range];
@@ -642,26 +744,51 @@
   // Routing
   // ======================================================================
 
-  const ROUTES = { '/': 'overview', '/beholdninger': 'holdings', '/indstillinger': 'settings' };
-  const TITLES = { overview: 'Overblik', holdings: 'Beholdninger', settings: 'Indstillinger' };
+  const ROUTES = { '/': 'overview', '/beholdninger': 'holdings', '/indstillinger': 'settings', '/folk': 'people', '/analyse': 'analytics' };
+  const TITLES = { overview: 'Overblik', holdings: 'Beholdninger', settings: 'Indstillinger', people: 'Folk', person: 'Profil', analytics: 'Analyse' };
+  const PERSON_PATH = /^\/profil\/([^/]+)$/;
+
+  const personIdFromPath = () => PERSON_PATH.exec(location.pathname)?.[1] || null;
 
   function currentRoute() {
+    if (personIdFromPath()) return 'person';
     return ROUTES[location.pathname] || 'overview';
   }
 
   function navigate(path) {
-    if (!(path in ROUTES)) path = '/';
+    if (!(path in ROUTES) && !PERSON_PATH.test(path)) path = '/';
     if (location.pathname !== path) history.pushState({}, '', path);
     closeMenu();
     closePanel();
+    closeMore();
     render();
     window.scrollTo({ top: 0 });
   }
 
+  // Går man videre fra "Mere", skal arket ikke blive liggende oven på siden.
+  function closeMore() {
+    const dlg = $('#dlg-more');
+    if (dlg?.open) dlg.close();
+  }
+
   window.addEventListener('popstate', () => {
     closePanel();
+    closeMore();
     render();
   });
+
+  // Sørger for, at siden har de data, den viser. Kaldes ved hver tegning, men
+  // henter kun når noget rent faktisk mangler.
+  function routeData(route) {
+    if (route === 'person') {
+      const id = personIdFromPath();
+      if (id) viewPerson(id);
+      return;
+    }
+    if (state.viewing) stopViewing();
+    if (route === 'people' && state.access === 'platform' && !state.people.loaded && !state.people.loading) loadPeople('');
+    if (route === 'analytics' && !state.analytics.loaded && !state.analytics.loading) loadAnalytics();
+  }
 
   // ======================================================================
   // Rendering
@@ -669,6 +796,7 @@
 
   function render({ silent = false } = {}) {
     const route = currentRoute();
+    routeData(route);
     document.title = `${TITLES[route]} – Min Portefølje`;
     $$('[data-nav]').forEach((a) => {
       const active = ROUTES[a.dataset.nav] === route;
@@ -676,6 +804,10 @@
       if (active) a.setAttribute('aria-current', 'page');
       else a.removeAttribute('aria-current');
     });
+    // "Mere" er selv en fane: den skal lyse op, når man står på en af de sider,
+    // den gemmer på – ellers ser fanebjælken ud som om ingenting er valgt.
+    const mereKnap = $('.tabbar [data-action="more"]');
+    if (mereKnap) mereKnap.classList.toggle('active', ['people', 'settings'].includes(route));
     // Afbryd ikke brugeren midt i et felt ved en stille baggrundsopdatering.
     const active = document.activeElement;
     if (silent && active && active !== document.body && $('#page')?.contains(active)) {
@@ -685,10 +817,15 @@
     const page = $('#page');
     if (route === 'overview') page.innerHTML = renderOverview();
     else if (route === 'holdings') page.innerHTML = renderHoldings();
+    else if (route === 'people') page.innerHTML = renderPeople();
+    else if (route === 'analytics') page.innerHTML = renderAnalytics();
+    else if (route === 'person') page.innerHTML = renderPerson();
     else page.innerHTML = renderSettings();
     if (route === 'overview') afterRenderOverview();
     renderSidebarStatus();
     document.body.classList.toggle('private', state.privacy);
+    // "Tilføj aktie" ville lægge i ens egen portefølje – forvirrende mens man ser en andens.
+    document.body.classList.toggle('viewing-person', Boolean(state.viewing));
     $$('[data-action="privacy"]').forEach((b) => {
       const label = state.privacy ? 'Vis beløb' : 'Skjul beløb';
       b.title = label;
@@ -763,7 +900,7 @@
   function greeting() {
     const hour = Number(new Intl.DateTimeFormat('da-DK', { hour: 'numeric', hour12: false, timeZone: 'Europe/Copenhagen' }).format(new Date()));
     const word = hour < 5 ? 'Godnat' : hour < 10 ? 'Godmorgen' : hour < 18 ? 'Goddag' : 'Godaften';
-    const name = (state.settings.displayName || '').trim();
+    const name = (state.me?.name || state.settings.displayName || '').trim();
     return name ? `${word}, ${name}` : 'Overblik';
   }
 
@@ -807,7 +944,9 @@
   }
 
   function browserModePill() {
-    return state.storage === 'browser' ? '<span class="status-pill" title="Serveren har ingen database, så dine aktier gemmes kun i denne browser. Se Indstillinger.">💾 Gemt i denne browser</span>' : '';
+    if (state.storage === 'browser') return '<span class="status-pill" title="Serveren har ingen database, så dine aktier gemmes kun i denne browser. Se Indstillinger.">💾 Gemt i denne browser</span>';
+    if (state.access === 'open') return '<span class="status-pill" title="Porteføljen ligger i databasen, så du ser den samme uanset enhed og browser.">☁️ Synkroniseret</span>';
+    return '';
   }
 
   function updatedSub() {
@@ -822,6 +961,9 @@
     if (state.localImport) {
       const n = state.localImport.holdings.length;
       out.push(`<div class="banner info">${icon('upload')}<div><b>${n} ${n === 1 ? 'aktie' : 'aktier'} ligger gemt i denne browser.</b> Overfør dem til din konto, så de følger med på alle dine enheder. <span class="banner-actions"><button class="btn btn-sm btn-primary" data-action="import-local">Overfør</button> <button class="btn btn-sm" data-action="import-dismiss">Ikke nu</button></span></div></div>`);
+    }
+    if (state.canSetPassword && !storageGet('open-dismissed', '')) {
+      out.push(`<div class="banner info">${icon('lock')}<div><b>Siden er åben for alle, der kender adressen.</b> Opret en adgangskode, hvis kun du skal kunne se og ændre din portefølje. <span class="banner-actions"><button class="btn btn-sm btn-primary" data-action="setup-password">Opret adgangskode</button> <button class="btn btn-sm" data-action="open-dismiss">Ikke nu</button></span></div></div>`);
     }
     if (state.loadError && !p) {
       out.push(`<div class="banner error">${icon('warn')}<div><b>Kunne ikke hente kurser.</b> ${esc(state.loadError)}. <a href="#" data-action="refresh">Prøv igen</a></div></div>`);
@@ -843,6 +985,22 @@
   }
 
   // ---------- Overblik ----------
+
+  // "3 år og 2 md." læses lettere end "1157 dage".
+  function ejertid(dage) {
+    if (!isNum(dage)) return '';
+    if (dage < 1) return 'i dag';
+    if (dage === 1) return `1${NBSP}dag`;
+    if (dage < 45) return `${dage}${NBSP}dage`;
+    const måneder = Math.round(dage / 30.44);
+    if (måneder < 24) return `${måneder}${NBSP}md.`;
+    const år = Math.floor(måneder / 12);
+    const rest = måneder % 12;
+    return rest ? `${år}${NBSP}år og ${rest}${NBSP}md.` : `${år}${NBSP}år`;
+  }
+
+  // Sætter punktum, medmindre teksten allerede ender på et.
+  const punktum = (t) => (/[.!?]$/.test(String(t).trim()) ? t : `${t}.`);
 
   const AFKAST_TOOLTIP = 'Kursafkast i forhold til din gns. købskurs, omregnet til basisvalutaen med dagens valutakurs. Valutaudsving siden købet indgår ikke.';
 
@@ -914,7 +1072,8 @@
     return `<div class="card-header"><h2>${icon('chart')}Udvikling <span class="hint">ca.</span></h2><div class="range-pills">${pills}</div></div>
       <div id="chart-summary" class="chart-summary"></div>
       <div class="chart-box" id="chart-box"></div>
-      <div class="chart-legend"><span><i></i>Porteføljeværdi</span><span><i class="dashed"></i>Investeret</span><span class="muted">Beregnet ud fra din nuværende beholdning og historiske lukkekurser.</span></div>`;
+      <div class="chart-legend"><span><i></i>Porteføljeværdi</span><span class="chart-invested-key"><i class="dashed"></i>Investeret</span><span class="chart-events-key hidden"><i class="dot"></i>Køb</span></div>
+      <div class="chart-notes" id="chart-notes"></div>`;
   }
 
   function renderChartCard() {
@@ -940,24 +1099,84 @@
     }
     const first = h.points[0];
     const last = h.points[h.points.length - 1];
-    const diff = last.value - first.value;
-    const pct = first.value ? (diff / first.value) * 100 : null;
-    summary.innerHTML = `<span class="big amount">${fmtAmount(last.value)}</span><span class="${signClass(diff)}"><span class="amount">${fmtAmount(diff, state.baseCurrency, { sign: true })}</span> (${fmtPct(pct)})</span><span class="muted small">siden ${esc(fmtDate(first.date, { year: longRange() }))}${h.missing?.length ? ` · ${h.missing.length} aktie${h.missing.length > 1 ? 'r' : ''} uden historik` : ''}${state.historyLoading === state.range ? ' · opdaterer…' : ''}</span>`;
-    drawChart(box, h.points, state.portfolio?.totals?.costBase ?? null);
+    // Kurven stiger også, når man køber til, og det er ikke afkast. Kender vi
+    // det indsatte, trækkes det fra i begge ender, så tallet kun er det,
+    // markedet gav i perioden. Ellers vises den rå bevægelse som før.
+    const medIndskud = isNum(last.invested) && last.invested > 0 && isNum(first.invested);
+    const diff = medIndskud
+      ? (last.value - last.invested) - (first.value - first.invested)
+      : last.value - first.value;
+    const pct = medIndskud
+      ? (diff / last.invested) * 100
+      : (first.value ? (diff / first.value) * 100 : null);
+    summary.innerHTML = `<span class="big amount">${fmtAmount(last.value)}</span>`
+      + `<span class="${signClass(diff)}"><span class="amount">${fmtAmount(diff, state.baseCurrency, { sign: true })}</span> (${fmtPct(pct)})</span>`
+      + `<span class="muted small">i ${medIndskud ? 'afkast' : 'kursbevægelse'} siden ${esc(fmtDate(first.date, { year: longRange() }))}`
+      + `${state.historyLoading === state.range ? ' · opdaterer…' : ''}</span>`;
+    drawChart(box, h.points, h.events || []);
+    renderChartNotes(h);
   }
 
   const longRange = () => ['1y', '2y', '5y', 'max'].includes(state.range);
 
-  function drawChart(box, points, invested) {
+  // Alt det, grafen ikke selv kan vise: hvad kurven egentlig er, hvorfor perioden
+  // kan være kortere end knappen, og hvad der eventuelt mangler.
+  function renderChartNotes(h) {
+    const el = $('#chart-notes');
+    if (!el) return;
+    const noter = [];
+    // Kurven bygger på købsdatoerne, når de er der. Mangler de, kan vi kun vise
+    // dagens antal hele vejen – og det skal siges, for så er den ikke historisk.
+    const udenDato = state.portfolio?.positions?.filter((p) => !p.purchasedAt).length || 0;
+    if (udenDato) {
+      noter.push(`For ${udenDato === 1 ? 'én beholdning' : `${udenDato} beholdninger`} mangler købsdatoen, så ${udenDato === 1 ? 'den regnes' : 'de regnes'} med i hele perioden – også før du ejede ${udenDato === 1 ? 'den' : 'dem'}. Skriv datoen ind under Redigér, så bliver kurven rigtig.`);
+    } else {
+      noter.push('Kurven viser, hvad du <b>faktisk ejede hver dag</b>. Køber du til, stiger den – den del er ikke afkast. Den stiplede linje er det, du har lagt ind, så afstanden mellem de to er dit afkast.');
+      if (h.events?.length) {
+        noter.push(`Prikkerne er dine køb – ${h.events.length === 1 ? 'der er ét' : `der er ${h.events.length}`} i perioden. Kør hen over kurven (eller tryk på den) for at se hvad og for hvor meget. Salg kan ikke vises: dem gemmer appen ikke, de skrumper bare købene.`);
+      }
+    }
+    // Er perioden klippet til første køb, skal det stå – ellers ser det ud som
+    // om knappen ikke virkede, når 6M og 1Å viser det samme.
+    if (h.ownedFrom) {
+      noter.push(`Kurven starter ved dit <b>første køb ${esc(fmtDate(h.ownedFrom, { year: true }))}</b> – før det ejede du ikke noget. Vælger du en længere periode, ændrer det derfor ikke kurven.`);
+    }
+    if (h.backfilled?.length) {
+      const liste = h.backfilled.map((b) => `<b>${esc(b.symbol)}</b> (før ${esc(fmtDate(b.from, { year: true }))})`).join(', ');
+      noter.push(`Yahoo har ikke kurser så langt tilbage for ${liste}. Der regnes med den første kurs, som findes – så kurven dækker hele perioden, men bevæger sig lidt mindre i den ældste del.`);
+    }
+    if (h.fxToday?.length) {
+      noter.push(`Historiske valutakurser kunne ikke hentes for ${esc(h.fxToday.join(', '))} – de dage er omregnet med dagens kurs.`);
+    }
+    if (h.missing?.length) {
+      noter.push(`Ikke med i kurven: ${h.missing.map((m) => `<b>${esc(m.symbol)}</b> (${esc(m.error)})`).join(', ')}.`);
+    }
+    if (state.investedOffChart) {
+      noter.push('Investeret ligger uden for grafens skala og er ikke tegnet.');
+    }
+    el.innerHTML = noter.map((n) => `<p>${n}</p>`).join('');
+  }
+
+  function drawChart(box, points, events = []) {
     const W = Math.max(280, box.clientWidth || 600);
     const H = box.clientHeight || 240;
     const padL = 8, padR = 8, padT = 14, padB = 26;
     const values = points.map((p) => p.value);
     let min = Math.min(...values);
     let max = Math.max(...values);
-    if (isNum(invested) && invested > 0) {
-      min = Math.min(min, invested);
-      max = Math.max(max, invested);
+    // Investeret er en trappe: den stiger den dag, der blev lagt penge ind.
+    const inv = points.map((p) => p.invested);
+    const harInv = inv.every(isNum) && Math.max(...inv) > 0;
+    // Linjen må gerne udvide skalaen lidt, men ikke mase kurven flad. Ligger
+    // den længere væk end halvdelen af kurvens eget udsving, udelades den.
+    const spread = Math.max(max - min, Math.abs(max) * 0.005);
+    const invMin = harInv ? Math.min(...inv.filter((v) => v > 0)) : null;
+    const invMax = harInv ? Math.max(...inv) : null;
+    const showInvested = harInv && invMax > min - spread * 0.5 && invMin < max + spread * 0.5;
+    state.investedOffChart = harInv && !showInvested;
+    if (showInvested) {
+      min = Math.min(min, invMin);
+      max = Math.max(max, invMax);
     }
     if (max === min) { max += 1; min -= 1; }
     const span = max - min;
@@ -977,7 +1196,8 @@
       const v = min + ((max - min) * i) / steps;
       const yy = y(v).toFixed(1);
       gridLines.push(`<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="var(--chart-grid)" stroke-width="1"/>`);
-      if (i > 0 && i < steps) gridLines.push(`<text x="${W - padR}" y="${yy - 3}" text-anchor="end" font-size="10" fill="var(--muted)" class="amount">${esc(fmtCompact(v))}</text>`);
+      // Tallet får en kant i baggrundsfarven, så det kan læses oven på kurven.
+      if (i > 0 && i < steps) gridLines.push(`<text x="${W - padR}" y="${yy - 3}" text-anchor="end" font-size="10" fill="var(--muted)" stroke="var(--surface)" stroke-width="3" paint-order="stroke" class="amount">${esc(fmtCompact(v))}</text>`);
     }
     const labelCount = W < 480 ? 3 : 5;
     const xLabels = [];
@@ -987,9 +1207,28 @@
       const anchor = i === 0 ? 'start' : i === labelCount - 1 ? 'end' : 'middle';
       xLabels.push(`<text x="${x(p.date).toFixed(1)}" y="${H - 8}" text-anchor="${anchor}" font-size="10" fill="var(--muted)">${esc(fmtDate(p.date, { year: longRange() }))}</text>`);
     }
-    const investedLine = isNum(invested) && invested > 0
-      ? `<line x1="${padL}" x2="${W - padR}" y1="${y(invested).toFixed(1)}" y2="${y(invested).toFixed(1)}" stroke="var(--chart-invested)" stroke-width="1.5" stroke-dasharray="5 4"/>`
+    // Trappen tegnes vandret frem til købsdagen og så lodret op – ikke skråt,
+    // for pengene kom ind på én dag.
+    const investedLine = showInvested
+      ? `<path d="${points.map((p, i) => (i ? `H${x(p.date).toFixed(1)} V${y(p.invested).toFixed(1)}` : `M${x(p.date).toFixed(1)},${y(p.invested).toFixed(1)}`)).join(' ')}" fill="none" stroke="var(--chart-invested)" stroke-width="1.5" stroke-dasharray="5 4"/>`
       : '';
+    $$('.chart-invested-key').forEach((el) => el.classList.toggle('hidden', !showInvested));
+
+    // Et køb kan falde i en weekend; markøren sættes på første børsdag derefter,
+    // altså samme dag som hoppet i kurven.
+    const påIndex = new Map();
+    for (const ev of events) {
+      let i = points.findIndex((p) => p.date >= ev.date);
+      if (i < 0) i = points.length - 1;
+      if (!påIndex.has(i)) påIndex.set(i, []);
+      påIndex.get(i).push(ev);
+    }
+    $$('.chart-events-key').forEach((el) => el.classList.toggle('hidden', påIndex.size === 0));
+    const markører = [...påIndex.keys()].map((i) => {
+      const p = points[i];
+      return `<circle class="chart-event" cx="${x(p.date).toFixed(1)}" cy="${y(p.value).toFixed(1)}" r="4" fill="var(--surface)" stroke="var(--chart-line)" stroke-width="2"/>`;
+    }).join('');
+
     const last = points[points.length - 1];
     box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
       <defs><linearGradient id="chart-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--chart-line)" stop-opacity="0.22"/><stop offset="1" stop-color="var(--chart-line)" stop-opacity="0"/></linearGradient></defs>
@@ -997,6 +1236,7 @@
       <path d="${area}" fill="url(#chart-grad)"/>
       ${investedLine}
       <path d="${path}" fill="none" stroke="var(--chart-line)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      ${markører}
       <circle cx="${x(last.date).toFixed(1)}" cy="${y(last.value).toFixed(1)}" r="3.5" fill="var(--chart-line)" stroke="var(--surface)" stroke-width="2"/>
       <line id="chart-cursor" x1="0" x2="0" y1="${padT}" y2="${H - padB}" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 3" style="display:none"/>
       <circle id="chart-dot" r="4" fill="var(--chart-line)" stroke="var(--surface)" stroke-width="2" style="display:none"/>
@@ -1022,10 +1262,23 @@
       const cy = y(p.value);
       cursor.setAttribute('x1', cx); cursor.setAttribute('x2', cx); cursor.style.display = '';
       dot.setAttribute('cx', cx); dot.setAttribute('cy', cy); dot.style.display = '';
-      const change = p.value - points[0].value;
-      tip.innerHTML = `${esc(fmtDate(p.date, { year: true }))}<b class="amount">${fmtAmount(p.value)}</b><span class="amount">${fmtAmount(change, state.baseCurrency, { sign: true })}</span> siden start`;
+      // Afkast den dag: værdien mod det, der faktisk var lagt ind indtil da.
+      const afkast = isNum(p.invested) && p.invested > 0 ? p.value - p.invested : null;
+      // Blev der købt den dag, står hvad og for hvor meget – det forklarer hoppet.
+      const køb = (påIndex.get(best) || []).flatMap((ev) => ev.items).map((i) => {
+        const beløb = i.amount > 0
+          ? `for <b>${fmtPrice(i.amount)} ${esc(i.currency || '')}</b>${i.currency && i.currency !== state.baseCurrency ? ` (${fmtAmount(i.amountBase)})` : ''}`
+          : '';
+        return `<span class="tip-event">Købt ${fmtQty(i.quantity)}\u00a0stk. ${esc(i.name)} ${beløb}</span>`;
+      }).join('');
+      tip.innerHTML = `${esc(fmtDate(p.date, { year: true }))}<b class="amount">${fmtAmount(p.value)}</b>`
+        + (afkast == null
+          ? `<span class="amount">${fmtAmount(p.value - points[0].value, state.baseCurrency, { sign: true })}</span> siden start`
+          : `<span class="amount ${signClass(afkast)}">${fmtAmount(afkast, state.baseCurrency, { sign: true })}</span> af ${fmtAmount(p.invested)} indsat`)
+        + køb;
       tip.style.display = '';
-      const leftPx = clamp((cx / W) * rect.width, 70, rect.width - 70);
+      const halv = Math.min(tip.offsetWidth / 2 + 4, rect.width / 2);
+      const leftPx = clamp((cx / W) * rect.width, halv, rect.width - halv);
       tip.style.left = `${leftPx}px`;
       tip.style.top = `${(cy / H) * rect.height - 10}px`;
     };
@@ -1139,6 +1392,10 @@
   }
 
   function holdingsTable({ compact = false } = {}) {
+    // Ser man en andens portefølje, er der intet at redigere: ingen handlingskolonne
+    // og ingen klikbare rækker.
+    if (state.viewing) compact = compact || false;
+    const readonly = Boolean(state.viewing);
     const rows = sortedPositions({ applyFilter: !compact });
     const t = state.portfolio?.totals;
     const pendingOnly = !state.portfolio; // beholdninger kendt, kurser på vej
@@ -1153,16 +1410,16 @@
       { key: 'quantity', label: 'Antal', n: true, hide: compact },
       { key: 'price', label: 'Kurs', n: true, title: 'Seneste kurs i aktiens egen valuta' },
       { key: 'dayChangePercent', label: todayLabel, n: true, title: 'Ændring i forhold til forrige lukkekurs på aktiens egen børs' },
-      { key: 'avgPrice', label: 'Gns. købskurs', n: true, hide: compact },
+      { key: 'avgPrice', label: 'Gns. købskurs', n: true, hide: compact, cls: 'col-avg' },
       { key: 'valueBase', label: `Værdi (${esc(state.baseCurrency)})`, n: true },
       { key: 'gainBase', label: 'Afkast', n: true, title: AFKAST_TOOLTIP },
-      { key: 'weight', label: 'Andel', n: true, title: 'Andel af porteføljens samlede aktieværdi' },
+      { key: 'weight', label: 'Andel', n: true, title: 'Andel af porteføljens samlede aktieværdi', cls: 'col-share' },
     ].filter((c) => !c.hide);
     const th = cols.map((c) => {
       const sorted = state.sort.key === c.key;
       const ariaSort = sorted ? (state.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none';
-      return `<th class="${c.n ? 'n' : ''}${sorted ? ' sorted' : ''}" data-sort="${c.key}" aria-sort="${ariaSort}" tabindex="0" role="columnheader button" ${c.title ? `title="${esc(c.title)}"` : ''}>${c.label}<span class="sort-ind">${sorted ? (state.sort.dir === 'asc' ? '▲' : '▼') : ''}</span></th>`;
-    }).join('') + (compact ? '' : '<th class="n"><span class="sr-only">Handlinger</span></th>');
+      return `<th class="${c.n ? 'n' : ''}${sorted ? ' sorted' : ''}${c.cls ? ` ${c.cls}` : ''}" data-sort="${c.key}" aria-sort="${ariaSort}" tabindex="0" role="columnheader button" ${c.title ? `title="${esc(c.title)}"` : ''}>${c.label}<span class="sort-ind">${sorted ? (state.sort.dir === 'asc' ? '▲' : '▼') : ''}</span></th>`;
+    }).join('') + (compact || readonly ? '' : '<th class="n"><span class="sr-only">Handlinger</span></th>');
 
     const sk = '<span class="skeleton">00.000</span>';
     const tr = rows.map((p) => {
@@ -1170,8 +1427,8 @@
         const cells = [`<td>${stockCell(p)}</td>`];
         if (!compact) cells.push(`<td class="n">${fmtQty(p.quantity)}</td>`);
         cells.push(`<td class="n">${sk}</td><td class="n">${sk}</td>`);
-        if (!compact) cells.push(`<td class="n">${isNum(p.avgPrice) ? fmtPrice(p.avgPrice) : '<span class="muted">–</span>'}</td>`);
-        cells.push(`<td class="n">${sk}</td><td class="n">${sk}</td><td class="n">${sk}</td>`);
+        if (!compact) cells.push(`<td class="n col-avg">${isNum(p.avgPrice) ? fmtPrice(p.avgPrice) : '<span class="muted">–</span>'}</td>`);
+        cells.push(`<td class="n">${sk}</td><td class="n">${sk}</td><td class="n col-share">${sk}</td>`);
         if (!compact) cells.push('<td></td>');
         return `<tr>${cells.join('')}</tr>`;
       }
@@ -1185,30 +1442,35 @@
       if (!compact) cells.push(`<td class="n">${fmtQty(p.quantity)}</td>`);
       cells.push(`<td class="n${stale ? ' stale' : ''}" ${stale ? `title="${esc(staleTitle(p))}"` : ''}>${hasPrice ? `${stale ? '⏱ ' : ''}${fmtPrice(p.price)} <span class="muted small">${esc(p.currency || '')}</span>` : '–'}</td>`);
       cells.push(`<td class="n${dayMuted ? ' stale' : ''}" ${dayTitle ? `title="${esc(dayTitle)}"` : ''}><div class="cell-2"><span class="${dayMuted ? '' : signClass(p.dayChangePercent)}">${arrow(p.dayChangePercent)}${fmtPct(p.dayChangePercent)}</span><span class="sub amount">${fmtAmount(p.dayChangeBase, state.baseCurrency, { sign: true })}</span></div></td>`);
-      if (!compact) cells.push(`<td class="n">${isNum(p.avgPrice) ? fmtPrice(p.avgPrice) : '<span class="muted">–</span>'}</td>`);
+      if (!compact) cells.push(`<td class="n col-avg">${isNum(p.avgPrice) ? fmtPrice(p.avgPrice) : '<span class="muted">–</span>'}</td>`);
       cells.push(`<td class="n"><b class="amount">${fmtAmount(p.valueBase)}</b></td>`);
       cells.push(`<td class="n"><div class="cell-2"><span class="amount ${signClass(p.gainBase)}">${fmtAmount(p.gainBase, state.baseCurrency, { sign: true })}</span><span class="sub ${signClass(p.gainPercent)}">${fmtPct(p.gainPercent)}</span></div></td>`);
-      cells.push(`<td class="n">${isNum(p.weight) ? `${fmtPct(p.weight, { sign: false })}<span class="weight-bar"><i style="width:${clamp(p.weight, 0, 100).toFixed(1)}%"></i></span>` : '–'}</td>`);
-      if (!compact) cells.push(`<td class="n"><div class="row-actions"><button class="btn btn-ghost btn-icon" data-action="menu" data-id="${esc(p.id)}" title="Handlinger" aria-label="Handlinger for ${esc(p.name)}">${icon('more')}</button></div></td>`);
+      cells.push(`<td class="n col-share">${isNum(p.weight) ? `${fmtPct(p.weight, { sign: false })}<span class="weight-bar"><i style="width:${clamp(p.weight, 0, 100).toFixed(1)}%"></i></span>` : '–'}</td>`);
+      if (!compact && !readonly) cells.push(`<td class="n"><div class="row-actions"><button class="btn btn-ghost btn-icon" data-action="menu" data-id="${esc(p.id)}" title="Handlinger" aria-label="Handlinger for ${esc(p.name)}">${icon('more')}</button></div></td>`);
+      if (readonly) return `<tr data-symbol="${esc(p.symbol)}" class="${hasPrice ? '' : 'error-row'}">${cells.join('')}</tr>`;
       return `<tr data-action="open" data-symbol="${esc(p.symbol)}" class="${hasPrice ? '' : 'error-row'}" tabindex="0" aria-label="Vis detaljer for ${esc(p.name || p.symbol)}">${cells.join('')}</tr>`;
     }).join('');
 
     const foot = t && !pendingOnly ? `<tfoot><tr>
-      <td>I alt</td>${compact ? '' : '<td></td>'}<td></td>
+      <td>I alt</td>${compact || readonly ? '' : '<td></td>'}<td></td>
       <td class="n"><div class="cell-2"><span class="${signClass(t.dayChangePercent)}">${fmtPct(t.dayChangePercent)}</span><span class="sub amount ${signClass(t.dayChangeBase)}">${fmtAmount(t.dayChangeBase, state.baseCurrency, { sign: true })}</span></div></td>
-      ${compact ? '' : '<td></td>'}
+      ${compact || readonly ? '' : '<td class="col-avg"></td>'}
       <td class="n"><span class="amount">${fmtAmount(t.valueBase)}</span></td>
       <td class="n"><div class="cell-2"><span class="amount ${signClass(t.gainBase)}">${fmtAmount(t.gainBase, state.baseCurrency, { sign: true })}</span><span class="sub ${signClass(t.gainPercent)}">${fmtPct(t.gainPercent)}</span></div></td>
-      <td class="n">100 %</td>${compact ? '' : '<td></td>'}
+      <td class="n col-share">100 %</td>${compact || readonly ? '' : '<td></td>'}
     </tr></tfoot>` : '';
 
     const cards = rows.map((p) => pendingOnly
-      ? `<div class="hcard"><div class="l1">${esc(p.name || p.symbol)}</div><div class="r1">${sk}</div><div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk.</div><div class="r2">${sk}</div></div>`
-      : `<div class="hcard" data-action="open" data-symbol="${esc(p.symbol)}" tabindex="0" role="button">
+      ? `<div class="hcard"><div class="l1">${esc(p.name || p.symbol)}</div><div class="r1">${sk}</div><div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)}\u00a0stk.</div><div class="r2">${sk}</div></div>`
+      // Tre linjer i stedet for to: så er der plads til både valuta og depot,
+      // uden at noget klippes af på en smal skærm.
+      : `<div class="hcard"${readonly ? '' : ` data-action="open" data-symbol="${esc(p.symbol)}" tabindex="0" role="button"`}>
       <div class="l1">${p.status !== 'ok' ? '<span class="warn-dot"></span>' : ''}${esc(p.name || p.symbol)}</div>
       <div class="r1 amount">${fmtAmount(p.valueBase)}</div>
-      <div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk. · ${isNum(p.price) ? `${fmtPrice(p.price)} ${esc(p.currency || '')}` : 'ingen kurs'}${p.accountName && state.account === 'all' ? ` · ${esc(p.accountName)}` : ''}</div>
-      <div class="r2"><span class="${p.status === 'stale' ? 'stale' : signClass(p.dayChangePercent)}">${arrow(p.dayChangePercent)}${fmtPct(p.dayChangePercent)}</span> <span class="muted">·</span> <span class="muted small">Afkast</span> <span class="${signClass(p.gainPercent)}">${fmtPct(p.gainPercent)}</span></div>
+      <div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)}\u00a0stk.${p.accountName && state.account === 'all' ? ` · ${esc(p.accountName)}` : ''}</div>
+      <div class="r2"><span class="${p.status === 'stale' ? 'stale' : signClass(p.dayChangePercent)}">${arrow(p.dayChangePercent)}${fmtPct(p.dayChangePercent)}</span></div>
+      <div class="l3">${isNum(p.price) ? `${fmtPrice(p.price)} ${esc(p.currency || '')}` : 'ingen kurs'}</div>
+      <div class="r3"><span class="muted">afkast</span> <span class="${signClass(p.gainPercent)}">${fmtPct(p.gainPercent)}</span></div>
     </div>`).join('');
     const cardTotal = t && !pendingOnly ? `<div class="hcard-total"><span>I alt</span><span class="amount">${fmtAmount(t.valueBase)}</span></div>` : '';
 
@@ -1235,6 +1497,292 @@
       <p class="footer-note">Tryk på en aktie for detaljer – her kan du købe til, sælge, redigere eller slette.</p>`}`;
   }
 
+  // ---------- Analyse ----------
+
+  async function loadAnalytics() {
+    state.analytics.loading = true;
+    try {
+      const data = await api('GET', '/api/analytics');
+      state.analytics = { data, loaded: true, loading: false };
+    } catch (err) {
+      state.analytics = { data: null, loaded: true, loading: false };
+      toast(err.message, 'error');
+    }
+    render();
+  }
+
+  // Samme regnestykke som på serveren: renter tilskrives månedligt.
+  function projectValue({ start = 0, perMonth = 0, annualPercent = 0, years = 10 }) {
+    const måneder = Math.max(0, Math.round(years * 12));
+    const r = (1 + annualPercent / 100) ** (1 / 12) - 1;
+    const vokset = start * (1 + r) ** måneder;
+    const bidrag = Math.abs(r) < 1e-9 ? perMonth * måneder : perMonth * (((1 + r) ** måneder - 1) / r);
+    const indbetalt = start + perMonth * måneder;
+    const slut = vokset + bidrag;
+    return { value: slut, contributed: indbetalt, growth: slut - indbetalt };
+  }
+
+  // Hvad fremskrivningen regner med, hvis brugeren ikke selv har rettet noget.
+  const DEFAULT_VÆKST = 7;
+  function faktaKort(ikon, titel, liste, note = '') {
+    if (!liste.length) return '';
+    return `<div class="card">
+        <div class="card-header"><h2>${icon(ikon)}${esc(titel)}</h2></div>
+        <div class="card-body">
+          <ul class="fact-list">${liste.map(([i, tekst]) => `<li>${i}<span>${tekst}</span></li>`).join('')}</ul>
+          ${note ? `<p class="muted small" style="margin:12px 0 0">${esc(note)}</p>` : ''}
+        </div>
+      </div>`;
+  }
+
+  // "2025-10" → "oktober 2025"
+  function månedNavn(m) {
+    const d = new Date(`${m}-01T12:00:00Z`);
+    if (Number.isNaN(d.getTime())) return m;
+    return d.toLocaleDateString('da-DK', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  }
+
+  function planInput(a) {
+    const perMonth = state.plan.perMonth ?? (isNum(a.perMonth) ? Math.round(a.perMonth) : 0);
+    // Eget afkast bruges kun, når der er over et års historik bag det.
+    const eget = a.annualizedReliable && isNum(a.annualizedPercent) ? a.annualizedPercent : null;
+    const growth = state.plan.growth ?? (eget === null ? DEFAULT_VÆKST : Math.round(eget * 10) / 10);
+    return { perMonth, growth, eget, years: state.plan.years };
+  }
+
+  function renderAnalytics() {
+    const { data: a, loaded } = state.analytics;
+    if (!loaded) return `${pageHeader('Analyse', '<span>Henter…</span>', headerActions({ add: false }))}`;
+    if (!a || !a.positionsTotal) {
+      return `${pageHeader('Analyse', '<span>Tal om din portefølje</span>', headerActions({ add: false }))}
+        <div class="card"><div class="empty">${icon('chart')}<h3>Ikke noget at regne på endnu</h3><p>Tilføj dine aktier – og skriv gerne købsdatoen på. Så kan der regnes på, hvor meget du lægger til side om måneden, og hvad det kan blive til.</p></div></div>`;
+    }
+
+    const { perMonth, growth, eget, years } = planInput(a);
+    const f = projectValue({ start: a.value, perMonth, annualPercent: growth, years });
+    const årValg = [5, 10, 15, 20, 30].map((å) => `<button type="button" class="chip-btn${å === years ? ' active' : ''}" data-action="plan-years" data-years="${å}">${å} år</button>`).join('');
+
+    // ---------- sjove tal ----------
+    const fakta = [];
+    if (isNum(a.months)) fakta.push([icon('chart'), `Du har investeret i <b>${esc(ejertid(a.days))}</b> – siden ${esc(fmtDate(a.since, { year: true }))}.`]);
+    if (isNum(a.perDay)) fakta.push([icon(a.perDay >= 0 ? 'trend' : 'warn'), `Porteføljen har i gennemsnit ${a.perDay >= 0 ? 'tjent' : 'tabt'} <b class="amount ${signClass(a.perDay)}">${fmtAmount(Math.abs(a.perDay))}</b> om dagen.`]);
+    if (isNum(a.gainShare)) fakta.push([icon('briefcase'), `<b>${fmtPct(a.gainShare, { sign: false })}</b> af det, porteføljen er værd, er afkast. Resten er dine egne penge.`]);
+    if (a.biggest) fakta.push([icon('list'), `Størst: <b>${esc(a.biggest.name)}</b>${isNum(a.biggest.weight) ? ` – ${fmtPct(a.biggest.weight, { sign: false })} af porteføljen` : ''}.`]);
+    if (isNum(a.concentration) && a.positionsTotal > 3) fakta.push([icon('list'), `Dine tre største fylder <b>${fmtPct(a.concentration, { sign: false })}</b> tilsammen.`]);
+    if (a.best) fakta.push([icon('trend'), `Højest afkast: <b>${esc(a.best.name)}</b> med <span class="${signClass(a.best.gainPercent)}">${fmtPct(a.best.gainPercent)}</span>.`]);
+    if (a.worst) fakta.push([icon(a.worst.gainPercent < 0 ? 'warn' : 'list'), `Lavest afkast: <b>${esc(a.worst.name)}</b> med <span class="${signClass(a.worst.gainPercent)}">${fmtPct(a.worst.gainPercent)}</span>${a.worst.gainPercent >= 0 ? ' – stadig i plus' : ''}.`]);
+    if (a.longestHeld) fakta.push([icon('chart'), `Længst ejet: <b>${esc(a.longestHeld.name)}</b> i ${esc(punktum(ejertid(a.longestHeld.heldDays)))}`]);
+    if (isNum(a.doublingYears)) fakta.push([icon('trend'), `Fortsætter væksten, er pengene fordoblet om <b>${fmtNum(a.doublingYears, 0, 1)} år</b>.`]);
+    if (a.currencies > 1) fakta.push([icon('eye'), `Du har papirer i <b>${a.currencies} valutaer</b>${a.accounts ? ` fordelt på ${a.accounts} ${a.accounts === 1 ? 'depot' : 'depoter'}` : ''}.`]);
+    if (isNum(a.units) && a.units > 0) fakta.push([icon('briefcase'), `Du ejer <b>${fmtQty(a.units)} andele</b> i alt, fordelt på ${a.positionsTotal} ${a.positionsTotal === 1 ? 'papir' : 'papirer'}.`]);
+
+    // ---------- dine køb ----------
+    const købFakta = [];
+    if (a.purchases > 1) {
+      købFakta.push([icon('cart'), `Du har købt <b>${a.purchases} gange</b> siden ${esc(fmtDate(a.firstBuy, { year: true }))}${isNum(a.daysBetweenBuys) ? ` – ét køb hver <b>${fmtNum(a.daysBetweenBuys, 0, 0)}. dag</b> i gennemsnit` : ''}.`]);
+    } else if (a.purchases === 1) {
+      købFakta.push([icon('cart'), `Ét køb registreret – den ${esc(fmtDate(a.firstBuy, { year: true }))}.`]);
+    }
+    if (isNum(a.daysSinceLastBuy)) {
+      købFakta.push([icon('chart'), a.daysSinceLastBuy === 0
+        ? 'Dit seneste køb var <b>i dag</b>.'
+        : `Der er gået <b>${esc(ejertid(a.daysSinceLastBuy))}</b> siden dit seneste køb den ${esc(fmtDate(a.lastBuy, { year: true }))}.`]);
+    }
+    if (a.biggestBuy) købFakta.push([icon('trend'), `Største enkeltkøb: <b>${esc(a.biggestBuy.name)}</b> for <b class="amount">${fmtAmount(a.biggestBuy.amountBase)}</b> den ${esc(fmtDate(a.biggestBuy.date, { year: true }))}.`]);
+    if (isNum(a.avgBuy)) købFakta.push([icon('list'), `Et typisk køb hos dig er på <b class="amount">${fmtAmount(a.avgBuy)}</b>`]);
+    if (a.busiestMonth) købFakta.push([icon('chart'), `Travleste måned: <b>${esc(månedNavn(a.busiestMonth.month))}</b> med <b class="amount">${fmtAmount(a.busiestMonth.amountBase)}</b> fordelt på ${a.busiestMonth.count} ${a.busiestMonth.count === 1 ? 'køb' : 'køb'}.`]);
+
+    // ---------- rekorder ----------
+    const r = a.records;
+    const rekorder = [];
+    if (r) {
+      const påToppen = isNum(r.fromPeakPercent) && r.fromPeakPercent > -0.05;
+      // "Nogensinde" holder kun, når alle papirer har en købsdato – ellers
+      // dækker kurven også tid, hvor man ikke ejede dem.
+      const nogensinde = a.withoutDates ? 'højeste i den viste periode' : 'højeste nogensinde';
+      rekorder.push([icon('trend'), påToppen
+        ? `Porteføljen står på sit <b>${nogensinde}</b>: <b class="amount">${fmtAmount(r.peak.value)}</b>`
+        : `Toppen var <b class="amount">${fmtAmount(r.peak.value)}</b> den ${esc(fmtDate(r.peak.date, { year: true }))} – du er <b class="neg">${fmtPct(r.fromPeakPercent)}</b> under.`]);
+      if (r.bestDay && isNum(r.bestDay.change)) rekorder.push([icon('trend'), `Bedste dag: <b class="amount pos">${fmtAmount(r.bestDay.change, state.baseCurrency, { sign: true })}</b> den ${esc(fmtDate(r.bestDay.date, { year: true }))}.`]);
+      if (r.worstDay && isNum(r.worstDay.change)) rekorder.push([icon('warn'), `Værste dag: <b class="amount neg">${fmtAmount(r.worstDay.change, state.baseCurrency, { sign: true })}</b> den ${esc(fmtDate(r.worstDay.date, { year: true }))}.`]);
+      if (isNum(r.daysInProfit) && r.tradingDays) {
+        const andel = (r.daysInProfit / r.tradingDays) * 100;
+        rekorder.push([icon('chart'), `Du har været i plus <b>${r.daysInProfit} af ${r.tradingDays} børsdage</b> – ${fmtPct(andel, { sign: false })} af tiden.`]);
+      }
+      if (r.longestStreak > 1) rekorder.push([icon('list'), `Længste stime: <b>${r.longestStreak} dage i træk</b> med fremgang.`]);
+    }
+
+    return `
+      ${pageHeader('Analyse', `<span>Tal om din portefølje</span>`, headerActions({ add: false }))}
+
+      ${a.withoutDates ? `<div class="banner">${icon('warn')}<div><b>${a.withoutDates} ${a.withoutDates === 1 ? 'papir mangler' : 'papirer mangler'} en købsdato.</b> Uden den kan der ikke regnes på tid – hverken månedligt gennemsnit eller afkast pr. år. Datoen sættes under Redigér.</div></div>` : ''}
+
+      <div class="grid grid-kpi">
+        <div class="card kpi kpi-hero">
+          <div class="kpi-label">Investeret pr. måned</div>
+          <div class="kpi-value amount">${isNum(a.perMonth) ? fmtAmount(a.perMonth) : '–'}</div>
+          <div class="kpi-sub">${isNum(a.months) ? `i gennemsnit over ${fmtNum(a.months, 0, 0)} måneder` : 'kræver købsdatoer'}</div>
+        </div>
+        <div class="card kpi">
+          <div class="kpi-label">Investeret i alt</div>
+          <div class="kpi-value amount">${fmtAmount(a.invested)}</div>
+          <div class="kpi-sub">dine egne indbetalinger</div>
+        </div>
+        <div class="card kpi">
+          <div class="kpi-label">Afkast pr. år</div>
+          <div class="kpi-value amount ${signClass(a.annualizedPercent)}">${isNum(a.annualizedPercent) ? fmtPct(a.annualizedPercent) : '–'}</div>
+          <div class="kpi-sub">${isNum(a.annualizedPercent) ? (a.annualizedReliable ? 'over hele ejertiden' : 'kort historik – tallet svinger meget') : 'kræver købsdatoer'}</div>
+        </div>
+        <div class="card kpi">
+          <div class="kpi-label">Værdi nu</div>
+          <div class="kpi-value amount">${fmtAmount(a.value)}</div>
+          <div class="kpi-sub ${signClass(a.gain)}">${fmtAmount(a.gain, state.baseCurrency, { sign: true })} i afkast</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2>${icon('trend')}Hvis det fortsætter sådan her</h2></div>
+        <div class="card-body">
+          <div class="chip-row" style="margin-bottom:14px">${årValg}</div>
+          <div class="plan-grid">
+            <div class="field">
+              <label for="plan-month">Jeg lægger til side hver måned</label>
+              <div class="input-group"><input class="input n" id="plan-month" inputmode="decimal" value="${esc(fmtRaw(perMonth))}"><span class="addon">${esc(a.baseCurrency)}</span></div>
+            </div>
+            <div class="field">
+              <label for="plan-growth">Vækst om året</label>
+              <div class="input-group"><input class="input n" id="plan-growth" inputmode="decimal" value="${esc(fmtRaw(growth))}"><span class="addon">%</span></div>
+              <span class="help">${eget === null ? `Der er ikke historik nok til dit eget tal endnu, så der regnes med ${DEFAULT_VÆKST} %.` : `Dit eget afkast hidtil er ${fmtPct(eget)}.`}</span>
+            </div>
+          </div>
+
+          <div class="plan-result">
+            <div class="plan-total">
+              <div class="kpi-label">Om ${years} år har du</div>
+              <div class="plan-value amount">${fmtAmount(f.value)}</div>
+            </div>
+            <dl class="kv">
+              <dt>Heraf lagt til side selv</dt><dd class="amount">${fmtAmount(f.contributed)}</dd>
+              <dt>Heraf vækst</dt><dd class="amount ${signClass(f.growth)}">${fmtAmount(f.growth, state.baseCurrency, { sign: true })}</dd>
+            </dl>
+          </div>
+          <p class="muted small" style="margin:12px 0 0">Det er et regnestykke, ikke en forudsigelse. Markedet giver ikke det samme hvert år, og et enkelt dårligt år ændrer tallet markant. Skatten er ikke regnet med.</p>
+        </div>
+      </div>
+
+      <div class="grid fact-grid">
+        ${faktaKort('list', 'Om din portefølje', fakta)}
+        ${faktaKort('cart', 'Dine køb', købFakta)}
+        ${faktaKort('trend', 'Rekorder', rekorder, 'Målt på kursbevægelser – dine egne indbetalinger er trukket fra, så en indbetaling ikke tæller som en god dag.')}
+      </div>`;
+  }
+
+  // ---------- Platform: profil, følgere, søgning ----------
+
+  async function loadMe() {
+    try {
+      const data = await api('GET', '/api/me');
+      state.me = data.user;
+      state.inviteCode = data.inviteCode || null;
+    } catch {
+      /* ikke logget ind eller ikke en platform – siden virker uden */
+    }
+  }
+
+  let peopleTimer = null;
+
+  async function loadPeople(q = '') {
+    state.people.loading = true;
+    try {
+      const data = await api('GET', q.trim() ? `/api/people?q=${encodeURIComponent(q.trim())}` : '/api/people');
+      if (state.people.q !== q) return;
+      state.people = { q, results: data.people, loading: false, loaded: true };
+    } catch (err) {
+      state.people = { q, results: [], loading: false, loaded: true };
+      toast(err.message, 'error');
+    }
+    render();
+  }
+
+  // Filtreringen sker på serveren, men først når man holder pause i tastningen.
+  function searchPeopleSoon(q) {
+    state.people.q = q;
+    clearTimeout(peopleTimer);
+    peopleTimer = setTimeout(() => loadPeople(q), 250);
+  }
+
+  // Skifter til en andens portefølje (eller tilbage til ens egen).
+  function viewPerson(id) {
+    if (state.viewing?.id === id) return;
+    state.viewingDenied = false;
+    state.viewing = { id, name: 'Profil' };
+    state.portfolio = null;
+    state.pending = null;
+    state.loadError = null;
+    render();
+    loadPortfolio();
+  }
+
+  function stopViewing() {
+    if (!state.viewing) return;
+    state.viewing = null;
+    state.portfolio = null;
+    state.pending = null;
+    state.loadError = null;
+    loadPortfolio();
+  }
+
+  // ---------- Folk: find, følg, godkend ----------
+
+  const personInitials = (name) => String(name || '?').split(' ').filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
+
+  function renderPeople() {
+    const { results, loading, loaded, q } = state.people;
+    const liste = results.map((person) => `
+      <a class="person-row person-link" href="/profil/${esc(person.id)}" data-link>
+        <span class="avatar" aria-hidden="true">${esc(personInitials(person.name))}</span>
+        <span class="person-name">${esc(person.name)}${person.isOwner ? ' <span class="hint">ejer</span>' : ''}</span>
+        <span class="person-go" aria-hidden="true">Se portefølje →</span>
+      </a>`).join('');
+
+    return `
+      ${pageHeader('Folk', '<span>Se hvad de andre har i deres portefølje</span>', headerActions({ add: false }))}
+      <div class="card">
+        <div class="card-header"><h2>${icon('users')}Profiler${loaded ? ` <span class="hint">${results.length}</span>` : ''}</h2></div>
+        <div class="card-body">
+          <div class="input-group" style="max-width:360px;margin-bottom:8px"><input class="input" id="people-search" type="search" placeholder="Søg efter navn…" value="${esc(q)}" aria-label="Søg efter profil"></div>
+          ${loading && !loaded ? '<p class="muted">Henter…</p>'
+            : results.length ? liste
+            : q ? `<p class="muted">Ingen profiler matcher "${esc(q)}".</p>`
+            : '<p class="muted">Der er ingen andre profiler endnu. Del din invitationskode fra Indstillinger, så kan de andre komme med.</p>'}
+        </div>
+      </div>`;
+  }
+
+  // En andens portefølje. Samme tal som ens egen, men intet kan ændres.
+  function renderPerson() {
+    const v = state.viewing;
+    if (state.loadError && !state.portfolio) {
+      return `${pageHeader('Profil', '<span>Kunne ikke hentes</span>')}
+        <div class="banner error">${icon('warn')}<div><b>${esc(state.loadError)}</b> <a href="/folk" data-link>Tilbage til Folk</a></div></div>`;
+    }
+    if (!v) return `${pageHeader('Profil', '<span>Henter…</span>')}`;
+    const p = state.portfolio;
+    return `
+      ${pageHeader(esc(v.name), `<span>Portefølje · kun visning</span>${updatedSub()}`, `<a class="btn" href="/folk" data-link>${icon('list')}<span>Tilbage</span></a><button class="btn btn-ghost btn-icon${state.loading ? ' is-loading' : ''}" data-action="refresh" title="Opdatér kurser" aria-label="Opdatér kurser">${icon('refresh')}</button>`)}
+      <div class="banner info">${icon('eye')}<div>Du ser <b>${esc(v.name)}s</b> portefølje. Du kan ikke ændre noget her.</div></div>
+      ${p ? `
+      <div class="grid grid-kpi">
+        <div class="card kpi kpi-hero"><div class="kpi-label">Porteføljeværdi</div><div class="kpi-value amount">${fmtAmount(p.totals.totalValueBase ?? p.totals.valueBase)}</div><div class="kpi-sub">${p.totals.positionCount} ${p.totals.positionCount === 1 ? 'aktie' : 'aktier'}</div></div>
+        <div class="card kpi"><div class="kpi-label">${allMarketsClosed() ? 'Seneste handelsdag' : 'I dag'}</div><div class="kpi-value amount ${signClass(p.totals.dayChangeBase)}">${fmtAmount(p.totals.dayChangeBase, state.baseCurrency, { sign: true })}</div><div class="kpi-sub ${signClass(p.totals.dayChangePercent)}">${fmtPct(p.totals.dayChangePercent)}</div></div>
+        <div class="card kpi"><div class="kpi-label">Samlet afkast</div><div class="kpi-value amount ${signClass(p.totals.gainBase)}">${fmtAmount(p.totals.gainBase, state.baseCurrency, { sign: true })}</div><div class="kpi-sub ${signClass(p.totals.gainPercent)}">${fmtPct(p.totals.gainPercent)}</div></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h2>${icon('list')}Aktier</h2></div>
+        ${holdingsTable({ compact: false })}
+      </div>` : '<p class="muted">Henter portefølje…</p>'}`;
+  }
+
   // ---------- Indstillinger ----------
 
   function renderSettings() {
@@ -1246,8 +1794,13 @@
       <div class="settings-grid">
         <div class="card">
           <div class="card-header"><h2>${icon('lock')}Konto</h2></div>
-          <div class="setting-row"><div><div class="lbl">Dit navn</div><div class="desc">Bruges i hilsenen på forsiden.</div></div><input class="input" id="set-name" style="max-width:180px" value="${esc(s.displayName || '')}" placeholder="F.eks. Mikkel" maxlength="40" aria-label="Dit navn"></div>
-          ${state.storage === 'browser' ? `<div class="setting-row"><div><div class="lbl">Browser-tilstand – intet login</div><div class="desc">Serveren har ingen database, så dine aktier og indstillinger gemmes kun i denne browser (de sendes til serveren for at få kurser, men gemmes ikke der). Tag jævnligt en sikkerhedskopi under Data. Vil du have login og synkronisering mellem enheder, så tilføj Upstash Redis og DASHBOARD_PASSWORD til Vercel-projektet – se README.</div></div></div>` : `
+          <div class="setting-row"><div><div class="lbl">Dit navn</div><div class="desc">${state.access === 'platform' ? 'Vises i hilsenen – og er sådan, andre finder dig.' : 'Bruges i hilsenen på forsiden.'}</div></div><input class="input" id="set-name" style="max-width:200px" value="${esc(state.access === 'platform' ? state.me?.name || '' : s.displayName || '')}" placeholder="F.eks. Mikkel Frost" maxlength="40" aria-label="Dit navn"></div>
+          ${state.access === 'platform' ? `
+          <div class="setting-row"><div><div class="lbl">E-mail</div><div class="desc">Bruges til at logge ind. Andre kan finde dig med den, men de får den aldrig at se.</div></div><span class="muted">${esc(state.me?.email || '')}</span></div>
+          <div class="setting-row"><div><div class="lbl">Adgangskode</div><div class="desc">Skifter du den, logges dine andre enheder ud.</div></div><button class="btn btn-sm" data-action="change-password">Skift adgangskode</button></div>
+          ${state.inviteCode ? `<div class="setting-row"><div><div class="lbl">Invitationskode</div><div class="desc">Del den med dem, du vil have med. Uden en kode kan ingen oprette en profil.</div></div><div class="invite-box"><code class="invite-code">${esc(state.inviteCode)}</code><button class="btn btn-sm" data-action="copy-invite">Kopiér</button><button class="btn btn-sm" data-action="rotate-invite">Ny kode</button></div></div>` : ''}
+          ` : ''}
+          ${state.access === 'platform' ? '' : state.storage === 'browser' ? `<div class="setting-row"><div><div class="lbl">Browser-tilstand – intet login</div><div class="desc">Serveren har ingen database, så dine aktier og indstillinger gemmes kun i denne browser (de sendes til serveren for at få kurser, men gemmes ikke der). Tag jævnligt en sikkerhedskopi under Data. Vil du have, at porteføljen følger med til alle dine enheder, så tilslut en database – se README.</div></div></div>` : state.access === 'open' ? `<div class="setting-row"><div><div class="lbl">Åben adgang – intet login</div><div class="desc">Porteføljen ligger i databasen og vises, så snart siden åbnes – på alle dine enheder og i alle browsere. Det betyder også, at alle der kender adressen, kan se og ændre den.</div></div><button class="btn btn-sm btn-primary" data-action="setup-password">Opret adgangskode</button></div>` : `
           <div class="setting-row"><div><div class="lbl">Adgangskode</div><div class="desc">${usesEnvPassword ? 'Styres af DASHBOARD_PASSWORD på serveren.' : 'Skift adgangskoden til dashboardet.'}</div></div><button class="btn btn-sm" data-action="change-password" ${usesEnvPassword ? 'disabled' : ''}>Skift adgangskode</button></div>
           <div class="setting-row"><div><div class="lbl">Log ud på alle enheder</div><div class="desc">Ugyldiggør alle aktive logins, også dette.</div></div><button class="btn btn-sm" data-action="logout-all">Log ud overalt</button></div>`}
         </div>
@@ -1347,14 +1900,18 @@
         <div>
           <h3>Din position</h3>
           <dl class="kv">
-            <dt>Antal</dt><dd>${fmtQty(p.quantity)} stk.</dd>
+            <dt>Antal</dt><dd>${fmtQty(p.quantity)}\u00a0stk.</dd>
             <dt>Gns. købskurs</dt><dd>${isNum(p.avgPrice) ? `${fmtPrice(p.avgPrice)} ${esc(cur)}` : '<span class="muted">ikke angivet</span>'}</dd>
             <dt>Investeret</dt><dd class="amount">${fmtAmount(p.costBase)}</dd>
             <dt>Værdi</dt><dd class="amount">${fmtAmount(p.valueBase)}</dd>
             <dt>Afkast</dt><dd class="${signClass(p.gainBase)}">${isNum(p.gainBase) ? `<span class="amount">${fmtAmount(p.gainBase, state.baseCurrency, { sign: true })}</span> (${fmtPct(p.gainPercent)})` : '<span class="muted">– tilføj købskurs under Redigér</span>'}</dd>
+            ${isNum(p.annualizedPercent) ? `<dt title="Afkastet omregnet til, hvad det svarer til pr. år">Afkast pr. år</dt><dd class="${signClass(p.annualizedPercent)}">${fmtPct(p.annualizedPercent)}</dd>` : ''}
             <dt>I dag</dt><dd class="${signClass(p.dayChangeBase)}"><span class="amount">${fmtAmount(p.dayChangeBase, state.baseCurrency, { sign: true })}</span></dd>
             <dt>Andel af portefølje</dt><dd>${fmtPct(p.weight, { sign: false })}</dd>
+            <dt>Købt den</dt><dd>${p.purchasedAt ? `${esc(fmtDate(p.purchasedAt, { year: true }))}${isNum(p.heldDays) ? ` <span class="muted">· ${esc(ejertid(p.heldDays))}</span>` : ''}` : '<span class="muted">ikke angivet</span>'}</dd>
+            ${p.weightedAt && p.weightedAt !== p.purchasedAt ? `<dt title="Den dato pengene i gennemsnit blev sat ind. Afkast pr. år regnes herfra.">Pengene i snit</dt><dd>${esc(fmtDate(p.weightedAt, { year: true }))}${isNum(p.moneyDays) ? ` <span class="muted">· ${esc(ejertid(p.moneyDays))}</span>` : ''}</dd>` : ''}
           </dl>
+          ${lotList(p)}
           ${fx}
           ${isNum(p.gainBase) ? `<div class="muted small" style="margin-top:6px">${esc(AFKAST_TOOLTIP)}</div>` : ''}
           ${p.note ? `<div class="muted small" style="margin-top:8px">Note: ${esc(p.note)}</div>` : ''}
@@ -1445,6 +2002,7 @@
     $('#add-qty').value = '';
     $('#add-price').value = '';
     $('#add-note').value = '';
+    $('#add-date').value = '';
     setError('#add-error', '');
     showAddStep('search');
     openDialog('#dlg-add');
@@ -1503,18 +2061,34 @@
   }
 
   // Ejer du allerede aktien i det valgte depot, bliver dialogen til "Køb til": det du skriver lægges oveni.
+  // Sætter fokus i et felt kort efter en dialog åbner – men kun hvis brugeren ikke
+  // allerede selv er i gang et andet sted. Ellers kan tastning nå at lande i det
+  // forkerte felt, når fokus rykkes bagefter.
+  function focusSoon(selector, ms = 30) {
+    setTimeout(() => {
+      const el = $(selector);
+      if (!el) return;
+      const aktiv = document.activeElement;
+      const iGang = aktiv && aktiv !== document.body && aktiv !== el
+        && (aktiv.tagName === 'INPUT' || aktiv.tagName === 'SELECT' || aktiv.tagName === 'TEXTAREA');
+      if (iGang) return;
+      el.focus();
+    }, ms);
+  }
+
   function applyAddMode() {
     if (!add.selected) return;
     const accountId = $('#add-account').value || null;
     add.existing = state.allHoldings.find((h) => sameSlot(h, add.selected.symbol, accountId)) || null;
     const buy = Boolean(add.existing);
     $('#add-mode-notice').innerHTML = buy
-      ? `<div class="notice info">Du ejer allerede <b>${fmtQty(add.existing.quantity)} stk.</b>${accountId ? ` i ${esc(accountName(accountId) || 'depotet')}` : ''}${isNum(add.existing.avgPrice) ? ` til gns. <b>${fmtPrice(add.existing.avgPrice)} ${esc(add.existing.currency || '')}</b>` : ''}. Det du skriver her lægges oveni, og gennemsnitskursen regnes ud for dig.</div>`
+      ? `<div class="notice info">Du ejer allerede <b>${fmtQty(add.existing.quantity)}\u00a0stk.</b>${accountId ? ` i ${esc(accountName(accountId) || 'depotet')}` : ''}${isNum(add.existing.avgPrice) ? ` til gns. <b>${fmtPrice(add.existing.avgPrice)} ${esc(add.existing.currency || '')}</b>` : ''}. Det du skriver her lægges oveni, og gennemsnitskursen regnes ud for dig.</div>`
       : '';
     $('#add-qty-label').textContent = buy ? 'Antal købt' : 'Antal';
     $('#add-price-label').textContent = buy ? 'Købskurs for dette køb' : 'Gns. købskurs';
     $('#add-price-help').textContent = buy ? 'Kursen du købte til denne gang.' : 'Valgfri. Uden købskurs vises værdi, men ikke afkast.';
     $('#add-note').closest('.field').classList.toggle('hidden', buy);
+    $('#add-date').closest('.field').classList.toggle('hidden', buy);
     $('#add-submit').textContent = buy ? 'Læg til beholdning' : 'Tilføj';
     updateAddSummary();
   }
@@ -1529,7 +2103,7 @@
     $('#add-submit').disabled = false;
     showAddStep('form');
     applyAddMode();
-    setTimeout(() => $('#add-qty').focus(), 30);
+    focusSoon('#add-qty', 30);
     try {
       const data = await api('GET', `/api/quote/${encodeURIComponent(result.symbol)}`);
       if (add.selected !== result) return;
@@ -1569,11 +2143,11 @@
       const oldQty = add.existing.quantity;
       const newQty = oldQty + qty;
       const newAvg = isNum(add.existing.avgPrice) && isNum(price) ? (oldQty * add.existing.avgPrice + qty * price) / newQty : null;
-      el.innerHTML = `<span>Ny beholdning: <b>${fmtQty(newQty)} stk.</b></span><span>${isNum(newAvg) ? `Ny gns. købskurs: <b>${fmtPrice(newAvg)} ${esc(cur)}</b>` : !isNum(add.existing.avgPrice) ? '<span class="muted">Gns. købskurs er ukendt for det du ejer – ret den under Redigér</span>' : 'Skriv købskursen for at se ny gns. købskurs'}</span>`;
+      el.innerHTML = `<span>Ny beholdning: <b>${fmtQty(newQty)}\u00a0stk.</b></span><span>${isNum(newAvg) ? `Ny gns. købskurs: <b>${fmtPrice(newAvg)} ${esc(cur)}</b>` : !isNum(add.existing.avgPrice) ? '<span class="muted">Gns. købskurs er ukendt for det du ejer – ret den under Redigér</span>' : 'Skriv købskursen for at se ny gns. købskurs'}</span>`;
       $('#add-deviation').innerHTML = '';
       return;
     }
-    if (isNum(qty) && qty > 0) parts.push(`<span>${fmtQty(qty)} stk.</span>`);
+    if (isNum(qty) && qty > 0) parts.push(`<span>${fmtQty(qty)}\u00a0stk.</span>`);
     if (isNum(price) && price >= 0 && isNum(qty) && qty > 0) parts.push(`<span>Investeret: <b>${fmtPrice(qty * price)} ${esc(cur)}</b></span>`);
     if (isNum(qty) && qty > 0 && add.quote && isNum(add.quote.price)) parts.push(`<span>Værdi nu: <b>${fmtPrice(qty * add.quote.price)} ${esc(cur)}</b></span>`);
     el.innerHTML = parts.join('') || '<span class="muted">Skriv antal – og gerne din gennemsnitlige købskurs.</span>';
@@ -1599,11 +2173,11 @@
         if (!isNum(price) || price < 0) return setError('#add-error', 'Skriv kursen, du købte til – så regnes den nye gennemsnitskurs ud.');
         const data = await api('POST', `/api/holdings/${encodeURIComponent(add.existing.id)}/trade`, { type: 'buy', quantity: qty, price });
         $('#dlg-add').close();
-        toast(`Købte ${fmtQty(qty)} stk. ${data.holding.name} – du har nu ${fmtQty(data.holding.quantity)} stk.`, 'success');
+        toast(`Købte ${fmtQty(qty)}\u00a0stk. ${data.holding.name} – du har nu ${fmtQty(data.holding.quantity)}\u00a0stk.`, 'success');
         await afterMutation();
         return;
       }
-      const data = await api('POST', '/api/holdings', { symbol: add.selected.symbol, quantity: qty, avgPrice: price ?? null, note: $('#add-note').value, name: add.selected.name, accountId });
+      const data = await api('POST', '/api/holdings', { symbol: add.selected.symbol, quantity: qty, avgPrice: price ?? null, note: $('#add-note').value, purchasedAt: $('#add-date').value || null, name: add.selected.name, accountId });
       $('#dlg-add').close();
       toast(`${data.holding.name} er tilføjet${accountId ? ` i ${accountName(accountId)}` : ''}`, 'success');
       if (data.warning) toast(data.warning);
@@ -1615,48 +2189,213 @@
     }
   }
 
+  // De enkelte køb vist i detaljepanelet – kun når aktien føres køb for køb.
+  function lotList(p) {
+    if (!Array.isArray(p.lots) || p.lots.length < 2) return '';
+    const cur = p.currency || '';
+    const rækker = [...p.lots]
+      .sort((a, b) => String(a.date || '9999').localeCompare(String(b.date || '9999')))
+      .map((l) => `<li><span>${l.date ? esc(fmtDate(l.date, { year: true })) : '<span class="muted">uden dato</span>'}</span><span class="amount">${fmtQty(l.quantity)}\u00a0stk.</span><span class="amount">${isNum(l.price) ? `${fmtPrice(l.price)} ${esc(cur)}` : '<span class="muted">–</span>'}</span></li>`)
+      .join('');
+    return `<div class="lot-list"><h3>Dine ${p.lots.length} køb</h3><ul>${rækker}</ul></div>`;
+  }
+
+  // ---------- "Mere" på telefon ----------
+  // Fanebjælken har fem pladser. Resten – Folk, Indstillinger og de knapper,
+  // der før lå i toplinjen – ligger her, ét tryk væk.
+
+  function moreItems() {
+    const rute = location.pathname;
+    const punkter = [];
+    if (state.access === 'platform') punkter.push({ href: '/folk', icon: 'users', label: 'Folk', hint: 'Se andres porteføljer' });
+    punkter.push({ href: '/indstillinger', icon: 'settings', label: 'Indstillinger', hint: 'Depoter, valuta, data' });
+    punkter.push({ action: 'privacy', icon: state.privacy ? 'eye-off' : 'eye', label: state.privacy ? 'Vis beløb' : 'Skjul beløb', hint: 'Slør tallene, når nogen kigger med' });
+    punkter.push({ action: 'refresh', icon: 'refresh', label: 'Opdatér kurser', hint: 'Hent de nyeste kurser nu' });
+    if (state.storage === 'server') punkter.push({ action: 'logout', icon: 'logout', label: 'Log ud', danger: true });
+    return punkter.map((p) => ({ ...p, active: p.href === rute }));
+  }
+
+  function renderMore() {
+    const nav = $('#more-nav');
+    if (!nav) return;
+    nav.innerHTML = moreItems().map((p) => {
+      const indhold = `${icon(p.icon)}<span class="sheet-label">${esc(p.label)}${p.hint ? `<span class="sheet-hint">${esc(p.hint)}</span>` : ''}</span>`;
+      return p.href
+        ? `<a href="${p.href}" data-link class="sheet-item${p.active ? ' active' : ''}"${p.active ? ' aria-current="page"' : ''}>${indhold}</a>`
+        : `<button type="button" class="sheet-item${p.danger ? ' danger' : ''}" data-action="${p.action}">${indhold}</button>`;
+    }).join('');
+  }
+
+  function openMore() {
+    renderMore();
+    openDialog('#dlg-more');
+  }
+
   // ---------- Redigér ----------
 
-  const edit = { id: null };
+  // edit.lots er null, når aktien føres med ét samlet antal, og en liste,
+  // når hvert køb skrives ind for sig. Rækkerne lever i DOM'en mellem
+  // tegninger – vi læser dem ind igen, før listen ændres, så det man er ved
+  // at taste, ikke forsvinder.
+  const edit = { id: null, lots: null };
+  const MAX_LOTS = 100;
 
   function openEdit(id) {
     const p = positions().find((x) => x.id === id);
     if (!p) return;
     edit.id = id;
+    edit.lots = Array.isArray(p.lots) && p.lots.length
+      ? p.lots.map((l) => ({ date: l.date || '', quantity: fmtRaw(l.quantity), price: fmtRaw(l.price) }))
+      : null;
     $('#dlg-edit-title').textContent = `Redigér ${p.name || p.symbol}`;
     $('#edit-qty').value = fmtRaw(p.quantity);
     $('#edit-price').value = fmtRaw(p.avgPrice);
     $('#edit-price-addon').textContent = p.currency || '';
     $('#edit-note').value = p.note || '';
+    $('#edit-date').value = p.purchasedAt || '';
     fillAccountSelect($('#edit-account'), p.accountId || '');
     setError('#edit-error', '');
-    updateEditSummary();
+    renderLots();
     openDialog('#dlg-edit');
-    setTimeout(() => $('#edit-qty').select(), 30);
+    if (!edit.lots) setTimeout(() => $('#edit-qty').select(), 30);
+  }
+
+  // Læser rækkerne tilbage fra DOM'en, så tastede værdier overlever en ny tegning.
+  function readLotRows() {
+    return $$('#edit-lot-rows .lot-row').map((row) => ({
+      date: row.querySelector('[data-lot="date"]').value,
+      quantity: row.querySelector('[data-lot="qty"]').value,
+      price: row.querySelector('[data-lot="price"]').value,
+    }));
+  }
+
+  // Antal og gennemsnitskurs regnet ud af købene – samme regnestykke som på serveren.
+  function sumLots(rows) {
+    let quantity = 0;
+    let cost = 0;
+    let medKurs = 0;
+    let mangler = 0;
+    for (const r of rows) {
+      const q = parseInput(r.quantity);
+      if (!isNum(q) || q <= 0) { if (String(r.quantity).trim() || String(r.price).trim() || r.date) mangler++; continue; }
+      quantity += q;
+      const pr = parseInput(r.price);
+      if (isNum(pr)) { cost += q * pr; medKurs += q; }
+    }
+    return { quantity, avgPrice: medKurs > 0 ? cost / medKurs : null, mangler };
+  }
+
+  // Fire decimaler er rigeligt til en kurs – også for en fond med lav NAV –
+  // og "49,19" er til at læse, hvor "49,190019" bare er larm.
+  function afrundKurs(n) {
+    return Math.round(n * 1e4) / 1e4;
+  }
+
+  function lotRowHtml(l) {
+    return `<div class="lot-row">
+      <input class="input lot-date" type="date" data-lot="date" value="${esc(l.date || '')}" aria-label="Købsdato">
+      <input class="input n" inputmode="decimal" data-lot="qty" value="${esc(l.quantity ?? '')}" placeholder="Antal" aria-label="Antal" autocomplete="off">
+      <input class="input n" inputmode="decimal" data-lot="price" value="${esc(l.price ?? '')}" placeholder="Kurs" aria-label="Kurs" autocomplete="off">
+      <button type="button" class="btn btn-ghost btn-icon" data-lot-del aria-label="Fjern købet"><svg class="icon"><use href="#i-x"/></svg></button>
+    </div>`;
+  }
+
+  function renderLots() {
+    const on = Array.isArray(edit.lots);
+    $('#edit-lots').classList.toggle('hidden', !on);
+    $('#edit-date-field').classList.toggle('hidden', on);
+    for (const id of ['#edit-qty', '#edit-price']) {
+      const el = $(id);
+      el.readOnly = on;
+      el.classList.toggle('derived', on);
+    }
+    if (on) {
+      $('#edit-lot-rows').innerHTML = edit.lots.map(lotRowHtml).join('');
+      $('#edit-lot-add').disabled = edit.lots.length >= MAX_LOTS;
+    }
+    updateEditSummary();
   }
 
   function updateEditSummary() {
     const p = positions().find((x) => x.id === edit.id);
-    const qty = parseInput($('#edit-qty').value);
-    const price = parseInput($('#edit-price').value);
     const el = $('#edit-summary');
+    const sumEl = $('#edit-lots-sum');
+    let qty;
+    let price;
+    if (Array.isArray(edit.lots)) {
+      const rows = readLotRows();
+      const sum = sumLots(rows);
+      qty = sum.quantity || null;
+      price = sum.avgPrice;
+      // Felterne ovenfor følger købene, så man kan se tallet vokse, mens man taster.
+      $('#edit-qty').value = sum.quantity > 0 ? fmtRaw(round6(sum.quantity)) : '';
+      $('#edit-price').value = isNum(sum.avgPrice) ? fmtRaw(afrundKurs(sum.avgPrice)) : '';
+      const datoer = rows.map((r) => r.date).filter(Boolean).sort();
+      const udenDato = rows.length - datoer.length;
+      const dele = [`${rows.length} køb`];
+      if (udenDato === 0 && datoer.length) dele.push(`første ${esc(fmtDate(datoer[0], { year: true }))}`);
+      // Uden dato på hvert køb kan ejertid og afkast pr. år ikke regnes ud.
+      if (udenDato) dele.push(`<span class="neg">${udenDato} mangler dato</span>`);
+      if (sum.mangler) dele.push(`<span class="neg">${sum.mangler} mangler antal</span>`);
+      sumEl.innerHTML = rows.length === 0 ? '<span class="muted">Tilføj dit første køb.</span>' : dele.join(' · ');
+    } else {
+      qty = parseInput($('#edit-qty').value);
+      price = parseInput($('#edit-price').value);
+    }
     if (!p || !isNum(qty)) return (el.innerHTML = '');
-    const parts = [`<span>${fmtQty(qty)} stk.</span>`];
+    const parts = [`<span>${fmtQty(qty)}\u00a0stk.</span>`];
     if (isNum(price)) parts.push(`<span>Investeret: <b>${fmtPrice(qty * price)} ${esc(p.currency || '')}</b></span>`);
     if (isNum(p.price)) parts.push(`<span>Værdi nu: <b>${fmtPrice(qty * p.price)} ${esc(p.currency || '')}</b></span>`);
     el.innerHTML = parts.join('');
   }
 
+  // Slå enkeltkøb til: det, der allerede står, bliver til det første køb,
+  // så man skriver videre i stedet for at starte forfra.
+  function lotsOn() {
+    const qty = parseInput($('#edit-qty').value);
+    const price = parseInput($('#edit-price').value);
+    edit.lots = isNum(qty) && qty > 0
+      ? [{ date: $('#edit-date').value || '', quantity: fmtRaw(qty), price: isNum(price) ? fmtRaw(price) : '' }]
+      : [{ date: '', quantity: '', price: '' }];
+    renderLots();
+    focusSoon('#edit-lot-rows .lot-row:last-child [data-lot="qty"]', 30);
+  }
+
+  function lotsOff() {
+    const sum = sumLots(readLotRows());
+    const datoer = readLotRows().map((r) => r.date).filter(Boolean).sort();
+    edit.lots = null;
+    renderLots();
+    if (sum.quantity > 0) $('#edit-qty').value = fmtRaw(round6(sum.quantity));
+    if (isNum(sum.avgPrice)) $('#edit-price').value = fmtRaw(afrundKurs(sum.avgPrice));
+    if (datoer.length) $('#edit-date').value = datoer[0];
+  }
+
   async function submitEdit() {
     setError('#edit-error', '');
-    const qty = parseInput($('#edit-qty').value);
-    const priceRaw = $('#edit-price').value.trim();
-    const price = parseInput(priceRaw);
-    if (!isNum(qty) || qty <= 0) return setError('#edit-error', 'Antal skal være større end 0.');
-    if (priceRaw && (!isNum(price) || price < 0)) return setError('#edit-error', 'Købskursen skal være et tal.');
+    const body = { note: $('#edit-note').value };
+    if (Array.isArray(edit.lots)) {
+      const rows = readLotRows().filter((r) => String(r.quantity).trim() || String(r.price).trim() || r.date);
+      if (!rows.length) return setError('#edit-error', 'Skriv mindst ét køb – eller vælg "Brug samlet antal".');
+      const lots = [];
+      for (const [i, r] of rows.entries()) {
+        const q = parseInput(r.quantity);
+        if (!isNum(q) || q <= 0) return setError('#edit-error', `Køb nr. ${i + 1}: antal skal være større end 0.`);
+        const pr = String(r.price).trim() ? parseInput(r.price) : null;
+        if (String(r.price).trim() && (!isNum(pr) || pr < 0)) return setError('#edit-error', `Køb nr. ${i + 1}: kursen skal være et tal.`);
+        lots.push({ date: r.date || null, quantity: q, price: pr });
+      }
+      body.lots = lots;
+    } else {
+      const qty = parseInput($('#edit-qty').value);
+      const priceRaw = $('#edit-price').value.trim();
+      const price = parseInput(priceRaw);
+      if (!isNum(qty) || qty <= 0) return setError('#edit-error', 'Antal skal være større end 0.');
+      if (priceRaw && (!isNum(price) || price < 0)) return setError('#edit-error', 'Købskursen skal være et tal.');
+      Object.assign(body, { quantity: qty, avgPrice: priceRaw ? price : null, purchasedAt: $('#edit-date').value || null, lots: [] });
+    }
+    if (accounts().length) body.accountId = $('#edit-account').value || null;
     try {
-      const body = { quantity: qty, avgPrice: priceRaw ? price : null, note: $('#edit-note').value };
-      if (accounts().length) body.accountId = $('#edit-account').value || null;
       await api('PUT', `/api/holdings/${encodeURIComponent(edit.id)}`, body);
       $('#dlg-edit').close();
       toast('Gemt', 'success');
@@ -1678,10 +2417,11 @@
     $('#trade-qty').value = '';
     $('#trade-price').value = fmtRaw(p.price);
     $('#trade-price-addon').textContent = p.currency || '';
+    $('#trade-date').value = '';
     setError('#trade-error', '');
     applyTradeType();
     openDialog('#dlg-trade');
-    setTimeout(() => $('#trade-qty').focus(), 30);
+    focusSoon('#trade-qty', 30);
   }
 
   function applyTradeType() {
@@ -1689,6 +2429,8 @@
     const buy = trade.type === 'buy';
     $$('#dlg-trade [data-trade-type]').forEach((b) => b.classList.toggle('active', b.dataset.tradeType === trade.type));
     $('#trade-sell-all').classList.toggle('hidden', buy);
+    // Datoen hører til købet – ved salg skrumper de eksisterende køb bare.
+    $('#trade-date-field').classList.toggle('hidden', !buy);
     $('#dlg-trade-title').textContent = `${buy ? 'Køb til' : 'Sælg'} – ${p?.name || ''}`;
     $('#trade-qty-label').textContent = buy ? 'Antal købt' : 'Antal solgt';
     $('#trade-submit').textContent = buy ? 'Læg til' : 'Registrér salg';
@@ -1702,18 +2444,18 @@
     const qty = parseInput($('#trade-qty').value);
     const price = parseInput($('#trade-price').value);
     if (!isNum(qty) || qty <= 0) {
-      el.innerHTML = `<span class="muted">Du ejer ${fmtQty(p.quantity)} stk.${isNum(p.avgPrice) ? ` til gns. ${fmtPrice(p.avgPrice)} ${esc(p.currency || '')}` : ''}</span>`;
+      el.innerHTML = `<span class="muted">Du ejer ${fmtQty(p.quantity)}\u00a0stk.${isNum(p.avgPrice) ? ` til gns. ${fmtPrice(p.avgPrice)} ${esc(p.currency || '')}` : ''}</span>`;
       return;
     }
     if (trade.type === 'buy') {
       const newQty = p.quantity + qty;
       const newAvg = isNum(p.avgPrice) && isNum(price) ? (p.quantity * p.avgPrice + qty * price) / newQty : null;
-      el.innerHTML = `<span>Ny beholdning: <b>${fmtQty(newQty)} stk.</b></span><span>${isNum(newAvg) ? `Ny gns. købskurs: <b>${fmtPrice(newAvg)} ${esc(p.currency || '')}</b>` : !isNum(p.avgPrice) ? '<span class="muted">Gns. købskurs forbliver ukendt – ret den under Redigér</span>' : ''}</span>`;
+      el.innerHTML = `<span>Ny beholdning: <b>${fmtQty(newQty)}\u00a0stk.</b></span><span>${isNum(newAvg) ? `Ny gns. købskurs: <b>${fmtPrice(newAvg)} ${esc(p.currency || '')}</b>` : !isNum(p.avgPrice) ? '<span class="muted">Gns. købskurs forbliver ukendt – ret den under Redigér</span>' : ''}</span>`;
     } else {
       const newQty = p.quantity - qty;
       el.innerHTML = newQty < -1e-9
-        ? `<span class="neg">Du ejer kun ${fmtQty(p.quantity)} stk.</span>`
-        : `<span>Tilbage: <b>${fmtQty(Math.max(0, newQty))} stk.</b>${newQty <= 1e-9 ? ' – aktien fjernes fra porteføljen' : ''}</span>${isNum(price) ? `<span>Salgssum: <b>${fmtPrice(qty * price)} ${esc(p.currency || '')}</b></span>` : ''}`;
+        ? `<span class="neg">Du ejer kun ${fmtQty(p.quantity)}\u00a0stk.</span>`
+        : `<span>Tilbage: <b>${fmtQty(Math.max(0, newQty))}\u00a0stk.</b>${newQty <= 1e-9 ? ' – aktien fjernes fra porteføljen' : ''}</span>${isNum(price) ? `<span>Salgssum: <b>${fmtPrice(qty * price)} ${esc(p.currency || '')}</b></span>` : ''}`;
     }
   }
 
@@ -1725,13 +2467,15 @@
     if (!isNum(qty) || qty <= 0) return setError('#trade-error', 'Antal skal være større end 0.');
     if (trade.type === 'buy' && (!isNum(price) || price < 0)) return setError('#trade-error', 'Skriv kursen, du købte til.');
     try {
-      const data = await api('POST', `/api/holdings/${encodeURIComponent(trade.id)}/trade`, { type: trade.type, quantity: qty, price: priceRaw ? price : null });
+      const body = { type: trade.type, quantity: qty, price: priceRaw ? price : null };
+      if (trade.type === 'buy' && $('#trade-date').value) body.date = $('#trade-date').value;
+      const data = await api('POST', `/api/holdings/${encodeURIComponent(trade.id)}/trade`, body);
       $('#dlg-trade').close();
       if (data.removed) {
         toast(`${data.holding.name} er solgt helt og fjernet fra porteføljen`, 'success');
         closePanel();
       } else {
-        toast(trade.type === 'buy' ? `Købte ${fmtQty(qty)} stk. ${data.holding.name}` : `Solgte ${fmtQty(qty)} stk. ${data.holding.name}`, 'success');
+        toast(trade.type === 'buy' ? `Købte ${fmtQty(qty)}\u00a0stk. ${data.holding.name}` : `Solgte ${fmtQty(qty)}\u00a0stk. ${data.holding.name}`, 'success');
       }
       await afterMutation();
     } catch (err) {
@@ -1744,7 +2488,7 @@
   async function deleteHolding(id) {
     const p = positions().find((x) => x.id === id);
     if (!p) return;
-    const ok = await confirmDialog({ title: `Slet ${p.name || p.symbol}?`, text: `${fmtQty(p.quantity)} stk. fjernes fra porteføljen. Det kan ikke fortrydes.` });
+    const ok = await confirmDialog({ title: `Slet ${p.name || p.symbol}?`, text: `${fmtQty(p.quantity)}\u00a0stk. fjernes fra porteføljen. Det kan ikke fortrydes.` });
     if (!ok) return;
     try {
       await api('DELETE', `/api/holdings/${encodeURIComponent(id)}`);
@@ -1822,6 +2566,7 @@
         <td><input class="input import-sym" data-import-symbol="${i}" value="${esc(row.symbol)}" placeholder="fx MU" spellcheck="false"></td>
         <td class="n">${fmtQty(row.quantity)}</td>
         <td class="n">${fmtPrice(row.avgPrice)} <span class="muted small">${esc(row.currency)}</span></td>
+        <td class="muted small">${row.purchasedAt ? esc(fmtDate(row.purchasedAt, { year: true })) : '–'}${row.lots ? `<div class="muted small">${row.lots.length} køb</div>` : ''}</td>
         <td class="muted small">${esc(imp.depots.find((d) => d.code === row.depot)?.name || '')}</td>
       </tr>`;
     }).join('');
@@ -1872,10 +2617,10 @@
         const match = existing.find((h) => sameSlot(h, symbol, accountId));
         try {
           if (match) {
-            await api('PUT', `/api/holdings/${encodeURIComponent(match.id)}`, { quantity: row.quantity, avgPrice: row.avgPrice });
+            await api('PUT', `/api/holdings/${encodeURIComponent(match.id)}`, { quantity: row.quantity, avgPrice: row.avgPrice, ...(row.purchasedAt ? { purchasedAt: row.purchasedAt } : {}), lots: row.lots || [] });
             updated++;
           } else {
-            await api('POST', '/api/holdings', { symbol, quantity: row.quantity, avgPrice: row.avgPrice, name: row.name, accountId });
+            await api('POST', '/api/holdings', { symbol, quantity: row.quantity, avgPrice: row.avgPrice, purchasedAt: row.purchasedAt || null, ...(row.lots ? { lots: row.lots } : {}), name: row.name, accountId });
             added++;
           }
         } catch (err) {
@@ -1954,6 +2699,24 @@
   }
 
   // ---------- Adgangskode ----------
+
+  // Første adgangskode på en åben side. Bagefter kræver alt login – også denne browser,
+  // men opsætningen logger én ind med det samme, så der skal ikke tastes igen.
+  async function submitSetup() {
+    setError('#setup-error', '');
+    const next = $('#setup-new').value;
+    const repeat = $('#setup-repeat').value;
+    if (next.length < 8) return setError('#setup-error', 'Adgangskoden skal være mindst 8 tegn.');
+    if (next !== repeat) return setError('#setup-error', 'De to adgangskoder er ikke ens.');
+    try {
+      await api('POST', '/api/auth/setup', { password: next, confirm: repeat });
+      $('#dlg-setup').close();
+      toast('Adgangskoden er oprettet – siden kræver nu login', 'success');
+      setTimeout(() => location.reload(), 900);
+    } catch (err) {
+      setError('#setup-error', err.message);
+    }
+  }
 
   async function submitPassword() {
     setError('#pw-error', '');
@@ -2122,6 +2885,23 @@
       selectStock({ symbol: sym, name: sym, exchange: null, type: 'EQUITY' });
       return;
     }
+    if (e.target.closest('#edit-lots-on')) { lotsOn(); return; }
+    if (e.target.closest('#edit-lots-off')) { lotsOff(); return; }
+    if (e.target.closest('#edit-lot-add')) {
+      edit.lots = [...readLotRows(), { date: '', quantity: '', price: '' }];
+      renderLots();
+      focusSoon('#edit-lot-rows .lot-row:last-child [data-lot="qty"]', 30);
+      return;
+    }
+    const lotDel = e.target.closest('[data-lot-del]');
+    if (lotDel) {
+      const rows = readLotRows();
+      const i = $$('#edit-lot-rows .lot-row').indexOf(lotDel.closest('.lot-row'));
+      rows.splice(i, 1);
+      edit.lots = rows;
+      renderLots();
+      return;
+    }
     if (e.target.closest('#trade-sell-all')) {
       e.preventDefault();
       const p = positions().find((x) => x.id === trade.id);
@@ -2141,11 +2921,15 @@
 
     switch (action) {
       case 'add': return openAdd(el.dataset.query || '');
+      case 'more': return openMore();
       case 'refresh': return manualRefresh();
       case 'privacy':
         state.privacy = !state.privacy;
         storageSet('privacy', state.privacy ? '1' : '0');
-        return render();
+        render();
+        // Står man i arket, skal teksten skifte med, ikke blive stående.
+        if ($('#dlg-more')?.open) renderMore();
+        return;
       case 'logout':
         api('POST', '/api/auth/logout').finally(() => location.replace('/login'));
         return;
@@ -2165,11 +2949,43 @@
       case 'delete':
         e.stopPropagation();
         return deleteHolding(el.dataset.id);
+      case 'plan-years':
+        state.plan.years = Number(el.dataset.years) || 10;
+        render();
+        break;
+      case 'copy-invite':
+        navigator.clipboard?.writeText(state.inviteCode || '').then(
+          () => toast('Invitationskoden er kopieret', 'success'),
+          () => toast('Kunne ikke kopiere – markér koden og kopiér selv', 'error'),
+        );
+        break;
+      case 'rotate-invite':
+        confirmDialog({ title: 'Ny invitationskode?', text: 'Den nuværende kode holder op med at virke med det samme. Dem, der allerede er tilmeldt, bliver ikke berørt.', okLabel: 'Lav en ny kode' }).then(async (ok) => {
+          if (!ok) return;
+          try {
+            state.inviteCode = (await api('POST', '/api/invite/rotate')).inviteCode;
+            render();
+            toast('Ny invitationskode lavet', 'success');
+          } catch (err) {
+            toast(err.message, 'error');
+          }
+        });
+        break;
+      case 'setup-password':
+        setError('#setup-error', '');
+        $('#form-setup-pw').reset();
+        $('#dlg-setup').showModal();
+        focusSoon('#setup-new', 50);
+        break;
+      case 'open-dismiss':
+        storageSet('open-dismissed', '1');
+        render();
+        break;
       case 'change-password':
         $('#form-password').reset();
         setError('#pw-error', '');
         openDialog('#dlg-password');
-        setTimeout(() => $('#pw-current').focus(), 30);
+        focusSoon('#pw-current', 30);
         return;
       case 'logout-all':
         confirmDialog({ title: 'Log ud på alle enheder?', text: 'Alle aktive logins ugyldiggøres – også dette. Du skal logge ind igen.', okLabel: 'Log ud overalt' }).then(async (ok) => {
@@ -2236,11 +3052,41 @@
       }
       add.timer = setTimeout(() => runSearch(q), 250);
     } else if (id === 'add-qty' || id === 'add-price') updateAddSummary();
+    else if (e.target.dataset.lot !== undefined) updateEditSummary();
     else if (id === 'edit-qty' || id === 'edit-price') updateEditSummary();
     else if (id === 'trade-qty' || id === 'trade-price') updateTradeSummary();
     else if (e.target.dataset.importSymbol !== undefined) {
       imp.rows[Number(e.target.dataset.importSymbol)].symbol = e.target.value.trim().toUpperCase();
       updateImportCount();
+    }
+    else if (id === 'plan-month' || id === 'plan-growth') {
+      const n = parseInput(e.target.value);
+      const felt = id === 'plan-month' ? 'perMonth' : 'growth';
+      state.plan[felt] = isNum(n) ? n : (e.target.value.trim() ? state.plan[felt] : 0);
+      // Kun resultatet tegnes om, så markøren ikke hopper ud af feltet.
+      const a = state.analytics.data;
+      if (a) {
+        const { perMonth, growth, years } = planInput(a);
+        const f = projectValue({ start: a.value, perMonth, annualPercent: growth, years });
+        const boks = $('.plan-result');
+        if (boks) {
+          $('.plan-value', boks).innerHTML = fmtAmount(f.value);
+          const dd = $$('.plan-result .kv dd');
+          if (dd[0]) dd[0].innerHTML = fmtAmount(f.contributed);
+          if (dd[1]) { dd[1].innerHTML = fmtAmount(f.growth, state.baseCurrency, { sign: true }); dd[1].className = `amount ${signClass(f.growth)}`; }
+        }
+      }
+    }
+    else if (id === 'people-search') {
+      const felt = e.target;
+      const pos = felt.selectionStart;
+      searchPeopleSoon(felt.value);
+      // Tegningen erstatter feltet; sæt markøren tilbage hvor den var.
+      const igen = $('#people-search');
+      if (igen && igen !== felt) {
+        igen.focus();
+        igen.setSelectionRange(pos, pos);
+      }
     }
     else if (id === 'filter') {
       state.filter = e.target.value;
@@ -2286,8 +3132,14 @@
         state.autoRefresh = e.target.checked;
         storageSet('autoRefresh', state.autoRefresh ? '1' : '0');
       } else if (id === 'set-name') {
-        const data = await api('PUT', '/api/settings', { displayName: e.target.value });
-        state.settings = data.settings;
+        if (state.access === 'platform') {
+          const data = await api('PUT', '/api/me', { name: e.target.value });
+          state.me = data.user;
+          render();
+        } else {
+          const data = await api('PUT', '/api/settings', { displayName: e.target.value });
+          state.settings = data.settings;
+        }
         toast('Navn gemt', 'success');
       } else if (id === 'set-cash') {
         const n = parseInput(e.target.value);
@@ -2356,6 +3208,7 @@
   $('#edit-delete').addEventListener('click', () => { $('#dlg-edit').close(); deleteHolding(edit.id); });
   $('#form-trade').addEventListener('submit', (e) => { e.preventDefault(); submitTrade(); });
   $('#form-password').addEventListener('submit', (e) => { e.preventDefault(); submitPassword(); });
+  $('#form-setup-pw').addEventListener('submit', (e) => { e.preventDefault(); submitSetup(); });
   $('#form-import').addEventListener('submit', (e) => { e.preventDefault(); submitImport(); });
   $('#dlg-confirm form').addEventListener('submit', (e) => { e.preventDefault(); $('#dlg-confirm').close('ok'); });
 
@@ -2389,8 +3242,17 @@
       const status = await serverApi('GET', '/api/auth/status');
       state.usesEnvPassword = status.usesEnvPassword;
       state.storage = status.storage === 'browser' ? 'browser' : 'server';
+      state.access = status.access || (state.storage === 'browser' ? 'browser' : 'login');
+      state.canSetPassword = state.access === 'open' && status.setupRequired === true;
+      document.body.classList.toggle('platform', state.access === 'platform');
+      if (state.access === 'platform') {
+        state.me = status.user;
+        loadMe();
+      }
       document.body.classList.toggle('browser-mode', state.storage === 'browser');
-      if (state.storage !== 'browser' && !status.authenticated) return location.replace('/login');
+      document.body.classList.toggle('open-access', state.access === 'open');
+      // Ved åben adgang findes der intet login at sende brugeren til.
+      if (state.access === 'login' && !status.authenticated) return location.replace('/login');
       checkLocalImport();
     } catch {}
     // Vis beholdningerne med det samme; kurserne fylder ind, når de er hentet.

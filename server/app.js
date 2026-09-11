@@ -4,9 +4,10 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { newId } from './store.js';
-import { computePortfolio, computeValueHistory, parseDanishNumber } from './portfolio-math.js';
+import { computeAnalytics, computeHistoryFacts, computePortfolio, computeValueHistory, dayKey, firstPurchaseDate, heldDays, narrowRange, parseDanishNumber, rangeDays, reduceLots, summarizeLots } from './portfolio-math.js';
 import { resolveSecurities } from './resolve.js';
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter, passwordVersion } from './auth.js';
+import { createAccounts, publicProfile, SignupError, normalizeEmail } from './accounts.js';
 import { sendJson, sendError, readJsonBody, parseCookies, cookieHeader, serveStatic, clientIp, isLoopback, safeDecode, HttpError } from './http-utils.js';
 import { timingSafeEqual } from 'node:crypto';
 import { YahooError } from './yahoo.js';
@@ -22,11 +23,17 @@ const MIN_PASSWORD_LENGTH = 8;
 
 const SYMBOL_RE = /^[A-Z0-9^][A-Z0-9.\-=^]{0,24}$/;
 const CURRENCY_RE = /^[A-Z]{3}$/;
-const PAGE_ROUTES = new Set(['/', '/beholdninger', '/indstillinger']);
+// Sider klienten kan tegne. Står en sti ikke her, giver et direkte besøg eller en
+// genindlæsning 404, selv om navigation inde i appen virker.
+// Skal holdes i takt med ROUTES i public/app.js – test/pages.test.js kontrollerer det.
+const PAGE_ROUTES = new Set(['/', '/beholdninger', '/indstillinger', '/folk', '/analyse']);
+// Profil-sider: /profil/<id> viser en andens portefølje, hvis man følger vedkommende.
+const PERSON_PAGE = /^\/profil\/[^/]+$/;
 const HISTORY_RANGES = new Set(['5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '5y', 'max']);
 const HOLDABLE_TYPES = new Set(['EQUITY', 'ETF', 'MUTUALFUND']);
 const MAX_HOLDINGS = 200;
 const MAX_ACCOUNTS = 20;
+const MAX_LOTS = 100;
 const TYPE_NAMES = { INDEX: 'et indeks', CRYPTOCURRENCY: 'en kryptovaluta', CURRENCY: 'en valuta', FUTURE: 'en future', OPTION: 'en option' };
 
 export function createApp({ store, yahoo, config, logger = console, onPortfolioRequest = null }) {
@@ -34,7 +41,29 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   // Browser-tilstand: ingen database og intet login. Beholdninger ligger i brugerens browser;
   // serveren leverer kun kurser og beregninger. API'et er så åbent og beskyttes af en kald-grænse pr. IP.
   const browserMode = config.storageMode === 'browser';
+  // Åben adgang: ingen login. Alle der kender adressen ser og redigerer den samme
+  // portefølje. Kræver et lager på serveren, ellers er der intet at dele.
+  // Den gælder kun, så længe der ikke er nogen adgangskode: opretter man én, er siden
+  // lukket fra det øjeblik – også for de øvrige serverless-instanser.
+  // Platform: flere profiler, hver med sin egen portefølje, og et følge-forhold imellem dem.
+  // Kræver en database; uden den er der kun browser-tilstanden.
+  const platform = Boolean(config.platform) && !browserMode && Boolean(store);
+  const accounts = platform ? createAccounts(store) : null;
+  const openAccessAllowed = !platform && Boolean(config.publicAccess) && !browserMode && Boolean(store);
+  const OPEN_CHECK_TTL = 10_000;
+  let passwordExists = false;
+  let openCheckedAt = 0;
+
+  async function openAccessNow() {
+    if (!openAccessAllowed || config.envPassword || passwordExists) return false;
+    if (Date.now() - openCheckedAt < OPEN_CHECK_TTL) return true;
+    // En adgangskode kan være oprettet fra en anden instans; slås op med jævne mellemrum.
+    if ((await store.getAuth()).passwordHash) passwordExists = true;
+    openCheckedAt = Date.now();
+    return !passwordExists;
+  }
   const apiLimiter = createLoginLimiter({ limit: 240, windowMs: 60_000 });
+  const USER_CACHE = Symbol('bruger'); // sessionens profil slås kun op én gang pr. kald
   let envPasswordHash = null;
 
   async function getEnvPasswordHash() {
@@ -55,8 +84,34 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     return store.getSessionSecret(config.sessionSecret);
   }
 
+  // Slår sessionens profil op. Er adgangskoden skiftet, passer pv ikke længere,
+  // og sessionen er dermed ugyldig – også på de andre enheder.
+  async function currentUser(req) {
+    if (!platform) return null;
+    if (req[USER_CACHE] !== undefined) return req[USER_CACHE];
+    let user = null;
+    const token = parseCookies(req)[COOKIE_NAME];
+    if (token) {
+      const payload = verifySessionToken(await sessionSecret(), token);
+      if (payload?.uid) {
+        const found = await accounts.byId(payload.uid);
+        if (found && payload.pv === passwordVersion(found.passwordHash)) user = found;
+      }
+    }
+    req[USER_CACHE] = user;
+    return user;
+  }
+
+  // Kaster, hvis man ikke er logget ind. Bruges af alt der rører data.
+  async function requireUser(req) {
+    const user = await currentUser(req);
+    if (!user) throw new HttpError(401, 'Log ind for at fortsætte', { code: 'LOGIN_REQUIRED' });
+    return user;
+  }
+
   async function isAuthenticated(req) {
-    if (browserMode) return true;
+    if (platform) return Boolean(await currentUser(req));
+    if (browserMode || (await openAccessNow())) return true;
     const cookies = parseCookies(req);
     const token = cookies[COOKIE_NAME];
     if (!token) return false;
@@ -66,12 +121,15 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   // Opsætningsnøgle: kræves for at oprette den første adgangskode, medmindre man sidder
   // på selve maskinen (localhost). Forhindrer at en fremmed "kaprer" en ny, åben instans.
-  function setupTokenRequired(req) {
+  // Ved åben adgang er der intet at kapre – alt er allerede synligt for enhver med adressen –
+  // og at oprette en adgangskode gør kun siden mere lukket. Så kræves nøglen ikke.
+  function setupTokenRequired(req, open = false) {
+    if (open) return false;
     return Boolean(config.setupToken) && (config.alwaysRequireSetupToken || !isLoopback(req));
   }
 
-  function checkSetupToken(req, body) {
-    if (!setupTokenRequired(req)) return;
+  function checkSetupToken(req, body, open = false) {
+    if (!setupTokenRequired(req, open)) return;
     const given = Buffer.from(String(body.setupToken ?? ''));
     const expected = Buffer.from(String(config.setupToken));
     if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
@@ -87,10 +145,10 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     return typeof proto === 'string' && proto.split(',')[0].trim() === 'https';
   }
 
-  async function issueSession(req, res, { remember = true } = {}) {
+  async function issueSession(req, res, { remember = true, user = null } = {}) {
     const ttlMs = remember ? SESSION_LONG_MS : SESSION_SHORT_MS;
-    const { passwordHash } = await authState();
-    const token = createSessionToken(await sessionSecret(), { ttlMs, pv: passwordVersion(passwordHash) });
+    const pv = user ? passwordVersion(user.passwordHash) : passwordVersion((await authState()).passwordHash);
+    const token = createSessionToken(await sessionSecret(), { ttlMs, pv, uid: user?.id ?? null });
     const opts = { secure: isSecure(req) };
     if (remember) opts.maxAgeSeconds = Math.floor(ttlMs / 1000);
     res.setHeader('Set-Cookie', cookieHeader(COOKIE_NAME, token, opts));
@@ -102,10 +160,22 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   // ---------- portefølje ----------
 
-  async function buildPortfolio(account = '') {
-    const data = await store.getPortfolio();
+  // Hvilken portefølje der arbejdes på. Med profiler har hver bruger sin egen;
+  // uden dem er der én fælles, som før.
+  function scope(userId = null) {
+    if (platform && userId) {
+      return { get: () => store.getUserPortfolio(userId), update: (fn) => store.updateUserPortfolio(userId, fn) };
+    }
+    return { get: () => store.getPortfolio(), update: (fn) => store.updatePortfolio(fn) };
+  }
+
+  // Porteføljen for den, kaldet gælder – egen som standard.
+  const own = async (req) => scope((await currentUser(req))?.id ?? null);
+
+  async function buildPortfolio(account = '', ps = scope()) {
+    const data = await ps.get();
     const result = await computeFrom(data, account);
-    rememberNames(data, result.quotes).catch((err) => logger.warn('Kunne ikke gemme navne:', err.message));
+    rememberNames(data, result.quotes, ps).catch((err) => logger.warn('Kunne ikke gemme navne:', err.message));
     if (onPortfolioRequest) onPortfolioRequest();
     delete result.quotes;
     return result;
@@ -148,13 +218,13 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   // Gem navn/valuta fra Yahoo på beholdningen, så tabellen kan vises når Yahoo er nede.
-  async function rememberNames(data, quotes) {
+  async function rememberNames(data, quotes, ps = scope()) {
     const changed = data.holdings.some((h) => {
       const q = quotes[h.symbol]?.quote;
       return q && (h.name !== q.name || h.currency !== q.currency);
     });
     if (!changed) return;
-    await store.updatePortfolio((draft) => {
+    await ps.update((draft) => {
       for (const h of draft.holdings) {
         const q = quotes[h.symbol]?.quote;
         if (q) {
@@ -165,23 +235,48 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     });
   }
 
-  async function buildHistory(range, data = null, account = '') {
-    if (!data) data = await store.getPortfolio();
+  // Rekorder fra kurven er et ekstra – kan historikken ikke hentes (Yahoo nede
+  // eller for mange kald), skal analysesiden stadig virke.
+  async function historyFacts(data, account, ps) {
+    try {
+      const h = await buildHistory('max', data, account, ps);
+      return computeHistoryFacts(h.points);
+    } catch {
+      return null;
+    }
+  }
+
+  async function buildHistory(range, data = null, account = '', ps = scope()) {
+    if (!data) data = await ps.get();
     const baseCurrency = data.settings.baseCurrency;
     const holdings = filterByAccount(data.holdings, account).filter((h) => Number(h.quantity) > 0);
+    // Kender vi købsdatoen på det hele, hentes der kun så langt tilbage, som man
+    // har ejet. Så slipper vi for at bede om ugebarer til en kort ejertid.
+    const købtFra = firstPurchaseDate(holdings);
+    const hentRange = narrowRange(range, købtFra);
+    // Rakte den valgte periode længere tilbage, end porteføljen er gammel, skal
+    // klienten kunne forklare, hvorfor en længere periode ikke ændrer kurven.
+    const kortereEndValgt = Boolean(købtFra) && heldDays(købtFra) < rangeDays(range);
     const histories = {};
     const missing = [];
     await Promise.all(
       holdings.map(async (h) => {
         try {
-          histories[h.symbol] = await yahoo.getHistory(h.symbol, range);
+          histories[h.symbol] = await yahoo.getHistory(h.symbol, hentRange);
         } catch (err) {
           missing.push({ symbol: h.symbol, error: err.message });
         }
       }),
     );
     const currencies = Object.values(histories).map((h) => h.currency);
-    const fxRates = currencies.length ? await yahoo.getFxRates(currencies, baseCurrency) : {};
+    const [fxRates, fxHistories] = currencies.length
+      ? await Promise.all([
+          yahoo.getFxRates(currencies, baseCurrency),
+          // Historiske valutakurser, så en dag i juni omregnes med juni-kursen.
+          // Kan de ikke hentes, falder hver valuta tilbage til dagens kurs.
+          yahoo.getFxHistories ? yahoo.getFxHistories(currencies, baseCurrency, hentRange).catch(() => ({})) : Promise.resolve({}),
+        ])
+      : [{}, {}];
     for (const h of holdings) {
       const hist = histories[h.symbol];
       if (!hist) continue; // allerede i missing
@@ -196,8 +291,36 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         delete histories[h.symbol];
       }
     }
-    const points = computeValueHistory({ holdings, histories, fxRates });
-    return { range, baseCurrency, points, missing, approximate: true };
+    // Perioden der blev bedt om – ikke den, Yahoo tilfældigvis leverede. Et køb
+    // få dage før første kurs hører stadig til her.
+    const dageTilbage = rangeDays(hentRange);
+    const windowStart = Number.isFinite(dageTilbage) ? dayKey(Date.now() - dageTilbage * 86_400_000) : null;
+    const { points, backfilled, events } = computeValueHistory({ holdings, histories, fxRates, fxHistories, windowStart });
+
+    // Yahoos dagsserier halter af og til efter de løbende kurser, og så sluttede
+    // kurven et andet sted end tallet lige over den. Sidste punkt sættes derfor
+    // til den værdi, dashboardet viser nu.
+    let liveEnd = false;
+    if (points.length) {
+      try {
+        const nu = await computeFrom(data, account);
+        const værdi = nu.totals.valueBase;
+        if (Number.isFinite(værdi) && værdi > 0) {
+          const iDag = dayKey(Date.now());
+          const sidste = points[points.length - 1];
+          if (sidste.date >= iDag) sidste.value = værdi;
+          else points.push({ date: iDag, value: værdi });
+          liveEnd = true;
+        }
+      } catch {
+        // Kurserne kunne ikke hentes lige nu; kurven står, som historikken siger.
+      }
+    }
+    // Hvilke valutaer der måtte bruge dagens kurs i stedet for dagens egen.
+    const fxToday = Object.entries(fxHistories)
+      .filter(([cur, h]) => cur !== baseCurrency && (!h?.ok || !h.points?.length) && !h?.identity)
+      .map(([cur]) => cur);
+    return { range, baseCurrency, points, missing, backfilled, events, fxToday, liveEnd, ownedFrom: kortereEndValgt ? købtFra : null, approximate: true };
   }
 
   // ---------- validering ----------
@@ -230,6 +353,59 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     return s;
   }
 
+  // Købsdato: en ren dato (åååå-mm-dd). Fremtidige datoer afvises – man kan ikke
+  // have købt i morgen – og tomt felt betyder "ved det ikke", ikke "i dag".
+  function parsePurchaseDate(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const s = String(value).trim().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new HttpError(400, 'Købsdatoen skal skrives som åååå-mm-dd');
+    const t = Date.parse(`${s}T12:00:00Z`);
+    if (Number.isNaN(t)) throw new HttpError(400, 'Købsdatoen er ikke en gyldig dato');
+    if (t > Date.now() + 86_400_000) throw new HttpError(400, 'Købsdatoen kan ikke ligge i fremtiden');
+    if (s < '1970-01-01') throw new HttpError(400, 'Købsdatoen er for langt tilbage');
+    return s;
+  }
+
+  // Ét køb: dato, antal og (valgfri) kurs. Uden kurs tæller købet med i antallet,
+  // men ikke i gennemsnitskursen – som når man ikke kan huske, hvad man gav.
+  function parseLot(raw, i) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new HttpError(400, `Køb nr. ${i + 1} kan ikke læses`);
+    const quantity = parseNumber(raw.quantity, `Antal i køb nr. ${i + 1}`, { min: 0 });
+    if (!(quantity > 0)) throw new HttpError(400, `Antal i køb nr. ${i + 1} skal være større end 0`);
+    return {
+      id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newId(),
+      date: parsePurchaseDate(raw.date),
+      quantity,
+      price: parseNumber(raw.price, `Kurs i køb nr. ${i + 1}`, { min: 0, allowNull: true }),
+    };
+  }
+
+  function parseLots(value) {
+    if (value === null || value === undefined) return null;
+    if (!Array.isArray(value)) throw new HttpError(400, 'Købene skal være en liste');
+    if (value.length > MAX_LOTS) throw new HttpError(400, `Der kan højst registreres ${MAX_LOTS} køb pr. aktie`);
+    const lots = value.map(parseLot);
+    // Ældste først, så listen altid læses i den rækkefølge, den skete.
+    lots.sort((a, b) => String(a.date || '9999').localeCompare(String(b.date || '9999')));
+    return lots;
+  }
+
+  // Er der skrevet enkelte køb ind, er antal og gennemsnitskurs ikke noget,
+  // man taster – de følger af købene, så de to aldrig kan komme i utakt.
+  function applyLots(h) {
+    const sum = summarizeLots(h.lots);
+    if (!sum) {
+      delete h.lots;
+      delete h.weightedAt;
+      return h;
+    }
+    h.quantity = sum.quantity;
+    h.avgPrice = sum.avgPrice;
+    h.purchasedAt = sum.purchasedAt;
+    h.weightedAt = sum.weightedAt;
+    return h;
+  }
+
   function parseNote(value) {
     const s = String(value ?? '').trim();
     if (s.length > 200) throw new HttpError(400, 'Noten må højst være 200 tegn');
@@ -254,7 +430,8 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const slot = `${symbol}@${accountId ?? ''}`;
       if (seen.has(slot)) throw new HttpError(400, `Symbolet ${symbol} optræder flere gange i samme depot`);
       seen.add(slot);
-      return {
+      const lots = parseLots(raw.lots);
+      return applyLots({
         accountId,
         id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newId(),
         symbol,
@@ -263,9 +440,11 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         quantity: parseQuantity(raw.quantity),
         avgPrice: parseNumber(raw.avgPrice, 'Købskurs', { min: 0, allowNull: true }),
         note: parseNote(raw.note),
+        purchasedAt: parsePurchaseDate(raw.purchasedAt),
+        ...(lots ? { lots } : {}),
         addedAt: typeof raw.addedAt === 'string' && raw.addedAt.length <= 40 ? raw.addedAt : null,
         updatedAt: typeof raw.updatedAt === 'string' && raw.updatedAt.length <= 40 ? raw.updatedAt : null,
-      };
+      });
     });
   }
 
@@ -321,20 +500,47 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   function publicHolding(h) {
-    return { id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, addedAt: h.addedAt, updatedAt: h.updatedAt };
+    return { id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, purchasedAt: h.purchasedAt ?? null, weightedAt: h.weightedAt ?? null, lots: Array.isArray(h.lots) ? h.lots : null, addedAt: h.addedAt, updatedAt: h.updatedAt };
+  }
+
+  // Alle med en profil kan se alle andres portefølje – man kommer kun ind på
+  // platformen med en invitationskode fra en, der allerede er her.
+  // Skrivning er en anden sag: ruterne til en andens portefølje findes kun som GET.
+  async function viewable(req, targetId) {
+    await requireUser(req);
+    const target = await accounts.byId(targetId);
+    if (!target) throw new HttpError(404, 'Profilen findes ikke');
+    return { person: publicProfile(target), ps: scope(target.id) };
   }
 
   // ---------- API-handlere ----------
 
   const api = {
     async status(req, res) {
+      if (platform) {
+        const user = await currentUser(req);
+        const antal = await accounts.count();
+        return sendJson(res, 200, {
+          access: 'platform',
+          storage: config.storageMode || 'file',
+          authenticated: Boolean(user),
+          // Den allerførste profil oprettes uden invitationskode – der er endnu intet at beskytte.
+          firstProfile: antal === 0,
+          setupRequired: false,
+          setupTokenRequired: false,
+          usesEnvPassword: false,
+          user: publicProfile(user, { includeEmail: true }),
+        });
+      }
       const { setupRequired, usesEnvPassword } = await authState();
+      const open = await openAccessNow();
       sendJson(res, 200, {
         setupRequired,
-        setupTokenRequired: setupRequired && setupTokenRequired(req),
+        setupTokenRequired: setupRequired && setupTokenRequired(req, open),
         usesEnvPassword,
-        authenticated: !setupRequired && (await isAuthenticated(req)),
+        authenticated: open || (!setupRequired && (await isAuthenticated(req))),
         storage: config.storageMode || 'file',
+        access: browserMode ? 'browser' : open ? 'open' : 'login',
       });
     },
 
@@ -377,7 +583,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const ip = clientIp(req, { trustProxy: config.trustProxy });
       if (limiter.isBlocked(ip)) throw new HttpError(429, 'For mange forsøg – prøv igen senere', { retryAfter: limiter.retryAfterSeconds(ip) });
       const body = await readJsonBody(req);
-      checkSetupToken(req, body);
+      checkSetupToken(req, body, await openAccessNow());
       const password = String(body.password ?? '');
       if (password.length < MIN_PASSWORD_LENGTH) throw new HttpError(400, `Adgangskoden skal være mindst ${MIN_PASSWORD_LENGTH} tegn`);
       if (body.confirm !== undefined && String(body.confirm) !== password) throw new HttpError(400, 'De to adgangskoder er ikke ens');
@@ -387,6 +593,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         draft.passwordHash = passwordHash;
         draft.createdAt = new Date().toISOString();
       });
+      passwordExists = true; // siden er lukket fra nu af – også hvis den var åben
       await issueSession(req, res, { remember: true });
       sendJson(res, 201, { ok: true });
     },
@@ -443,13 +650,125 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     },
 
     async portfolio(req, res, url) {
-      sendJson(res, 200, await buildPortfolio(parseAccountFilter(url.searchParams.get('account'))));
+      sendJson(res, 200, await buildPortfolio(parseAccountFilter(url.searchParams.get('account')), await own(req)));
     },
 
     async history(req, res, url) {
       const range = url.searchParams.get('range') || '1y';
       if (!HISTORY_RANGES.has(range)) throw new HttpError(400, 'Ugyldigt interval');
-      sendJson(res, 200, await buildHistory(range, null, parseAccountFilter(url.searchParams.get('account'))));
+      sendJson(res, 200, await buildHistory(range, null, parseAccountFilter(url.searchParams.get('account')), await own(req)));
+    },
+
+    // ---------- analyse ----------
+
+    async analytics(req, res, url) {
+      const ps = await own(req);
+      const data = await ps.get();
+      const account = parseAccountFilter(url.searchParams.get('account'));
+      const beregnet = await computeFrom(data, account);
+      sendJson(res, 200, {
+        ...computeAnalytics({ positions: beregnet.positions, totals: beregnet.totals, baseCurrency: beregnet.baseCurrency }),
+        records: await historyFacts(data, account, ps),
+      });
+    },
+
+    async personAnalytics(req, res, url, params) {
+      const { person, ps } = await viewable(req, params.id);
+      const account = parseAccountFilter(url.searchParams.get('account'));
+      const data = await ps.get();
+      const beregnet = await computeFrom(data, account);
+      sendJson(res, 200, {
+        person,
+        ...computeAnalytics({ positions: beregnet.positions, totals: beregnet.totals, baseCurrency: beregnet.baseCurrency }),
+        records: await historyFacts(data, account, ps),
+      });
+    },
+
+    // ---------- profiler ----------
+
+    async signup(req, res) {
+      const ip = clientIp(req, { trustProxy: config.trustProxy });
+      if (limiter.isBlocked(ip)) throw new HttpError(429, 'For mange forsøg – prøv igen senere', { retryAfter: limiter.retryAfterSeconds(ip) });
+      const body = await readJsonBody(req);
+      const user = await accounts.signup(body, { requireInvite: true });
+      limiter.reset(ip);
+      await issueSession(req, res, { remember: true, user });
+      sendJson(res, 201, { user: publicProfile(user, { includeEmail: true }) });
+    },
+
+    async platformLogin(req, res) {
+      const ip = clientIp(req, { trustProxy: config.trustProxy });
+      if (limiter.isBlocked(ip)) {
+        const wait = limiter.retryAfterSeconds(ip);
+        throw new HttpError(429, `For mange forsøg – prøv igen om ${Math.ceil(wait / 60)} min.`, { retryAfter: wait });
+      }
+      const body = await readJsonBody(req);
+      const user = await accounts.verify(body.email, body.password);
+      if (!user) {
+        limiter.recordFailure(ip);
+        // Samme svar uanset om e-mailen findes, så listen over profiler ikke kan afsøges.
+        throw new HttpError(401, 'Forkert e-mail eller adgangskode');
+      }
+      limiter.reset(ip);
+      await issueSession(req, res, { remember: body.remember !== false, user });
+      sendJson(res, 200, { user: publicProfile(user, { includeEmail: true }) });
+    },
+
+    async me(req, res) {
+      const user = await requireUser(req);
+      sendJson(res, 200, {
+        user: publicProfile(user, { includeEmail: true }),
+        inviteCode: user.isOwner ? await accounts.inviteCode() : null,
+      });
+    },
+
+    async updateMe(req, res) {
+      const user = await requireUser(req);
+      const body = await readJsonBody(req);
+      const name = await accounts.rename(user.id, body.name);
+      sendJson(res, 200, { user: { ...publicProfile(user, { includeEmail: true }), name } });
+    },
+
+    async platformChangePassword(req, res) {
+      const user = await requireUser(req);
+      const body = await readJsonBody(req);
+      const newHash = await accounts.changePassword(user.id, body.currentPassword, body.newPassword);
+      // Denne browser bliver logget ind igen med det samme; de øvrige enheder falder ud.
+      await issueSession(req, res, { remember: true, user: { ...user, passwordHash: newHash } });
+      sendJson(res, 200, { ok: true });
+    },
+
+    async rotateInvite(req, res) {
+      const user = await requireUser(req);
+      if (!user.isOwner) throw new HttpError(403, 'Kun den, der oprettede platformen, kan lave en ny invitationskode');
+      sendJson(res, 200, { inviteCode: await accounts.rotateInviteCode() });
+    },
+
+    // ---------- følg andre ----------
+
+    async people(req, res, url) {
+      const user = await requireUser(req);
+      sendJson(res, 200, { people: await accounts.browse(url.searchParams.get('q'), { exclude: user.id }) });
+    },
+
+    // ---------- en andens portefølje ----------
+
+    async personPortfolio(req, res, url, params) {
+      const { person, ps } = await viewable(req, params.id);
+      sendJson(res, 200, { person, ...(await buildPortfolio(parseAccountFilter(url.searchParams.get('account')), ps)) });
+    },
+
+    async personHistory(req, res, url, params) {
+      const { ps } = await viewable(req, params.id);
+      const range = url.searchParams.get('range') || '1y';
+      if (!HISTORY_RANGES.has(range)) throw new HttpError(400, 'Ugyldigt interval');
+      sendJson(res, 200, await buildHistory(range, null, parseAccountFilter(url.searchParams.get('account')), ps));
+    },
+
+    async personHoldings(req, res, url, params) {
+      const { person, ps } = await viewable(req, params.id);
+      const data = await ps.get();
+      sendJson(res, 200, { person, holdings: data.holdings.map(publicHolding), settings: data.settings });
     },
 
     async search(req, res, url) {
@@ -469,7 +788,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     },
 
     async listHoldings(req, res) {
-      const data = await store.getPortfolio();
+      const data = await (await own(req)).get();
       sendJson(res, 200, { holdings: data.holdings.map(publicHolding), settings: data.settings });
     },
 
@@ -479,8 +798,10 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const quantity = parseQuantity(body.quantity);
       const avgPrice = parseNumber(body.avgPrice, 'Købskurs', { min: 0, allowNull: true });
       const note = parseNote(body.note);
+      const purchasedAt = parsePurchaseDate(body.purchasedAt);
+      const lots = parseLots(body.lots);
 
-      const currentData = await store.getPortfolio();
+      const currentData = await (await own(req)).get();
       const current = currentData.holdings;
       const accountId = parseAccountId(body.accountId, currentData.settings.accounts);
       const existing = current.find((h) => sameSlot(h, symbol, accountId));
@@ -506,10 +827,13 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         avgPrice,
         note,
         accountId,
+        purchasedAt,
+        ...(lots ? { lots } : {}),
         addedAt: now,
         updatedAt: now,
       };
-      await store.updatePortfolio((draft) => {
+      applyLots(holding);
+      await (await own(req)).update((draft) => {
         if (draft.holdings.some((h) => sameSlot(h, symbol, accountId))) throw new HttpError(409, 'Aktien er allerede i porteføljen');
         draft.holdings.push(holding);
       });
@@ -519,16 +843,19 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     async updateHolding(req, res, url, params) {
       const body = await readJsonBody(req);
       let updated;
-      await store.updatePortfolio((draft) => {
+      await (await own(req)).update((draft) => {
         const h = findHolding(draft, params.id);
         if (body.quantity !== undefined) h.quantity = parseQuantity(body.quantity);
         if (body.avgPrice !== undefined) h.avgPrice = parseNumber(body.avgPrice, 'Købskurs', { min: 0, allowNull: true });
         if (body.note !== undefined) h.note = parseNote(body.note);
+        if (body.purchasedAt !== undefined) h.purchasedAt = parsePurchaseDate(body.purchasedAt);
+        if (body.lots !== undefined) h.lots = parseLots(body.lots) || [];
         if (body.accountId !== undefined) {
           const accountId = parseAccountId(body.accountId, draft.settings.accounts);
           if (draft.holdings.some((x) => x.id !== h.id && sameSlot(x, h.symbol, accountId))) throw new HttpError(409, `${h.name || h.symbol} findes allerede i det depot – brug "Køb til" dér i stedet`);
           h.accountId = accountId;
         }
+        applyLots(h);
         h.updatedAt = new Date().toISOString();
         updated = h;
       });
@@ -542,18 +869,32 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       if (!type) throw new HttpError(400, 'Type skal være "buy" eller "sell"');
       const quantity = parseQuantity(body.quantity);
       const price = parseNumber(body.price, 'Kurs', { min: 0, allowNull: type === 'sell' });
+      const date = parsePurchaseDate(body.date);
       let result;
-      await store.updatePortfolio((draft) => {
+      await (await own(req)).update((draft) => {
         const h = findHolding(draft, params.id);
         const oldQty = Number(h.quantity) || 0;
         if (type === 'buy') {
-          const newQty = oldQty + quantity;
-          if (h.avgPrice != null && oldQty > 0) {
-            h.avgPrice = Math.round(((oldQty * h.avgPrice + quantity * price) / newQty) * 1e6) / 1e6;
-          } else if (oldQty === 0 || h.avgPrice == null) {
-            h.avgPrice = oldQty === 0 ? price : h.avgPrice;
+          // Føres aktien køb for køb – eller skriver man en dato på dette køb –
+          // lægges købet i listen, og antal og gennemsnitskurs regnes derudfra.
+          const førerKøb = Array.isArray(h.lots) && h.lots.length > 0;
+          if (førerKøb || date) {
+            const lots = førerKøb ? [...h.lots] : (oldQty > 0
+              ? [{ id: newId(), date: h.purchasedAt ?? null, quantity: oldQty, price: h.avgPrice ?? null }]
+              : []);
+            if (lots.length >= MAX_LOTS) throw new HttpError(409, `Der kan højst registreres ${MAX_LOTS} køb pr. aktie`);
+            lots.push({ id: newId(), date, quantity, price });
+            h.lots = parseLots(lots);
+            applyLots(h);
+          } else {
+            const newQty = oldQty + quantity;
+            if (h.avgPrice != null && oldQty > 0) {
+              h.avgPrice = Math.round(((oldQty * h.avgPrice + quantity * price) / newQty) * 1e6) / 1e6;
+            } else if (oldQty === 0 || h.avgPrice == null) {
+              h.avgPrice = oldQty === 0 ? price : h.avgPrice;
+            }
+            h.quantity = Math.round(newQty * 1e6) / 1e6;
           }
-          h.quantity = Math.round(newQty * 1e6) / 1e6;
         } else {
           if (quantity > oldQty + 1e-9) throw new HttpError(400, `Du ejer kun ${formatQty(oldQty)} stk.`);
           const newQty = Math.round((oldQty - quantity) * 1e6) / 1e6;
@@ -561,6 +902,10 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
             draft.holdings = draft.holdings.filter((x) => x.id !== h.id);
             result = { removed: true, holding: publicHolding({ ...h, quantity: 0 }) };
             return;
+          }
+          if (Array.isArray(h.lots) && h.lots.length) {
+            h.lots = reduceLots(h.lots, quantity);
+            applyLots(h);
           }
           h.quantity = newQty;
         }
@@ -572,7 +917,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
     async deleteHolding(req, res, url, params) {
       let removed;
-      await store.updatePortfolio((draft) => {
+      await (await own(req)).update((draft) => {
         removed = findHolding(draft, params.id);
         draft.holdings = draft.holdings.filter((h) => h.id !== params.id);
       });
@@ -580,7 +925,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     },
 
     async getSettings(req, res) {
-      const data = await store.getPortfolio();
+      const data = await (await own(req)).get();
       sendJson(res, 200, { settings: data.settings });
     },
 
@@ -603,7 +948,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       if (body.showDecimals !== undefined) patch.showDecimals = Boolean(body.showDecimals);
       if (body.cash !== undefined) patch.cash = parseNumber(body.cash, 'Kontanter', { min: 0, allowNull: true }) ?? 0;
       if (body.accounts !== undefined) patch.accounts = parseAccounts(body.accounts);
-      const data = await store.updatePortfolio((draft) => {
+      const data = await (await own(req)).update((draft) => {
         Object.assign(draft.settings, patch);
         if (patch.accounts) {
           // Slettede depoter: beholdningerne beholdes, men står nu "uden depot".
@@ -615,7 +960,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     },
 
     async backup(req, res) {
-      const data = await store.getPortfolio();
+      const data = await (await own(req)).get();
       const stamp = new Date().toISOString().slice(0, 10);
       sendJson(res, 200, { ...data, exportedAt: new Date().toISOString() }, {
         'Content-Disposition': `attachment; filename="aktie-portfolio-${stamp}.json"`,
@@ -636,7 +981,8 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         const slot = `${symbol}@${accountId ?? ''}`;
         if (seen.has(slot)) throw new HttpError(400, `Symbolet ${symbol} optræder flere gange i samme depot (linje ${i + 1})`);
         seen.add(slot);
-        return {
+        const lots = parseLots(raw.lots);
+        return applyLots({
           id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newId(),
           symbol,
           accountId,
@@ -645,14 +991,16 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
           quantity: parseQuantity(raw.quantity),
           avgPrice: parseNumber(raw.avgPrice, 'Købskurs', { min: 0, allowNull: true }),
           note: parseNote(raw.note),
+          purchasedAt: parsePurchaseDate(raw.purchasedAt),
+          ...(lots ? { lots } : {}),
           addedAt: typeof raw.addedAt === 'string' && raw.addedAt.length <= 40 && !Number.isNaN(Date.parse(raw.addedAt)) ? raw.addedAt : now,
           updatedAt: now,
-        };
+        });
       });
       const baseCurrency = body.settings?.baseCurrency ? parseCurrency(body.settings.baseCurrency) : undefined;
       const cash = body.settings?.cash !== undefined ? parseNumber(body.settings.cash, 'Kontanter', { min: 0, allowNull: true }) ?? 0 : undefined;
       const settings = body.settings && typeof body.settings === 'object' ? body.settings : {};
-      const data = await store.updatePortfolio((draft) => {
+      const data = await (await own(req)).update((draft) => {
         draft.holdings = holdings;
         draft.settings.accounts = accounts;
         if (baseCurrency) draft.settings.baseCurrency = baseCurrency;
@@ -666,14 +1014,40 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   // ---------- routing ----------
 
+  // Med profiler er login og adgangskode knyttet til en bruger; uden dem er der
+  // én fælles adgangskode til hele instansen.
+  const authRoutes = platform
+    ? [
+        ['POST', /^\/api\/auth\/signup$/, api.signup, { public: true }],
+        ['POST', /^\/api\/auth\/login$/, api.platformLogin, { public: true }],
+        ['POST', /^\/api\/auth\/change-password$/, api.platformChangePassword],
+      ]
+    : [
+        ['POST', /^\/api\/auth\/setup$/, api.setup, { public: true }],
+        ['POST', /^\/api\/auth\/login$/, api.login, { public: true }],
+        ['POST', /^\/api\/auth\/change-password$/, api.changePassword],
+        ['POST', /^\/api\/auth\/logout-all$/, api.logoutAll],
+      ];
+
+  const profileRoutes = platform
+    ? [
+        ['GET', /^\/api\/me$/, api.me],
+        ['PUT', /^\/api\/me$/, api.updateMe],
+        ['POST', /^\/api\/invite\/rotate$/, api.rotateInvite],
+        ['GET', /^\/api\/people$/, api.people],
+        ['GET', /^\/api\/users\/(?<id>[^/]+)\/portfolio\/history$/, api.personHistory],
+        ['GET', /^\/api\/users\/(?<id>[^/]+)\/portfolio$/, api.personPortfolio],
+        ['GET', /^\/api\/users\/(?<id>[^/]+)\/holdings$/, api.personHoldings],
+        ['GET', /^\/api\/users\/(?<id>[^/]+)\/analytics$/, api.personAnalytics],
+      ]
+    : [];
+
   const routes = [
     ['GET', /^\/api\/health$/, (req, res) => sendJson(res, 200, { ok: true }), { public: true }],
     ['GET', /^\/api\/auth\/status$/, api.status, { public: true }],
-    ['POST', /^\/api\/auth\/setup$/, api.setup, { public: true }],
-    ['POST', /^\/api\/auth\/login$/, api.login, { public: true }],
+    ...authRoutes,
+    ...profileRoutes,
     ['POST', /^\/api\/auth\/logout$/, api.logout, { public: true }],
-    ['POST', /^\/api\/auth\/change-password$/, api.changePassword],
-    ['POST', /^\/api\/auth\/logout-all$/, api.logoutAll],
     ['GET', /^\/api\/portfolio$/, api.portfolio],
     ['GET', /^\/api\/portfolio\/history$/, api.history],
     ['POST', /^\/api\/resolve$/, api.resolve],
@@ -686,6 +1060,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     ['PUT', /^\/api\/holdings\/(?<id>[^/]+)$/, api.updateHolding],
     ['POST', /^\/api\/holdings\/(?<id>[^/]+)\/trade$/, api.trade],
     ['DELETE', /^\/api\/holdings\/(?<id>[^/]+)$/, api.deleteHolding],
+    ['GET', /^\/api\/analytics$/, api.analytics],
     ['GET', /^\/api\/settings$/, api.getSettings],
     ['PUT', /^\/api\/settings$/, api.updateSettings],
     ['GET', /^\/api\/backup$/, api.backup],
@@ -708,15 +1083,21 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   // I browser-tilstand findes intet lager på serveren – disse ruter giver ingen mening.
-  const STORE_ROUTES = /^\/api\/(portfolio|holdings|settings|backup|restore|auth\/(setup|login|change-password|logout-all))(\/|$)/;
+  const STORE_ROUTES = /^\/api\/(portfolio|holdings|settings|analytics|backup|restore|auth\/(setup|login|change-password|logout-all))(\/|$)/;
+  // Ved åben adgang findes der intet login at bruge – men /api/auth/setup skal være åben,
+  // for det er dén vej, man lukker siden med en adgangskode.
+  const AUTH_ROUTES_WHEN_OPEN = /^\/api\/auth\/(login|change-password|logout-all|logout)$/;
 
   async function handleApi(req, res, url) {
     const method = req.method === 'HEAD' ? 'GET' : req.method;
-    if (browserMode) {
+    const open = !browserMode && (await openAccessNow());
+    if (browserMode || open) {
+      // Uden login beskytter en kald-grænse pr. IP mod misbrug.
       const ip = clientIp(req, { trustProxy: config.trustProxy });
       apiLimiter.recordFailure(ip);
       if (apiLimiter.isBlocked(ip)) throw new HttpError(429, 'For mange kald – prøv igen om lidt', { retryAfter: apiLimiter.retryAfterSeconds(ip) });
-      if (STORE_ROUTES.test(url.pathname)) throw new HttpError(404, 'Ikke tilgængelig i browser-tilstand (ingen database på serveren)', { code: 'BROWSER_MODE' });
+      if (browserMode && STORE_ROUTES.test(url.pathname)) throw new HttpError(404, 'Ikke tilgængelig i browser-tilstand (ingen database på serveren)', { code: 'BROWSER_MODE' });
+      if (open && AUTH_ROUTES_WHEN_OPEN.test(url.pathname)) throw new HttpError(404, 'Login er slået fra (åben adgang)', { code: 'OPEN_ACCESS' });
     }
     for (const [m, pattern, handler, opts = {}] of routes) {
       const match = url.pathname.match(pattern);
@@ -743,15 +1124,18 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
 
   async function handlePage(req, res, url) {
     if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Metoden er ikke tilladt');
-    const { setupRequired } = await authState();
-    const authed = !setupRequired && (await isAuthenticated(req));
+    // Med profiler afgør sessionen alene, om man er inde; den fælles adgangskode
+    // og opsætnings-tilstanden findes ikke i den tilstand.
+    const { setupRequired } = platform ? { setupRequired: false } : await authState();
+    const open = !platform && !browserMode && (await openAccessNow());
+    const authed = open || (!setupRequired && (await isAuthenticated(req)));
 
     if (url.pathname === '/login') {
       if (authed || browserMode) return redirect(res, '/');
       if (!(await serveStatic(res, VIEWS_DIR, '/login.html'))) throw new HttpError(500, 'login.html mangler');
       return;
     }
-    if (PAGE_ROUTES.has(url.pathname)) {
+    if (PAGE_ROUTES.has(url.pathname) || (platform && PERSON_PAGE.test(url.pathname))) {
       if (!authed) {
         const next = url.pathname === '/' ? '' : `?next=${encodeURIComponent(url.pathname)}`;
         return redirect(res, `/login${next}`);
@@ -774,6 +1158,9 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       if (res.headersSent) {
         res.destroy();
         return;
+      }
+      if (err instanceof SignupError && !res.headersSent) {
+        if (url.pathname.startsWith('/api/')) return sendError(res, err.status, err.message);
       }
       if (err instanceof HttpError) {
         if (err.status === 429 && err.extra?.retryAfter) res.setHeader('Retry-After', String(err.extra.retryAfter));

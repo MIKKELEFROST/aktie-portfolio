@@ -22,7 +22,7 @@ test('browser-tilstand: ingen login, compute-endpoints virker, lager-ruter er sl
     assert.equal(login.headers.get('location'), '/');
 
     const status = await (await call('GET', '/api/auth/status')).json();
-    assert.deepEqual(status, { setupRequired: false, setupTokenRequired: false, usesEnvPassword: false, authenticated: true, storage: 'browser' });
+    assert.deepEqual(status, { setupRequired: false, setupTokenRequired: false, usesEnvPassword: false, access: 'browser', authenticated: true, storage: 'browser' });
 
     const computed = await call('POST', '/api/compute', {
       holdings: [{ symbol: 'NOVO-B.CO', quantity: 10, avgPrice: 200 }, { symbol: 'SHEL.L', quantity: 100, avgPrice: '27,50' }],
