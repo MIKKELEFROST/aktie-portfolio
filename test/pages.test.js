@@ -23,6 +23,22 @@ async function klientensRuter() {
   return [...linje[1].matchAll(/'([^']+)':/g)].map((m) => m[1]);
 }
 
+// Serverens egen liste, læst ud af koden.
+async function serverensRuter() {
+  const kode = await readFile(path.join(rod, '..', 'server', 'app.js'), 'utf8');
+  const linje = /const PAGE_ROUTES = new Set\(\[([^\]]+)\]\)/.exec(kode);
+  assert.ok(linje, 'kunne ikke finde PAGE_ROUTES i server/app.js');
+  return [...linje[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+}
+
+test('klienten og serveren kender præcis de samme sider', async () => {
+  const klient = [...await klientensRuter()].sort();
+  const server = [...await serverensRuter()].sort();
+  // Står en side kun ét sted, ender den enten som 404 ved et direkte besøg,
+  // eller som en tom side serveren stadig udleverer.
+  assert.deepEqual(server, klient);
+});
+
 test('hver side i klienten kan også hentes direkte fra serveren', async () => {
   const ruter = await klientensRuter();
   const store = createStore(await mkdtemp(path.join(tmpdir(), 'aktie-sider-')));
