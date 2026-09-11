@@ -408,3 +408,25 @@ test('graf: uden købsdato tæller hele beholdningen med i hele perioden', async
     server.close();
   }
 });
+
+test('graf: et køb få dage før første kurs får stadig sin markør', async () => {
+  const { call, server } = await start();
+  try {
+    // Købt for 70 dage siden. Perioden snævres ind til 3 måneder, men Yahoo
+    // leverer ikke altid helt så mange dage – markøren skal med alligevel.
+    const købt = new Date(Date.now() - 70 * 86_400_000).toISOString().slice(0, 10);
+    const senere = new Date(Date.now() - 20 * 86_400_000).toISOString().slice(0, 10);
+    await call('POST', '/api/holdings', {
+      symbol: 'NOVO-B.CO',
+      quantity: 50,
+      lots: [
+        { date: købt, quantity: 10, price: 250 },
+        { date: senere, quantity: 40, price: 280 },
+      ],
+    });
+    const h = (await call('GET', '/api/portfolio/history?range=6mo')).json;
+    assert.deepEqual(h.events.map((e) => e.date), [købt, senere], 'begge køb skal kunne ses');
+  } finally {
+    server.close();
+  }
+});

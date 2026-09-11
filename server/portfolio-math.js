@@ -274,7 +274,7 @@ function ownedSteps(holding) {
   return trin.sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
 }
 
-export function computeValueHistory({ holdings, histories, fxRates, fxHistories = {} }) {
+export function computeValueHistory({ holdings, histories, fxRates, fxHistories = {}, windowStart = null }) {
   const series = [];
   const med = [];
   for (const h of holdings) {
@@ -291,6 +291,7 @@ export function computeValueHistory({ holdings, histories, fxRates, fxHistories 
     }
     series.push({
       symbol: hist.symbol || h.symbol,
+      name: h.name || hist.symbol || h.symbol,
       currency: hist.currency,
       byDay,
       rateOn,
@@ -340,6 +341,27 @@ export function computeValueHistory({ holdings, histories, fxRates, fxHistories 
     out.push({ date: day, value: round(total), invested: round(invested) });
   }
 
+  // Begivenheder på kurven: hvad blev der købt hvornår. Køb samme dag samles i
+  // ét punkt, så en måned med fire fondskøb bliver til én markør og ikke fire
+  // oven i hinanden. Salg kan ikke vises – dem gemmer vi ikke, købene skrumper
+  // bare forholdsmæssigt.
+  const påDag = new Map();
+  for (const s of series) {
+    for (const step of s.steps) {
+      if (!step.date || !(step.quantity > 0)) continue;
+      if (!påDag.has(step.date)) påDag.set(step.date, []);
+      påDag.get(step.date).push({
+        symbol: s.symbol,
+        name: s.name,
+        quantity: round(step.quantity, 6),
+        price: step.cost > 0 ? round(step.cost / step.quantity, 6) : null,
+        currency: s.currency,
+        amount: round(step.cost, 2),
+        amountBase: round(step.cost * s.rateNow),
+      });
+    }
+  }
+
   // Dagene før det første køb er nuller – der var ikke noget at være værd.
   let første = 0;
   while (første < out.length - 1 && out[første].value <= 0) første++;
@@ -357,7 +379,25 @@ export function computeValueHistory({ holdings, histories, fxRates, fxHistories 
     .filter((s) => s.first > begin)
     .map((s) => ({ symbol: s.symbol, from: s.first }));
 
-  return { points, backfilled, ownedFrom };
+  // Hvilke køb hører til den viste periode? Kurven kan begynde senere end
+  // købet – køber man en lørdag, er første børsdag mandag, og Yahoo leverer
+  // ikke altid så mange dage, som perioden lover. Derfor måles der mod den
+  // periode, der blev bedt om (windowStart), og ellers mod den sidste dag,
+  // der blev klippet væk. Kurvens første dag alene ville smide markøren for
+  // det allerførste køb på gulvet.
+  const trimGrænse = første > 0 ? out[første - 1].date : null;
+  const start = points.length ? points[0].date : '';
+  const iVinduet = (dato) => {
+    if (windowStart && dato >= windowStart) return true;
+    if (trimGrænse) return dato > trimGrænse;
+    return dato >= start;
+  };
+  const events = [...påDag.entries()]
+    .filter(([dato]) => iVinduet(dato))
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([date, items]) => ({ date, items, amountBase: round(items.reduce((sum, i) => sum + i.amountBase, 0)) }));
+
+  return { points, backfilled, ownedFrom, events: events.length <= 80 ? events : [] };
 }
 
 // Opslag fra dato til valutakurs. Bruger seneste kurs til og med dagen; er dagen

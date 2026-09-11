@@ -1056,7 +1056,7 @@
     return `<div class="card-header"><h2>${icon('chart')}Udvikling <span class="hint">ca.</span></h2><div class="range-pills">${pills}</div></div>
       <div id="chart-summary" class="chart-summary"></div>
       <div class="chart-box" id="chart-box"></div>
-      <div class="chart-legend"><span><i></i>Porteføljeværdi</span><span class="chart-invested-key"><i class="dashed"></i>Investeret</span></div>
+      <div class="chart-legend"><span><i></i>Porteføljeværdi</span><span class="chart-invested-key"><i class="dashed"></i>Investeret</span><span class="chart-events-key hidden"><i class="dot"></i>Køb</span></div>
       <div class="chart-notes" id="chart-notes"></div>`;
   }
 
@@ -1097,7 +1097,7 @@
       + `<span class="${signClass(diff)}"><span class="amount">${fmtAmount(diff, state.baseCurrency, { sign: true })}</span> (${fmtPct(pct)})</span>`
       + `<span class="muted small">i ${medIndskud ? 'afkast' : 'kursbevægelse'} siden ${esc(fmtDate(first.date, { year: longRange() }))}`
       + `${state.historyLoading === state.range ? ' · opdaterer…' : ''}</span>`;
-    drawChart(box, h.points);
+    drawChart(box, h.points, h.events || []);
     renderChartNotes(h);
   }
 
@@ -1116,6 +1116,9 @@
       noter.push(`For ${udenDato === 1 ? 'én beholdning' : `${udenDato} beholdninger`} mangler købsdatoen, så ${udenDato === 1 ? 'den regnes' : 'de regnes'} med i hele perioden – også før du ejede ${udenDato === 1 ? 'den' : 'dem'}. Skriv datoen ind under Redigér, så bliver kurven rigtig.`);
     } else {
       noter.push('Kurven viser, hvad du <b>faktisk ejede hver dag</b>. Køber du til, stiger den – den del er ikke afkast. Den stiplede linje er det, du har lagt ind, så afstanden mellem de to er dit afkast.');
+      if (h.events?.length) {
+        noter.push(`Prikkerne er dine køb – ${h.events.length === 1 ? 'der er ét' : `der er ${h.events.length}`} i perioden. Kør hen over kurven (eller tryk på den) for at se hvad og for hvor meget. Salg kan ikke vises: dem gemmer appen ikke, de skrumper bare købene.`);
+      }
     }
     // Er perioden klippet til første køb, skal det stå – ellers ser det ud som
     // om knappen ikke virkede, når 6M og 1Å viser det samme.
@@ -1138,7 +1141,7 @@
     el.innerHTML = noter.map((n) => `<p>${n}</p>`).join('');
   }
 
-  function drawChart(box, points) {
+  function drawChart(box, points, events = []) {
     const W = Math.max(280, box.clientWidth || 600);
     const H = box.clientHeight || 240;
     const padL = 8, padR = 8, padT = 14, padB = 26;
@@ -1194,6 +1197,22 @@
       ? `<path d="${points.map((p, i) => (i ? `H${x(p.date).toFixed(1)} V${y(p.invested).toFixed(1)}` : `M${x(p.date).toFixed(1)},${y(p.invested).toFixed(1)}`)).join(' ')}" fill="none" stroke="var(--chart-invested)" stroke-width="1.5" stroke-dasharray="5 4"/>`
       : '';
     $$('.chart-invested-key').forEach((el) => el.classList.toggle('hidden', !showInvested));
+
+    // Et køb kan falde i en weekend; markøren sættes på første børsdag derefter,
+    // altså samme dag som hoppet i kurven.
+    const påIndex = new Map();
+    for (const ev of events) {
+      let i = points.findIndex((p) => p.date >= ev.date);
+      if (i < 0) i = points.length - 1;
+      if (!påIndex.has(i)) påIndex.set(i, []);
+      påIndex.get(i).push(ev);
+    }
+    $$('.chart-events-key').forEach((el) => el.classList.toggle('hidden', påIndex.size === 0));
+    const markører = [...påIndex.keys()].map((i) => {
+      const p = points[i];
+      return `<circle class="chart-event" cx="${x(p.date).toFixed(1)}" cy="${y(p.value).toFixed(1)}" r="4" fill="var(--surface)" stroke="var(--chart-line)" stroke-width="2"/>`;
+    }).join('');
+
     const last = points[points.length - 1];
     box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
       <defs><linearGradient id="chart-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--chart-line)" stop-opacity="0.22"/><stop offset="1" stop-color="var(--chart-line)" stop-opacity="0"/></linearGradient></defs>
@@ -1201,6 +1220,7 @@
       <path d="${area}" fill="url(#chart-grad)"/>
       ${investedLine}
       <path d="${path}" fill="none" stroke="var(--chart-line)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      ${markører}
       <circle cx="${x(last.date).toFixed(1)}" cy="${y(last.value).toFixed(1)}" r="3.5" fill="var(--chart-line)" stroke="var(--surface)" stroke-width="2"/>
       <line id="chart-cursor" x1="0" x2="0" y1="${padT}" y2="${H - padB}" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 3" style="display:none"/>
       <circle id="chart-dot" r="4" fill="var(--chart-line)" stroke="var(--surface)" stroke-width="2" style="display:none"/>
@@ -1228,12 +1248,21 @@
       dot.setAttribute('cx', cx); dot.setAttribute('cy', cy); dot.style.display = '';
       // Afkast den dag: værdien mod det, der faktisk var lagt ind indtil da.
       const afkast = isNum(p.invested) && p.invested > 0 ? p.value - p.invested : null;
+      // Blev der købt den dag, står hvad og for hvor meget – det forklarer hoppet.
+      const køb = (påIndex.get(best) || []).flatMap((ev) => ev.items).map((i) => {
+        const beløb = i.amount > 0
+          ? `for <b>${fmtPrice(i.amount)} ${esc(i.currency || '')}</b>${i.currency && i.currency !== state.baseCurrency ? ` (${fmtAmount(i.amountBase)})` : ''}`
+          : '';
+        return `<span class="tip-event">Købt ${fmtQty(i.quantity)} stk. ${esc(i.name)} ${beløb}</span>`;
+      }).join('');
       tip.innerHTML = `${esc(fmtDate(p.date, { year: true }))}<b class="amount">${fmtAmount(p.value)}</b>`
         + (afkast == null
           ? `<span class="amount">${fmtAmount(p.value - points[0].value, state.baseCurrency, { sign: true })}</span> siden start`
-          : `<span class="amount ${signClass(afkast)}">${fmtAmount(afkast, state.baseCurrency, { sign: true })}</span> af ${fmtAmount(p.invested)} indsat`);
+          : `<span class="amount ${signClass(afkast)}">${fmtAmount(afkast, state.baseCurrency, { sign: true })}</span> af ${fmtAmount(p.invested)} indsat`)
+        + køb;
       tip.style.display = '';
-      const leftPx = clamp((cx / W) * rect.width, 70, rect.width - 70);
+      const halv = Math.min(tip.offsetWidth / 2 + 4, rect.width / 2);
+      const leftPx = clamp((cx / W) * rect.width, halv, rect.width - halv);
       tip.style.left = `${leftPx}px`;
       tip.style.top = `${(cy / H) * rect.height - 10}px`;
     };
