@@ -220,8 +220,43 @@ export function computePortfolio({ holdings, quotes, fxRates, baseCurrency }) {
 // Historisk porteføljeværdi i basisvaluta, givet nuværende beholdning
 // (antager beholdningen har været uændret i perioden – tydeligt markeret i UI).
 // histories: { [symbol]: { currency, points: [{t, close}] } }, fxRates: { [cur]: {ok, rate} }
+// Cirka-længden på hver periode i dage, fra kort til lang. Den første, der
+// dækker ejertiden, er dermed også den mindste, der dækker.
+const RANGE_DAGE = [['1mo', 31], ['3mo', 93], ['6mo', 186], ['1y', 366], ['2y', 731], ['5y', 1827]];
+
+export function rangeDays(range, now = Date.now()) {
+  if (range === '5d') return 5;
+  if (range === 'ytd') {
+    const d = new Date(now);
+    return Math.floor((now - Date.UTC(d.getUTCFullYear(), 0, 1)) / MS_PER_DAG) + 1;
+  }
+  const fundet = RANGE_DAGE.find(([k]) => k === range);
+  return fundet ? fundet[1] : Infinity; // "max"
+}
+
+// Første køb på tværs af beholdningerne. Mangler datoen på bare én, ved vi ikke,
+// hvornår porteføljen begyndte – og så svares der null i stedet for at gætte.
+export function firstPurchaseDate(holdings = []) {
+  const datoer = holdings.map((h) => h?.purchasedAt || null);
+  return datoer.length && datoer.every(Boolean) ? [...datoer].sort()[0] : null;
+}
+
+// Yahoo leverer 5y og max i ugebarer. Henter vi "Alt" for noget købt for en
+// måned siden, bliver kurven til en håndfuld punkter, når tiden inden købet er
+// klippet fra. Derfor snævres perioden ind til den mindste, der stadig dækker
+// ejertiden – så bliver det dagsbarer og en rigtig kurve.
+export function narrowRange(range, ownedFrom, now = Date.now()) {
+  if (!ownedFrom || range === '5d') return range;
+  const dage = heldDays(ownedFrom, now);
+  if (!Number.isFinite(dage)) return range;
+  const mindste = RANGE_DAGE.find(([, d]) => d >= dage);
+  if (!mindste) return range; // ejet længere end fem år: hent som bedt om
+  return mindste[1] < rangeDays(range, now) ? mindste[0] : range;
+}
+
 export function computeValueHistory({ holdings, histories, fxRates, fxHistories = {} }) {
   const series = [];
+  const med = [];
   for (const h of holdings) {
     const hist = histories[h.symbol.toUpperCase()];
     if (!hist || !hist.points?.length) continue;
@@ -236,22 +271,20 @@ export function computeValueHistory({ holdings, histories, fxRates, fxHistories 
       byDay.set(day, { local: p.close * qty, day });
     }
     series.push({ symbol: hist.symbol || h.symbol, currency: hist.currency, byDay, rateOn, first: [...byDay.keys()].sort()[0] });
+    med.push(h);
   }
-  if (!series.length) return { points: [], backfilled: [] };
+  if (!series.length) return { points: [], backfilled: [], ownedFrom: null };
+
+  // Kurven skal ikke starte, før man ejede noget: tiden inden første køb klippes
+  // væk, uanset hvilken periode der er valgt. Kun de beholdninger, der faktisk
+  // er med i kurven, tæller – en der mangler kurser, skal ikke flytte starten.
+  const ownedFrom = firstPurchaseDate(med);
 
   // Brug alle dage fra alle serier; manglende dage udfyldes med seneste kendte
   // lukkekurs (forward fill), så en helligdag på én børs ikke giver et dyk.
   const allDays = new Set();
   for (const s of series) for (const d of s.byDay.keys()) allDays.add(d);
   const days = [...allDays].sort();
-  const begin = days[0];
-
-  // Et papir med kortere historik end resten afkortede før hele grafen. I stedet
-  // regnes det med til sin første kendte kurs i tiden inden. Det er stadig et gæt,
-  // så hvilke papirer det gælder, gives videre og skrives under grafen.
-  const backfilled = series
-    .filter((s) => s.first > begin)
-    .map((s) => ({ symbol: s.symbol, from: s.first }));
 
   const last = series.map((s) => s.byDay.get(s.first));
   const out = [];
@@ -264,7 +297,25 @@ export function computeValueHistory({ holdings, histories, fxRates, fxHistories 
     }
     out.push({ date: day, value: total });
   }
-  return { points: out, backfilled };
+
+  let points = out;
+  if (ownedFrom) {
+    const efterKøb = out.filter((p) => p.date >= ownedFrom);
+    // Er alt købt i dag, er der ikke en kurve endnu; så beholdes de sidste par
+    // dage, så grafen ikke står helt tom.
+    points = efterKøb.length >= 2 ? efterKøb : out.slice(-2);
+  }
+
+  // Et papir med kortere historik end resten afkortede før hele grafen. I stedet
+  // regnes det med til sin første kendte kurs i tiden inden. Det er stadig et gæt,
+  // så hvilke papirer det gælder, gives videre og skrives under grafen. Måles mod
+  // den viste periode: ligger gættet før kurvens start, ses det ikke.
+  const begin = points.length ? points[0].date : days[0];
+  const backfilled = series
+    .filter((s) => s.first > begin)
+    .map((s) => ({ symbol: s.symbol, from: s.first }));
+
+  return { points, backfilled, ownedFrom };
 }
 
 // Opslag fra dato til valutakurs. Bruger seneste kurs til og med dagen; er dagen

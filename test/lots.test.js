@@ -297,3 +297,70 @@ test('browser-tilstand: compute regner også ud fra de enkelte køb', async () =
     server.close();
   }
 });
+
+test('graf: perioden starter ved første køb, uanset hvilken knap der vælges', async () => {
+  const { call, server } = await start();
+  try {
+    const forDageSiden = (n) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+    const købt = forDageSiden(30);
+    await call('POST', '/api/holdings', { symbol: 'NOVO-B.CO', quantity: 10, avgPrice: 250, purchasedAt: købt });
+
+    for (const range of ['6mo', '1y', 'max']) {
+      const h = (await call('GET', `/api/portfolio/history?range=${range}`)).json;
+      assert.ok(h.points[0].date >= købt, `${range}: kurven starter ${h.points[0].date}, men købet var ${købt}`);
+      assert.equal(h.ownedFrom, købt, `${range}: skal fortælle klienten hvorfor perioden er kortere`);
+      assert.equal(h.range, range, 'den valgte periode meldes tilbage uændret');
+      // De lange perioder leveres i ugebarer. Hentes de uændret og klippes
+      // bagefter, bliver en måneds ejertid til en håndfuld punkter – derfor
+      // skal perioden snævres ind, så der kommer dagsbarer.
+      assert.ok(h.points.length >= 10, `${range}: kun ${h.points.length} punkter – det ligner ugebarer`);
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test('graf: købt i sidste uge – kurven begynder dér, ikke hvor hentningen begyndte', async () => {
+  const { call, server } = await start();
+  try {
+    // Fem dage er kortere end selv den mindste periode, der kan hentes, så her
+    // er det klipningen – ikke indsnævringen – der skal holde kurven på plads.
+    const købt = new Date(Date.now() - 5 * 86_400_000).toISOString().slice(0, 10);
+    await call('POST', '/api/holdings', { symbol: 'NOVO-B.CO', quantity: 10, avgPrice: 250, purchasedAt: købt });
+    const h = (await call('GET', '/api/portfolio/history?range=1y')).json;
+    assert.ok(h.points[0].date >= købt, `kurven starter ${h.points[0].date}, men købet var ${købt}`);
+    assert.ok(h.points.length >= 2, 'grafen må ikke stå tom');
+    assert.equal(h.ownedFrom, købt);
+  } finally {
+    server.close();
+  }
+});
+
+test('graf: uden købsdato vises hele den valgte periode', async () => {
+  const { call, server } = await start();
+  try {
+    await call('POST', '/api/holdings', { symbol: 'NOVO-B.CO', quantity: 10, avgPrice: 250 });
+    const h = (await call('GET', '/api/portfolio/history?range=1y')).json;
+    assert.equal(h.ownedFrom, null);
+    // Uden købsdato hentes hele perioden. Hvor langt Yahoo (her: mock'en) rækker
+    // tilbage, er ikke vores at love – men den må ikke være klippet til et par uger.
+    const treMånederSiden = new Date(Date.now() - 90 * 86_400_000).toISOString().slice(0, 10);
+    assert.ok(h.points[0].date < treMånederSiden, `forventede hele perioden, men kurven starter ${h.points[0].date}`);
+  } finally {
+    server.close();
+  }
+});
+
+test('graf: mangler datoen på én af to, klippes der ikke', async () => {
+  const { call, server } = await start();
+  try {
+    const købt = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10);
+    await call('POST', '/api/holdings', { symbol: 'NOVO-B.CO', quantity: 10, avgPrice: 250, purchasedAt: købt });
+    await call('POST', '/api/holdings', { symbol: 'MAERSK-B.CO', quantity: 1, avgPrice: 12000 });
+    const h = (await call('GET', '/api/portfolio/history?range=1y')).json;
+    assert.equal(h.ownedFrom, null, 'vi ved ikke hvornår den uden dato blev købt');
+    assert.ok(h.points[0].date < købt, `forventede hele perioden, men kurven starter ${h.points[0].date}`);
+  } finally {
+    server.close();
+  }
+});

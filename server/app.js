@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { newId } from './store.js';
-import { computeAnalytics, computePortfolio, computeValueHistory, dayKey, parseDanishNumber, reduceLots, summarizeLots } from './portfolio-math.js';
+import { computeAnalytics, computePortfolio, computeValueHistory, dayKey, firstPurchaseDate, heldDays, narrowRange, parseDanishNumber, rangeDays, reduceLots, summarizeLots } from './portfolio-math.js';
 import { resolveSecurities } from './resolve.js';
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter, passwordVersion } from './auth.js';
 import { createAccounts, publicProfile, SignupError, normalizeEmail } from './accounts.js';
@@ -239,12 +239,19 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     if (!data) data = await ps.get();
     const baseCurrency = data.settings.baseCurrency;
     const holdings = filterByAccount(data.holdings, account).filter((h) => Number(h.quantity) > 0);
+    // Kender vi købsdatoen på det hele, hentes der kun så langt tilbage, som man
+    // har ejet. Så slipper vi for at bede om ugebarer til en kort ejertid.
+    const købtFra = firstPurchaseDate(holdings);
+    const hentRange = narrowRange(range, købtFra);
+    // Rakte den valgte periode længere tilbage, end porteføljen er gammel, skal
+    // klienten kunne forklare, hvorfor en længere periode ikke ændrer kurven.
+    const kortereEndValgt = Boolean(købtFra) && heldDays(købtFra) < rangeDays(range);
     const histories = {};
     const missing = [];
     await Promise.all(
       holdings.map(async (h) => {
         try {
-          histories[h.symbol] = await yahoo.getHistory(h.symbol, range);
+          histories[h.symbol] = await yahoo.getHistory(h.symbol, hentRange);
         } catch (err) {
           missing.push({ symbol: h.symbol, error: err.message });
         }
@@ -256,7 +263,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
           yahoo.getFxRates(currencies, baseCurrency),
           // Historiske valutakurser, så en dag i juni omregnes med juni-kursen.
           // Kan de ikke hentes, falder hver valuta tilbage til dagens kurs.
-          yahoo.getFxHistories ? yahoo.getFxHistories(currencies, baseCurrency, range).catch(() => ({})) : Promise.resolve({}),
+          yahoo.getFxHistories ? yahoo.getFxHistories(currencies, baseCurrency, hentRange).catch(() => ({})) : Promise.resolve({}),
         ])
       : [{}, {}];
     for (const h of holdings) {
@@ -298,7 +305,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     const fxToday = Object.entries(fxHistories)
       .filter(([cur, h]) => cur !== baseCurrency && (!h?.ok || !h.points?.length) && !h?.identity)
       .map(([cur]) => cur);
-    return { range, baseCurrency, points, missing, backfilled, fxToday, liveEnd, approximate: true };
+    return { range, baseCurrency, points, missing, backfilled, fxToday, liveEnd, ownedFrom: kortereEndValgt ? købtFra : null, approximate: true };
   }
 
   // ---------- validering ----------

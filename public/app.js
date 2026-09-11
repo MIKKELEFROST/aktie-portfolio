@@ -1104,6 +1104,11 @@
     if (!el) return;
     const noter = [];
     noter.push('Kurven viser, hvad <b>din nuværende beholdning</b> ville have været værd på hver dag – ikke hvad du faktisk ejede dengang. Dit rigtige afkast står under "Samlet afkast".');
+    // Er perioden klippet til første køb, skal det stå – ellers ser det ud som
+    // om knappen ikke virkede, når 6M og 1Å viser det samme.
+    if (h.ownedFrom) {
+      noter.push(`Kurven starter ved dit <b>første køb ${esc(fmtDate(h.ownedFrom, { year: true }))}</b> – før det ejede du ikke noget. Vælger du en længere periode, ændrer det derfor ikke kurven.`);
+    }
     if (h.backfilled?.length) {
       const liste = h.backfilled.map((b) => `<b>${esc(b.symbol)}</b> (før ${esc(fmtDate(b.from, { year: true }))})`).join(', ');
       noter.push(`Yahoo har ikke kurser så langt tilbage for ${liste}. Der regnes med den første kurs, som findes – så kurven dækker hele perioden, men bevæger sig lidt mindre i den ældste del.`);
