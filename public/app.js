@@ -1508,6 +1508,24 @@
 
   // Hvad fremskrivningen regner med, hvis brugeren ikke selv har rettet noget.
   const DEFAULT_VÆKST = 7;
+  function faktaKort(ikon, titel, liste, note = '') {
+    if (!liste.length) return '';
+    return `<div class="card">
+        <div class="card-header"><h2>${icon(ikon)}${esc(titel)}</h2></div>
+        <div class="card-body">
+          <ul class="fact-list">${liste.map(([i, tekst]) => `<li>${i}<span>${tekst}</span></li>`).join('')}</ul>
+          ${note ? `<p class="muted small" style="margin:12px 0 0">${esc(note)}</p>` : ''}
+        </div>
+      </div>`;
+  }
+
+  // "2025-10" → "oktober 2025"
+  function månedNavn(m) {
+    const d = new Date(`${m}-01T12:00:00Z`);
+    if (Number.isNaN(d.getTime())) return m;
+    return d.toLocaleDateString('da-DK', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  }
+
   function planInput(a) {
     const perMonth = state.plan.perMonth ?? (isNum(a.perMonth) ? Math.round(a.perMonth) : 0);
     // Eget afkast bruges kun, når der er over et års historik bag det.
@@ -1540,6 +1558,43 @@
     if (a.longestHeld) fakta.push([icon('chart'), `Længst ejet: <b>${esc(a.longestHeld.name)}</b> i ${esc(punktum(ejertid(a.longestHeld.heldDays)))}`]);
     if (isNum(a.doublingYears)) fakta.push([icon('trend'), `Fortsætter væksten, er pengene fordoblet om <b>${fmtNum(a.doublingYears, 0, 1)} år</b>.`]);
     if (a.currencies > 1) fakta.push([icon('eye'), `Du har papirer i <b>${a.currencies} valutaer</b>${a.accounts ? ` fordelt på ${a.accounts} ${a.accounts === 1 ? 'depot' : 'depoter'}` : ''}.`]);
+    if (isNum(a.units) && a.units > 0) fakta.push([icon('briefcase'), `Du ejer <b>${fmtQty(a.units)} andele</b> i alt, fordelt på ${a.positionsTotal} ${a.positionsTotal === 1 ? 'papir' : 'papirer'}.`]);
+
+    // ---------- dine køb ----------
+    const købFakta = [];
+    if (a.purchases > 1) {
+      købFakta.push([icon('cart'), `Du har købt <b>${a.purchases} gange</b> siden ${esc(fmtDate(a.firstBuy, { year: true }))}${isNum(a.daysBetweenBuys) ? ` – ét køb hver <b>${fmtNum(a.daysBetweenBuys, 0, 0)}. dag</b> i gennemsnit` : ''}.`]);
+    } else if (a.purchases === 1) {
+      købFakta.push([icon('cart'), `Ét køb registreret – den ${esc(fmtDate(a.firstBuy, { year: true }))}.`]);
+    }
+    if (isNum(a.daysSinceLastBuy)) {
+      købFakta.push([icon('chart'), a.daysSinceLastBuy === 0
+        ? 'Dit seneste køb var <b>i dag</b>.'
+        : `Der er gået <b>${esc(ejertid(a.daysSinceLastBuy))}</b> siden dit seneste køb den ${esc(fmtDate(a.lastBuy, { year: true }))}.`]);
+    }
+    if (a.biggestBuy) købFakta.push([icon('trend'), `Største enkeltkøb: <b>${esc(a.biggestBuy.name)}</b> for <b class="amount">${fmtAmount(a.biggestBuy.amountBase)}</b> den ${esc(fmtDate(a.biggestBuy.date, { year: true }))}.`]);
+    if (isNum(a.avgBuy)) købFakta.push([icon('list'), `Et typisk køb hos dig er på <b class="amount">${fmtAmount(a.avgBuy)}</b>`]);
+    if (a.busiestMonth) købFakta.push([icon('chart'), `Travleste måned: <b>${esc(månedNavn(a.busiestMonth.month))}</b> med <b class="amount">${fmtAmount(a.busiestMonth.amountBase)}</b> fordelt på ${a.busiestMonth.count} ${a.busiestMonth.count === 1 ? 'køb' : 'køb'}.`]);
+
+    // ---------- rekorder ----------
+    const r = a.records;
+    const rekorder = [];
+    if (r) {
+      const påToppen = isNum(r.fromPeakPercent) && r.fromPeakPercent > -0.05;
+      // "Nogensinde" holder kun, når alle papirer har en købsdato – ellers
+      // dækker kurven også tid, hvor man ikke ejede dem.
+      const nogensinde = a.withoutDates ? 'højeste i den viste periode' : 'højeste nogensinde';
+      rekorder.push([icon('trend'), påToppen
+        ? `Porteføljen står på sit <b>${nogensinde}</b>: <b class="amount">${fmtAmount(r.peak.value)}</b>`
+        : `Toppen var <b class="amount">${fmtAmount(r.peak.value)}</b> den ${esc(fmtDate(r.peak.date, { year: true }))} – du er <b class="neg">${fmtPct(r.fromPeakPercent)}</b> under.`]);
+      if (r.bestDay && isNum(r.bestDay.change)) rekorder.push([icon('trend'), `Bedste dag: <b class="amount pos">${fmtAmount(r.bestDay.change, state.baseCurrency, { sign: true })}</b> den ${esc(fmtDate(r.bestDay.date, { year: true }))}.`]);
+      if (r.worstDay && isNum(r.worstDay.change)) rekorder.push([icon('warn'), `Værste dag: <b class="amount neg">${fmtAmount(r.worstDay.change, state.baseCurrency, { sign: true })}</b> den ${esc(fmtDate(r.worstDay.date, { year: true }))}.`]);
+      if (isNum(r.daysInProfit) && r.tradingDays) {
+        const andel = (r.daysInProfit / r.tradingDays) * 100;
+        rekorder.push([icon('chart'), `Du har været i plus <b>${r.daysInProfit} af ${r.tradingDays} børsdage</b> – ${fmtPct(andel, { sign: false })} af tiden.`]);
+      }
+      if (r.longestStreak > 1) rekorder.push([icon('list'), `Længste stime: <b>${r.longestStreak} dage i træk</b> med fremgang.`]);
+    }
 
     return `
       ${pageHeader('Analyse', `<span>Tal om din portefølje</span>`, headerActions({ add: false }))}
@@ -1599,12 +1654,9 @@
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-header"><h2>${icon('list')}Om din portefølje</h2></div>
-        <div class="card-body">
-          <ul class="fact-list">${fakta.map(([ikon, tekst]) => `<li>${ikon}<span>${tekst}</span></li>`).join('')}</ul>
-        </div>
-      </div>`;
+      ${faktaKort('list', 'Om din portefølje', fakta)}
+      ${faktaKort('cart', 'Dine køb', købFakta)}
+      ${faktaKort('trend', 'Rekorder', rekorder, 'Målt på kursbevægelser – dine egne indbetalinger er trukket fra, så en indbetaling ikke tæller som en god dag.')}`;
   }
 
   // ---------- Platform: profil, følgere, søgning ----------

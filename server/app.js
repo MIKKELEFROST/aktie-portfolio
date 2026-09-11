@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { newId } from './store.js';
-import { computeAnalytics, computePortfolio, computeValueHistory, dayKey, firstPurchaseDate, heldDays, narrowRange, parseDanishNumber, rangeDays, reduceLots, summarizeLots } from './portfolio-math.js';
+import { computeAnalytics, computeHistoryFacts, computePortfolio, computeValueHistory, dayKey, firstPurchaseDate, heldDays, narrowRange, parseDanishNumber, rangeDays, reduceLots, summarizeLots } from './portfolio-math.js';
 import { resolveSecurities } from './resolve.js';
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter, passwordVersion } from './auth.js';
 import { createAccounts, publicProfile, SignupError, normalizeEmail } from './accounts.js';
@@ -233,6 +233,17 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         }
       }
     });
+  }
+
+  // Rekorder fra kurven er et ekstra – kan historikken ikke hentes (Yahoo nede
+  // eller for mange kald), skal analysesiden stadig virke.
+  async function historyFacts(data, account, ps) {
+    try {
+      const h = await buildHistory('max', data, account, ps);
+      return computeHistoryFacts(h.points);
+    } catch {
+      return null;
+    }
   }
 
   async function buildHistory(range, data = null, account = '', ps = scope()) {
@@ -653,18 +664,24 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     async analytics(req, res, url) {
       const ps = await own(req);
       const data = await ps.get();
-      const beregnet = await computeFrom(data, parseAccountFilter(url.searchParams.get('account')));
-      sendJson(res, 200, computeAnalytics({
-        positions: beregnet.positions,
-        totals: beregnet.totals,
-        baseCurrency: beregnet.baseCurrency,
-      }));
+      const account = parseAccountFilter(url.searchParams.get('account'));
+      const beregnet = await computeFrom(data, account);
+      sendJson(res, 200, {
+        ...computeAnalytics({ positions: beregnet.positions, totals: beregnet.totals, baseCurrency: beregnet.baseCurrency }),
+        records: await historyFacts(data, account, ps),
+      });
     },
 
     async personAnalytics(req, res, url, params) {
       const { person, ps } = await viewable(req, params.id);
-      const beregnet = await computeFrom(await ps.get(), parseAccountFilter(url.searchParams.get('account')));
-      sendJson(res, 200, { person, ...computeAnalytics({ positions: beregnet.positions, totals: beregnet.totals, baseCurrency: beregnet.baseCurrency }) });
+      const account = parseAccountFilter(url.searchParams.get('account'));
+      const data = await ps.get();
+      const beregnet = await computeFrom(data, account);
+      sendJson(res, 200, {
+        person,
+        ...computeAnalytics({ positions: beregnet.positions, totals: beregnet.totals, baseCurrency: beregnet.baseCurrency }),
+        records: await historyFacts(data, account, ps),
+      });
     },
 
     // ---------- profiler ----------

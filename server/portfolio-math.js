@@ -512,6 +512,129 @@ export function computeAnalytics({ positions = [], totals = {}, baseCurrency = '
       gainBase: round(sorteretEfterAfkast[sorteretEfterAfkast.length - 1].gainBase),
     }) : null,
     longestHeld: kort(længstEjet, { heldDays: længstEjet?.heldDays ?? null, purchasedAt: længstEjet?.purchasedAt ?? null }),
+    ...computePurchaseFacts(positions, now),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tal om købene selv: hvor tit, hvor meget, hvornår. Bygger på de enkelte køb,
+// hvor de findes, og ellers på beholdningens ene købsdato.
+// ---------------------------------------------------------------------------
+
+export function computePurchaseFacts(positions = [], now = Date.now()) {
+  const køb = [];
+  let units = 0;
+  for (const p of positions) {
+    units += Number(p.quantity) || 0;
+    const fx = Number.isFinite(p.fxRate) ? p.fxRate : null;
+    const lots = Array.isArray(p.lots) ? p.lots.filter((l) => l && l.date && Number(l.quantity) > 0) : [];
+    if (lots.length) {
+      for (const l of lots) {
+        køb.push({
+          date: String(l.date).slice(0, 10),
+          name: p.name || p.symbol,
+          symbol: p.symbol,
+          quantity: Number(l.quantity),
+          amountBase: harKurs(l) && fx != null ? round(Number(l.quantity) * Number(l.price) * fx) : null,
+        });
+      }
+    } else if (p.purchasedAt) {
+      køb.push({
+        date: String(p.purchasedAt).slice(0, 10),
+        name: p.name || p.symbol,
+        symbol: p.symbol,
+        quantity: Number(p.quantity) || 0,
+        amountBase: Number.isFinite(p.costBase) ? round(p.costBase) : null,
+      });
+    }
+  }
+
+  const tom = { purchases: 0, units: round(units, 4), firstBuy: null, lastBuy: null, daysSinceLastBuy: null, daysBetweenBuys: null, biggestBuy: null, avgBuy: null, busiestMonth: null };
+  if (!køb.length) return tom;
+
+  køb.sort((a, b) => a.date.localeCompare(b.date));
+  const firstBuy = køb[0].date;
+  const lastBuy = køb[køb.length - 1].date;
+  const spænd = heldDays(firstBuy, now) - heldDays(lastBuy, now);
+
+  const medBeløb = køb.filter((k) => Number.isFinite(k.amountBase) && k.amountBase > 0);
+  const biggest = medBeløb.reduce((bedst, k) => (!bedst || k.amountBase > bedst.amountBase ? k : bedst), null);
+
+  // Hvilken måned der blev lagt mest ind.
+  const måneder = new Map();
+  for (const k of medBeløb) {
+    const m = k.date.slice(0, 7);
+    const r = måneder.get(m) || { month: m, amountBase: 0, count: 0 };
+    r.amountBase += k.amountBase;
+    r.count++;
+    måneder.set(m, r);
+  }
+  const travlest = [...måneder.values()].reduce((bedst, m) => (!bedst || m.amountBase > bedst.amountBase ? m : bedst), null);
+
+  return {
+    purchases: køb.length,
+    units: round(units, 4),
+    firstBuy,
+    lastBuy,
+    daysSinceLastBuy: heldDays(lastBuy, now),
+    // Hvor tit der købes. Giver først mening fra to køb og op.
+    daysBetweenBuys: køb.length > 1 && Number.isFinite(spænd) ? round(spænd / (køb.length - 1), 1) : null,
+    biggestBuy: biggest ? { name: biggest.name, symbol: biggest.symbol, date: biggest.date, amountBase: biggest.amountBase } : null,
+    avgBuy: medBeløb.length ? round(medBeløb.reduce((sum, k) => sum + k.amountBase, 0) / medBeløb.length) : null,
+    busiestMonth: travlest ? { month: travlest.month, amountBase: round(travlest.amountBase), count: travlest.count } : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Rekorder fra kurven: toppen, bedste og værste dag, og hvor længe man har
+// været i plus. Dagens udsving måles på afkastet – værdi minus indsat – så en
+// indbetaling ikke ligner en kanondag.
+// ---------------------------------------------------------------------------
+
+export function computeHistoryFacts(points = []) {
+  const p = points.filter((x) => x && Number.isFinite(x.value));
+  if (p.length < 2) return null;
+
+  const top = p.reduce((bedst, x) => (x.value > bedst.value ? x : bedst), p[0]);
+  const nu = p[p.length - 1];
+
+  const medIndsat = p.every((x) => Number.isFinite(x.invested));
+  let bedstDag = null;
+  let værstDag = null;
+  let iPlus = 0;
+  let stime = 0;
+  let længsteStime = 0;
+  for (let i = 0; i < p.length; i++) {
+    if (medIndsat && p[i].invested > 0 && p[i].value >= p[i].invested) iPlus++;
+    if (i === 0) continue;
+    const før = p[i - 1];
+    const dag = p[i];
+    const ændring = medIndsat
+      ? (dag.value - dag.invested) - (før.value - før.invested)
+      : dag.value - før.value;
+    const post = {
+      date: dag.date,
+      change: round(ændring),
+      changePercent: før.value > 0 ? round((ændring / før.value) * 100, 2) : null,
+    };
+    if (!bedstDag || ændring > bedstDag.change) bedstDag = post;
+    if (!værstDag || ændring < værstDag.change) værstDag = post;
+    if (ændring > 0) {
+      stime++;
+      if (stime > længsteStime) længsteStime = stime;
+    } else if (ændring < 0) {
+      stime = 0;
+    }
+  }
+
+  return {
+    tradingDays: p.length,
+    peak: { date: top.date, value: round(top.value) },
+    fromPeakPercent: top.value > 0 ? round(((nu.value - top.value) / top.value) * 100, 2) : null,
+    bestDay: bedstDag,
+    worstDay: værstDag,
+    daysInProfit: medIndsat ? iPlus : null,
+    longestStreak: længsteStime,
   };
 }
 
