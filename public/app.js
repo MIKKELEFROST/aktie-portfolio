@@ -1394,15 +1394,15 @@
       { key: 'quantity', label: 'Antal', n: true, hide: compact },
       { key: 'price', label: 'Kurs', n: true, title: 'Seneste kurs i aktiens egen valuta' },
       { key: 'dayChangePercent', label: todayLabel, n: true, title: 'Ændring i forhold til forrige lukkekurs på aktiens egen børs' },
-      { key: 'avgPrice', label: 'Gns. købskurs', n: true, hide: compact },
+      { key: 'avgPrice', label: 'Gns. købskurs', n: true, hide: compact, cls: 'col-avg' },
       { key: 'valueBase', label: `Værdi (${esc(state.baseCurrency)})`, n: true },
       { key: 'gainBase', label: 'Afkast', n: true, title: AFKAST_TOOLTIP },
-      { key: 'weight', label: 'Andel', n: true, title: 'Andel af porteføljens samlede aktieværdi' },
+      { key: 'weight', label: 'Andel', n: true, title: 'Andel af porteføljens samlede aktieværdi', cls: 'col-share' },
     ].filter((c) => !c.hide);
     const th = cols.map((c) => {
       const sorted = state.sort.key === c.key;
       const ariaSort = sorted ? (state.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none';
-      return `<th class="${c.n ? 'n' : ''}${sorted ? ' sorted' : ''}" data-sort="${c.key}" aria-sort="${ariaSort}" tabindex="0" role="columnheader button" ${c.title ? `title="${esc(c.title)}"` : ''}>${c.label}<span class="sort-ind">${sorted ? (state.sort.dir === 'asc' ? '▲' : '▼') : ''}</span></th>`;
+      return `<th class="${c.n ? 'n' : ''}${sorted ? ' sorted' : ''}${c.cls ? ` ${c.cls}` : ''}" data-sort="${c.key}" aria-sort="${ariaSort}" tabindex="0" role="columnheader button" ${c.title ? `title="${esc(c.title)}"` : ''}>${c.label}<span class="sort-ind">${sorted ? (state.sort.dir === 'asc' ? '▲' : '▼') : ''}</span></th>`;
     }).join('') + (compact || readonly ? '' : '<th class="n"><span class="sr-only">Handlinger</span></th>');
 
     const sk = '<span class="skeleton">00.000</span>';
@@ -1411,8 +1411,8 @@
         const cells = [`<td>${stockCell(p)}</td>`];
         if (!compact) cells.push(`<td class="n">${fmtQty(p.quantity)}</td>`);
         cells.push(`<td class="n">${sk}</td><td class="n">${sk}</td>`);
-        if (!compact) cells.push(`<td class="n">${isNum(p.avgPrice) ? fmtPrice(p.avgPrice) : '<span class="muted">–</span>'}</td>`);
-        cells.push(`<td class="n">${sk}</td><td class="n">${sk}</td><td class="n">${sk}</td>`);
+        if (!compact) cells.push(`<td class="n col-avg">${isNum(p.avgPrice) ? fmtPrice(p.avgPrice) : '<span class="muted">–</span>'}</td>`);
+        cells.push(`<td class="n">${sk}</td><td class="n">${sk}</td><td class="n col-share">${sk}</td>`);
         if (!compact) cells.push('<td></td>');
         return `<tr>${cells.join('')}</tr>`;
       }
@@ -1426,10 +1426,10 @@
       if (!compact) cells.push(`<td class="n">${fmtQty(p.quantity)}</td>`);
       cells.push(`<td class="n${stale ? ' stale' : ''}" ${stale ? `title="${esc(staleTitle(p))}"` : ''}>${hasPrice ? `${stale ? '⏱ ' : ''}${fmtPrice(p.price)} <span class="muted small">${esc(p.currency || '')}</span>` : '–'}</td>`);
       cells.push(`<td class="n${dayMuted ? ' stale' : ''}" ${dayTitle ? `title="${esc(dayTitle)}"` : ''}><div class="cell-2"><span class="${dayMuted ? '' : signClass(p.dayChangePercent)}">${arrow(p.dayChangePercent)}${fmtPct(p.dayChangePercent)}</span><span class="sub amount">${fmtAmount(p.dayChangeBase, state.baseCurrency, { sign: true })}</span></div></td>`);
-      if (!compact) cells.push(`<td class="n">${isNum(p.avgPrice) ? fmtPrice(p.avgPrice) : '<span class="muted">–</span>'}</td>`);
+      if (!compact) cells.push(`<td class="n col-avg">${isNum(p.avgPrice) ? fmtPrice(p.avgPrice) : '<span class="muted">–</span>'}</td>`);
       cells.push(`<td class="n"><b class="amount">${fmtAmount(p.valueBase)}</b></td>`);
       cells.push(`<td class="n"><div class="cell-2"><span class="amount ${signClass(p.gainBase)}">${fmtAmount(p.gainBase, state.baseCurrency, { sign: true })}</span><span class="sub ${signClass(p.gainPercent)}">${fmtPct(p.gainPercent)}</span></div></td>`);
-      cells.push(`<td class="n">${isNum(p.weight) ? `${fmtPct(p.weight, { sign: false })}<span class="weight-bar"><i style="width:${clamp(p.weight, 0, 100).toFixed(1)}%"></i></span>` : '–'}</td>`);
+      cells.push(`<td class="n col-share">${isNum(p.weight) ? `${fmtPct(p.weight, { sign: false })}<span class="weight-bar"><i style="width:${clamp(p.weight, 0, 100).toFixed(1)}%"></i></span>` : '–'}</td>`);
       if (!compact && !readonly) cells.push(`<td class="n"><div class="row-actions"><button class="btn btn-ghost btn-icon" data-action="menu" data-id="${esc(p.id)}" title="Handlinger" aria-label="Handlinger for ${esc(p.name)}">${icon('more')}</button></div></td>`);
       if (readonly) return `<tr data-symbol="${esc(p.symbol)}" class="${hasPrice ? '' : 'error-row'}">${cells.join('')}</tr>`;
       return `<tr data-action="open" data-symbol="${esc(p.symbol)}" class="${hasPrice ? '' : 'error-row'}" tabindex="0" aria-label="Vis detaljer for ${esc(p.name || p.symbol)}">${cells.join('')}</tr>`;
@@ -1438,10 +1438,10 @@
     const foot = t && !pendingOnly ? `<tfoot><tr>
       <td>I alt</td>${compact || readonly ? '' : '<td></td>'}<td></td>
       <td class="n"><div class="cell-2"><span class="${signClass(t.dayChangePercent)}">${fmtPct(t.dayChangePercent)}</span><span class="sub amount ${signClass(t.dayChangeBase)}">${fmtAmount(t.dayChangeBase, state.baseCurrency, { sign: true })}</span></div></td>
-      ${compact || readonly ? '' : '<td></td>'}
+      ${compact || readonly ? '' : '<td class="col-avg"></td>'}
       <td class="n"><span class="amount">${fmtAmount(t.valueBase)}</span></td>
       <td class="n"><div class="cell-2"><span class="amount ${signClass(t.gainBase)}">${fmtAmount(t.gainBase, state.baseCurrency, { sign: true })}</span><span class="sub ${signClass(t.gainPercent)}">${fmtPct(t.gainPercent)}</span></div></td>
-      <td class="n">100 %</td>${compact || readonly ? '' : '<td></td>'}
+      <td class="n col-share">100 %</td>${compact || readonly ? '' : '<td></td>'}
     </tr></tfoot>` : '';
 
     const cards = rows.map((p) => pendingOnly
@@ -2236,6 +2236,12 @@
     return { quantity, avgPrice: medKurs > 0 ? cost / medKurs : null, mangler };
   }
 
+  // Fire decimaler er rigeligt til en kurs – også for en fond med lav NAV –
+  // og "49,19" er til at læse, hvor "49,190019" bare er larm.
+  function afrundKurs(n) {
+    return Math.round(n * 1e4) / 1e4;
+  }
+
   function lotRowHtml(l) {
     return `<div class="lot-row">
       <input class="input lot-date" type="date" data-lot="date" value="${esc(l.date || '')}" aria-label="Købsdato">
@@ -2274,7 +2280,7 @@
       price = sum.avgPrice;
       // Felterne ovenfor følger købene, så man kan se tallet vokse, mens man taster.
       $('#edit-qty').value = sum.quantity > 0 ? fmtRaw(round6(sum.quantity)) : '';
-      $('#edit-price').value = isNum(sum.avgPrice) ? fmtRaw(round6(sum.avgPrice)) : '';
+      $('#edit-price').value = isNum(sum.avgPrice) ? fmtRaw(afrundKurs(sum.avgPrice)) : '';
       const datoer = rows.map((r) => r.date).filter(Boolean).sort();
       const udenDato = rows.length - datoer.length;
       const dele = [`${rows.length} køb`];
@@ -2312,7 +2318,7 @@
     edit.lots = null;
     renderLots();
     if (sum.quantity > 0) $('#edit-qty').value = fmtRaw(round6(sum.quantity));
-    if (isNum(sum.avgPrice)) $('#edit-price').value = fmtRaw(round6(sum.avgPrice));
+    if (isNum(sum.avgPrice)) $('#edit-price').value = fmtRaw(afrundKurs(sum.avgPrice));
     if (datoer.length) $('#edit-date').value = datoer[0];
   }
 
