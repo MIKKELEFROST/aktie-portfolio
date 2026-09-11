@@ -138,10 +138,10 @@ test('computeValueHistory: summerer på tværs af serier med forward fill', () =
     { date: '2026-01-02', value: 2 * 11 + 100 * 7 },
     { date: '2026-01-03', value: 2 * 12 + 110 * 7 },
   ]);
-  assert.equal(history.limitedBy, null, 'begge serier starter samme dag');
+  assert.deepEqual(history.backfilled, [], 'begge serier starter samme dag');
 });
 
-test('computeValueHistory: dage før alle serier har data udelades', () => {
+test('computeValueHistory: en kortere serie regnes med til sin første kurs', () => {
   const day = (d) => Date.parse(`2026-01-0${d}T08:00:00Z`);
   const history = computeValueHistory({
     holdings: [{ symbol: 'A', quantity: 1 }, { symbol: 'B', quantity: 1 }],
@@ -151,9 +151,13 @@ test('computeValueHistory: dage før alle serier har data udelades', () => {
     },
     fxRates: { DKK: { ok: true, rate: 1 } },
   });
-  assert.deepEqual(history.points, [{ date: '2026-01-02', value: 16 }]);
-  // …og det fortælles, hvem der afkorter perioden.
-  assert.deepEqual(history.limitedBy, { symbol: 'B', from: '2026-01-02' });
+  // B begynder først dag 2. Dag 1 regnes med B's første kurs (5), så hele
+  // perioden kan tegnes i stedet for at blive skåret af.
+  assert.deepEqual(history.points, [
+    { date: '2026-01-01', value: 10 + 5 },
+    { date: '2026-01-02', value: 11 + 5 },
+  ]);
+  assert.deepEqual(history.backfilled, [{ symbol: 'B', from: '2026-01-02' }], 'det fortælles hvem der blev fyldt bagud');
 });
 
 test('round', () => {
@@ -208,7 +212,11 @@ test('computeValueHistory: rækkefølge af beholdninger påvirker ikke resultate
   const ab = computeValueHistory({ holdings: [{ symbol: 'A', quantity: 1 }, { symbol: 'B', quantity: 1 }], histories, fxRates: fx });
   const ba = computeValueHistory({ holdings: [{ symbol: 'B', quantity: 1 }, { symbol: 'A', quantity: 1 }], histories, fxRates: fx });
   assert.deepEqual(ab, ba);
-  assert.deepEqual(ab.points, [{ date: '2026-01-02', value: 15 }, { date: '2026-01-03', value: 17 }]);
+  assert.deepEqual(ab.points, [
+    { date: '2026-01-01', value: 10 + 5 }, // A fyldt bagud med sin første kurs
+    { date: '2026-01-02', value: 10 + 5 },
+    { date: '2026-01-03', value: 11 + 6 },
+  ]);
 });
 
 test('computeValueHistory: hver dag omregnes med sin egen valutakurs', () => {
