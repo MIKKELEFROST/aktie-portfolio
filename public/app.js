@@ -269,8 +269,72 @@
 
   const localErr = (status, message, extra = {}) => Object.assign(new Error(message), { status, data: extra });
   const round6 = (n) => Math.round(n * 1e6) / 1e6;
-  const pubHolding = (h) => ({ id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, addedAt: h.addedAt || null, updatedAt: h.updatedAt || null });
+  const pubHolding = (h) => ({ id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, purchasedAt: h.purchasedAt ?? null, weightedAt: h.weightedAt ?? null, lots: Array.isArray(h.lots) ? h.lots : null, addedAt: h.addedAt || null, updatedAt: h.updatedAt || null });
   const newLocalId = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
+
+  function localDate(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const d = String(value).trim().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || Number.isNaN(Date.parse(`${d}T12:00:00Z`))) throw localErr(400, 'Købsdatoen skal skrives som åååå-mm-dd');
+    if (Date.parse(`${d}T12:00:00Z`) > Date.now() + 86400000) throw localErr(400, 'Købsdatoen kan ikke ligge i fremtiden');
+    return d;
+  }
+
+  function localLots(value) {
+    if (value === null || value === undefined) return null;
+    if (!Array.isArray(value)) throw localErr(400, 'Købene skal være en liste');
+    if (value.length > 100) throw localErr(400, 'Der kan højst registreres 100 køb pr. aktie');
+    return value
+      .map((raw) => ({
+        id: typeof raw?.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newLocalId(),
+        date: localDate(raw?.date),
+        quantity: localQty(raw?.quantity),
+        price: localPrice(raw?.price),
+      }))
+      .sort((a, b) => String(a.date || '9999').localeCompare(String(b.date || '9999')));
+  }
+
+  // Samme regnestykke som på serveren: antal, gennemsnitskurs, første køb og
+  // den dato, pengene i gennemsnit blev sat ind.
+  const harKurs = (l) => l.price !== null && l.price !== undefined && l.price !== '' && isNum(Number(l.price));
+
+  function localApplyLots(h) {
+    const lots = (Array.isArray(h.lots) ? h.lots : []).filter((l) => Number(l.quantity) > 0);
+    if (!lots.length) {
+      delete h.lots;
+      delete h.weightedAt;
+      return h;
+    }
+    let quantity = 0;
+    let cost = 0;
+    let medKurs = 0;
+    for (const l of lots) {
+      quantity += Number(l.quantity);
+      if (harKurs(l)) { cost += Number(l.quantity) * Number(l.price); medKurs += Number(l.quantity); }
+    }
+    const medDato = lots.filter((l) => l.date);
+    const vægt = (l) => (medKurs > 0 && harKurs(l) ? Number(l.quantity) * Number(l.price) : Number(l.quantity));
+    const samlet = medDato.reduce((sum, l) => sum + vægt(l), 0);
+    h.quantity = round6(quantity);
+    h.avgPrice = medKurs > 0 ? round6(cost / medKurs) : null;
+    h.purchasedAt = medDato.length === lots.length ? (medDato.map((l) => l.date).sort()[0] || null) : null;
+    h.weightedAt = h.purchasedAt;
+    if (samlet > 0 && h.purchasedAt) {
+      const ms = medDato.reduce((sum, l) => sum + Date.parse(`${l.date}T12:00:00Z`) * (vægt(l) / samlet), 0);
+      if (isNum(ms)) h.weightedAt = new Date(ms).toISOString().slice(0, 10);
+    }
+    return h;
+  }
+
+  // Ved salg skrumper alle køb forholdsmæssigt – gennemsnitsmetoden, som på serveren.
+  function localReduceLots(lots, solgt) {
+    const liste = (lots || []).filter((l) => Number(l.quantity) > 0);
+    const ialt = liste.reduce((sum, l) => sum + Number(l.quantity), 0);
+    if (solgt <= 0) return liste;
+    if (solgt >= ialt - 1e-9) return [];
+    const andel = (ialt - solgt) / ialt;
+    return liste.map((l) => ({ ...l, quantity: round6(Number(l.quantity) * andel) })).filter((l) => l.quantity > 0);
+  }
 
   function localQty(value) {
     const n = typeof value === 'number' ? value : parseInput(value);
@@ -319,7 +383,8 @@
         warning = `Kunne ikke hente kurs lige nu (${err.message}). Aktien er tilføjet alligevel.`;
       }
       if (quote?.type && !HOLDABLE.includes(quote.type)) throw localErr(400, "Kun aktier, ETF'er og fonde kan tilføjes");
-      const holding = { id: newLocalId(), symbol, name: quote ? quote.name : String(body.name || symbol).slice(0, 120), currency: quote ? quote.currency : null, quantity, avgPrice, note: String(body.note || '').trim().slice(0, 200), accountId, addedAt: now, updatedAt: now };
+      const lots = localLots(body.lots);
+      const holding = localApplyLots({ id: newLocalId(), symbol, name: quote ? quote.name : String(body.name || symbol).slice(0, 120), currency: quote ? quote.currency : null, quantity, avgPrice, note: String(body.note || '').trim().slice(0, 200), accountId, purchasedAt: localDate(body.purchasedAt), ...(lots ? { lots } : {}), addedAt: now, updatedAt: now });
       data.holdings.push(holding);
       localSave(data);
       return { holding: pubHolding(holding), warning };
@@ -332,13 +397,23 @@
       if (m[2] && method === 'POST') {
         const type = body.type === 'sell' ? 'sell' : 'buy';
         const q = localQty(body.quantity);
+        const date = localDate(body.date);
         if (type === 'buy') {
           const price = localPrice(body.price, { allowNull: false });
           const oldQty = Number(h.quantity) || 0;
-          const newQty = oldQty + q;
-          if (h.avgPrice != null && oldQty > 0) h.avgPrice = round6((oldQty * h.avgPrice + q * price) / newQty);
-          else if (oldQty === 0) h.avgPrice = price;
-          h.quantity = round6(newQty);
+          const førerKøb = Array.isArray(h.lots) && h.lots.length > 0;
+          if (førerKøb || date) {
+            const lots = førerKøb ? [...h.lots] : (oldQty > 0 ? [{ id: newLocalId(), date: h.purchasedAt ?? null, quantity: oldQty, price: h.avgPrice ?? null }] : []);
+            if (lots.length >= 100) throw localErr(409, 'Der kan højst registreres 100 køb pr. aktie');
+            lots.push({ id: newLocalId(), date, quantity: q, price });
+            h.lots = localLots(lots);
+            localApplyLots(h);
+          } else {
+            const newQty = oldQty + q;
+            if (h.avgPrice != null && oldQty > 0) h.avgPrice = round6((oldQty * h.avgPrice + q * price) / newQty);
+            else if (oldQty === 0) h.avgPrice = price;
+            h.quantity = round6(newQty);
+          }
         } else {
           if (q > h.quantity + 1e-9) throw localErr(400, `Du ejer kun ${fmtQty(h.quantity)} stk.`);
           const newQty = round6(h.quantity - q);
@@ -346,6 +421,10 @@
             data.holdings = data.holdings.filter((x) => x !== h);
             localSave(data);
             return { removed: true, holding: pubHolding({ ...h, quantity: 0 }) };
+          }
+          if (Array.isArray(h.lots) && h.lots.length) {
+            h.lots = localReduceLots(h.lots, q);
+            localApplyLots(h);
           }
           h.quantity = newQty;
         }
@@ -357,11 +436,14 @@
         if (body.quantity !== undefined) h.quantity = localQty(body.quantity);
         if (body.avgPrice !== undefined) h.avgPrice = localPrice(body.avgPrice);
         if (body.note !== undefined) h.note = String(body.note ?? '').trim().slice(0, 200);
+        if (body.purchasedAt !== undefined) h.purchasedAt = localDate(body.purchasedAt);
+        if (body.lots !== undefined) h.lots = localLots(body.lots) || [];
         if (body.accountId !== undefined) {
           const accountId = localAccountId(body.accountId, data.settings.accounts);
           if (data.holdings.some((x) => x !== h && sameSlot(x, h.symbol, accountId))) throw localErr(409, `${h.name || h.symbol} findes allerede i det depot – brug "Køb til" dér i stedet`);
           h.accountId = accountId;
         }
+        localApplyLots(h);
         h.updatedAt = now;
         localSave(data);
         return { holding: pubHolding(h) };
@@ -405,7 +487,8 @@
         const slot = `${symbol}@${accountId ?? ''}`;
         if (seen.has(slot)) throw localErr(400, `Symbolet ${symbol} optræder flere gange i samme depot (linje ${i + 1})`);
         seen.add(slot);
-        return { id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newLocalId(), symbol, accountId, name: String(raw.name || symbol).slice(0, 120), currency: raw.currency ? String(raw.currency).toUpperCase().slice(0, 3) : null, quantity: localQty(raw.quantity), avgPrice: localPrice(raw.avgPrice), note: String(raw.note || '').trim().slice(0, 200), addedAt: typeof raw.addedAt === 'string' ? raw.addedAt : now, updatedAt: now };
+        const lots = localLots(raw.lots);
+        return localApplyLots({ id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newLocalId(), symbol, accountId, name: String(raw.name || symbol).slice(0, 120), currency: raw.currency ? String(raw.currency).toUpperCase().slice(0, 3) : null, quantity: localQty(raw.quantity), avgPrice: localPrice(raw.avgPrice), note: String(raw.note || '').trim().slice(0, 200), purchasedAt: localDate(raw.purchasedAt), ...(lots ? { lots } : {}), addedAt: typeof raw.addedAt === 'string' ? raw.addedAt : now, updatedAt: now });
       });
       data.holdings = holdings;
       data.settings.accounts = restoredAccounts;
@@ -1698,7 +1781,9 @@
             <dt>I dag</dt><dd class="${signClass(p.dayChangeBase)}"><span class="amount">${fmtAmount(p.dayChangeBase, state.baseCurrency, { sign: true })}</span></dd>
             <dt>Andel af portefølje</dt><dd>${fmtPct(p.weight, { sign: false })}</dd>
             <dt>Købt den</dt><dd>${p.purchasedAt ? `${esc(fmtDate(p.purchasedAt, { year: true }))}${isNum(p.heldDays) ? ` <span class="muted">· ${esc(ejertid(p.heldDays))}</span>` : ''}` : '<span class="muted">ikke angivet</span>'}</dd>
+            ${p.weightedAt && p.weightedAt !== p.purchasedAt ? `<dt title="Den dato pengene i gennemsnit blev sat ind. Afkast pr. år regnes herfra.">Pengene i snit</dt><dd>${esc(fmtDate(p.weightedAt, { year: true }))}${isNum(p.moneyDays) ? ` <span class="muted">· ${esc(ejertid(p.moneyDays))}</span>` : ''}</dd>` : ''}
           </dl>
+          ${lotList(p)}
           ${fx}
           ${isNum(p.gainBase) ? `<div class="muted small" style="margin-top:6px">${esc(AFKAST_TOOLTIP)}</div>` : ''}
           ${p.note ? `<div class="muted small" style="margin-top:8px">Note: ${esc(p.note)}</div>` : ''}
@@ -1976,14 +2061,33 @@
     }
   }
 
+  // De enkelte køb vist i detaljepanelet – kun når aktien føres køb for køb.
+  function lotList(p) {
+    if (!Array.isArray(p.lots) || p.lots.length < 2) return '';
+    const cur = p.currency || '';
+    const rækker = [...p.lots]
+      .sort((a, b) => String(a.date || '9999').localeCompare(String(b.date || '9999')))
+      .map((l) => `<li><span>${l.date ? esc(fmtDate(l.date, { year: true })) : '<span class="muted">uden dato</span>'}</span><span class="amount">${fmtQty(l.quantity)} stk.</span><span class="amount">${isNum(l.price) ? `${fmtPrice(l.price)} ${esc(cur)}` : '<span class="muted">–</span>'}</span></li>`)
+      .join('');
+    return `<div class="lot-list"><h3>Dine ${p.lots.length} køb</h3><ul>${rækker}</ul></div>`;
+  }
+
   // ---------- Redigér ----------
 
-  const edit = { id: null };
+  // edit.lots er null, når aktien føres med ét samlet antal, og en liste,
+  // når hvert køb skrives ind for sig. Rækkerne lever i DOM'en mellem
+  // tegninger – vi læser dem ind igen, før listen ændres, så det man er ved
+  // at taste, ikke forsvinder.
+  const edit = { id: null, lots: null };
+  const MAX_LOTS = 100;
 
   function openEdit(id) {
     const p = positions().find((x) => x.id === id);
     if (!p) return;
     edit.id = id;
+    edit.lots = Array.isArray(p.lots) && p.lots.length
+      ? p.lots.map((l) => ({ date: l.date || '', quantity: fmtRaw(l.quantity), price: fmtRaw(l.price) }))
+      : null;
     $('#dlg-edit-title').textContent = `Redigér ${p.name || p.symbol}`;
     $('#edit-qty').value = fmtRaw(p.quantity);
     $('#edit-price').value = fmtRaw(p.avgPrice);
@@ -1992,16 +2096,87 @@
     $('#edit-date').value = p.purchasedAt || '';
     fillAccountSelect($('#edit-account'), p.accountId || '');
     setError('#edit-error', '');
-    updateEditSummary();
+    renderLots();
     openDialog('#dlg-edit');
-    setTimeout(() => $('#edit-qty').select(), 30);
+    if (!edit.lots) setTimeout(() => $('#edit-qty').select(), 30);
+  }
+
+  // Læser rækkerne tilbage fra DOM'en, så tastede værdier overlever en ny tegning.
+  function readLotRows() {
+    return $$('#edit-lot-rows .lot-row').map((row) => ({
+      date: row.querySelector('[data-lot="date"]').value,
+      quantity: row.querySelector('[data-lot="qty"]').value,
+      price: row.querySelector('[data-lot="price"]').value,
+    }));
+  }
+
+  // Antal og gennemsnitskurs regnet ud af købene – samme regnestykke som på serveren.
+  function sumLots(rows) {
+    let quantity = 0;
+    let cost = 0;
+    let medKurs = 0;
+    let mangler = 0;
+    for (const r of rows) {
+      const q = parseInput(r.quantity);
+      if (!isNum(q) || q <= 0) { if (String(r.quantity).trim() || String(r.price).trim() || r.date) mangler++; continue; }
+      quantity += q;
+      const pr = parseInput(r.price);
+      if (isNum(pr)) { cost += q * pr; medKurs += q; }
+    }
+    return { quantity, avgPrice: medKurs > 0 ? cost / medKurs : null, mangler };
+  }
+
+  function lotRowHtml(l) {
+    return `<div class="lot-row">
+      <input class="input lot-date" type="date" data-lot="date" value="${esc(l.date || '')}" aria-label="Købsdato">
+      <input class="input n" inputmode="decimal" data-lot="qty" value="${esc(l.quantity ?? '')}" placeholder="Antal" aria-label="Antal" autocomplete="off">
+      <input class="input n" inputmode="decimal" data-lot="price" value="${esc(l.price ?? '')}" placeholder="Kurs" aria-label="Kurs" autocomplete="off">
+      <button type="button" class="btn btn-ghost btn-icon" data-lot-del aria-label="Fjern købet"><svg class="icon"><use href="#i-x"/></svg></button>
+    </div>`;
+  }
+
+  function renderLots() {
+    const on = Array.isArray(edit.lots);
+    $('#edit-lots').classList.toggle('hidden', !on);
+    $('#edit-date-field').classList.toggle('hidden', on);
+    for (const id of ['#edit-qty', '#edit-price']) {
+      const el = $(id);
+      el.readOnly = on;
+      el.classList.toggle('derived', on);
+    }
+    if (on) {
+      $('#edit-lot-rows').innerHTML = edit.lots.map(lotRowHtml).join('');
+      $('#edit-lot-add').disabled = edit.lots.length >= MAX_LOTS;
+    }
+    updateEditSummary();
   }
 
   function updateEditSummary() {
     const p = positions().find((x) => x.id === edit.id);
-    const qty = parseInput($('#edit-qty').value);
-    const price = parseInput($('#edit-price').value);
     const el = $('#edit-summary');
+    const sumEl = $('#edit-lots-sum');
+    let qty;
+    let price;
+    if (Array.isArray(edit.lots)) {
+      const rows = readLotRows();
+      const sum = sumLots(rows);
+      qty = sum.quantity || null;
+      price = sum.avgPrice;
+      // Felterne ovenfor følger købene, så man kan se tallet vokse, mens man taster.
+      $('#edit-qty').value = sum.quantity > 0 ? fmtRaw(round6(sum.quantity)) : '';
+      $('#edit-price').value = isNum(sum.avgPrice) ? fmtRaw(round6(sum.avgPrice)) : '';
+      const datoer = rows.map((r) => r.date).filter(Boolean).sort();
+      const udenDato = rows.length - datoer.length;
+      const dele = [`${rows.length} køb`];
+      if (udenDato === 0 && datoer.length) dele.push(`første ${esc(fmtDate(datoer[0], { year: true }))}`);
+      // Uden dato på hvert køb kan ejertid og afkast pr. år ikke regnes ud.
+      if (udenDato) dele.push(`<span class="neg">${udenDato} mangler dato</span>`);
+      if (sum.mangler) dele.push(`<span class="neg">${sum.mangler} mangler antal</span>`);
+      sumEl.innerHTML = rows.length === 0 ? '<span class="muted">Tilføj dit første køb.</span>' : dele.join(' · ');
+    } else {
+      qty = parseInput($('#edit-qty').value);
+      price = parseInput($('#edit-price').value);
+    }
     if (!p || !isNum(qty)) return (el.innerHTML = '');
     const parts = [`<span>${fmtQty(qty)} stk.</span>`];
     if (isNum(price)) parts.push(`<span>Investeret: <b>${fmtPrice(qty * price)} ${esc(p.currency || '')}</b></span>`);
@@ -2009,16 +2184,53 @@
     el.innerHTML = parts.join('');
   }
 
+  // Slå enkeltkøb til: det, der allerede står, bliver til det første køb,
+  // så man skriver videre i stedet for at starte forfra.
+  function lotsOn() {
+    const qty = parseInput($('#edit-qty').value);
+    const price = parseInput($('#edit-price').value);
+    edit.lots = isNum(qty) && qty > 0
+      ? [{ date: $('#edit-date').value || '', quantity: fmtRaw(qty), price: isNum(price) ? fmtRaw(price) : '' }]
+      : [{ date: '', quantity: '', price: '' }];
+    renderLots();
+    focusSoon('#edit-lot-rows .lot-row:last-child [data-lot="qty"]', 30);
+  }
+
+  function lotsOff() {
+    const sum = sumLots(readLotRows());
+    const datoer = readLotRows().map((r) => r.date).filter(Boolean).sort();
+    edit.lots = null;
+    renderLots();
+    if (sum.quantity > 0) $('#edit-qty').value = fmtRaw(round6(sum.quantity));
+    if (isNum(sum.avgPrice)) $('#edit-price').value = fmtRaw(round6(sum.avgPrice));
+    if (datoer.length) $('#edit-date').value = datoer[0];
+  }
+
   async function submitEdit() {
     setError('#edit-error', '');
-    const qty = parseInput($('#edit-qty').value);
-    const priceRaw = $('#edit-price').value.trim();
-    const price = parseInput(priceRaw);
-    if (!isNum(qty) || qty <= 0) return setError('#edit-error', 'Antal skal være større end 0.');
-    if (priceRaw && (!isNum(price) || price < 0)) return setError('#edit-error', 'Købskursen skal være et tal.');
+    const body = { note: $('#edit-note').value };
+    if (Array.isArray(edit.lots)) {
+      const rows = readLotRows().filter((r) => String(r.quantity).trim() || String(r.price).trim() || r.date);
+      if (!rows.length) return setError('#edit-error', 'Skriv mindst ét køb – eller vælg "Brug samlet antal".');
+      const lots = [];
+      for (const [i, r] of rows.entries()) {
+        const q = parseInput(r.quantity);
+        if (!isNum(q) || q <= 0) return setError('#edit-error', `Køb nr. ${i + 1}: antal skal være større end 0.`);
+        const pr = String(r.price).trim() ? parseInput(r.price) : null;
+        if (String(r.price).trim() && (!isNum(pr) || pr < 0)) return setError('#edit-error', `Køb nr. ${i + 1}: kursen skal være et tal.`);
+        lots.push({ date: r.date || null, quantity: q, price: pr });
+      }
+      body.lots = lots;
+    } else {
+      const qty = parseInput($('#edit-qty').value);
+      const priceRaw = $('#edit-price').value.trim();
+      const price = parseInput(priceRaw);
+      if (!isNum(qty) || qty <= 0) return setError('#edit-error', 'Antal skal være større end 0.');
+      if (priceRaw && (!isNum(price) || price < 0)) return setError('#edit-error', 'Købskursen skal være et tal.');
+      Object.assign(body, { quantity: qty, avgPrice: priceRaw ? price : null, purchasedAt: $('#edit-date').value || null, lots: [] });
+    }
+    if (accounts().length) body.accountId = $('#edit-account').value || null;
     try {
-      const body = { quantity: qty, avgPrice: priceRaw ? price : null, note: $('#edit-note').value, purchasedAt: $('#edit-date').value || null };
-      if (accounts().length) body.accountId = $('#edit-account').value || null;
       await api('PUT', `/api/holdings/${encodeURIComponent(edit.id)}`, body);
       $('#dlg-edit').close();
       toast('Gemt', 'success');
@@ -2040,6 +2252,7 @@
     $('#trade-qty').value = '';
     $('#trade-price').value = fmtRaw(p.price);
     $('#trade-price-addon').textContent = p.currency || '';
+    $('#trade-date').value = '';
     setError('#trade-error', '');
     applyTradeType();
     openDialog('#dlg-trade');
@@ -2051,6 +2264,8 @@
     const buy = trade.type === 'buy';
     $$('#dlg-trade [data-trade-type]').forEach((b) => b.classList.toggle('active', b.dataset.tradeType === trade.type));
     $('#trade-sell-all').classList.toggle('hidden', buy);
+    // Datoen hører til købet – ved salg skrumper de eksisterende køb bare.
+    $('#trade-date-field').classList.toggle('hidden', !buy);
     $('#dlg-trade-title').textContent = `${buy ? 'Køb til' : 'Sælg'} – ${p?.name || ''}`;
     $('#trade-qty-label').textContent = buy ? 'Antal købt' : 'Antal solgt';
     $('#trade-submit').textContent = buy ? 'Læg til' : 'Registrér salg';
@@ -2087,7 +2302,9 @@
     if (!isNum(qty) || qty <= 0) return setError('#trade-error', 'Antal skal være større end 0.');
     if (trade.type === 'buy' && (!isNum(price) || price < 0)) return setError('#trade-error', 'Skriv kursen, du købte til.');
     try {
-      const data = await api('POST', `/api/holdings/${encodeURIComponent(trade.id)}/trade`, { type: trade.type, quantity: qty, price: priceRaw ? price : null });
+      const body = { type: trade.type, quantity: qty, price: priceRaw ? price : null };
+      if (trade.type === 'buy' && $('#trade-date').value) body.date = $('#trade-date').value;
+      const data = await api('POST', `/api/holdings/${encodeURIComponent(trade.id)}/trade`, body);
       $('#dlg-trade').close();
       if (data.removed) {
         toast(`${data.holding.name} er solgt helt og fjernet fra porteføljen`, 'success');
@@ -2184,7 +2401,7 @@
         <td><input class="input import-sym" data-import-symbol="${i}" value="${esc(row.symbol)}" placeholder="fx MU" spellcheck="false"></td>
         <td class="n">${fmtQty(row.quantity)}</td>
         <td class="n">${fmtPrice(row.avgPrice)} <span class="muted small">${esc(row.currency)}</span></td>
-        <td class="muted small">${row.purchasedAt ? esc(fmtDate(row.purchasedAt, { year: true })) : '–'}</td>
+        <td class="muted small">${row.purchasedAt ? esc(fmtDate(row.purchasedAt, { year: true })) : '–'}${row.lots ? `<div class="muted small">${row.lots.length} køb</div>` : ''}</td>
         <td class="muted small">${esc(imp.depots.find((d) => d.code === row.depot)?.name || '')}</td>
       </tr>`;
     }).join('');
@@ -2235,10 +2452,10 @@
         const match = existing.find((h) => sameSlot(h, symbol, accountId));
         try {
           if (match) {
-            await api('PUT', `/api/holdings/${encodeURIComponent(match.id)}`, { quantity: row.quantity, avgPrice: row.avgPrice, ...(row.purchasedAt ? { purchasedAt: row.purchasedAt } : {}) });
+            await api('PUT', `/api/holdings/${encodeURIComponent(match.id)}`, { quantity: row.quantity, avgPrice: row.avgPrice, ...(row.purchasedAt ? { purchasedAt: row.purchasedAt } : {}), lots: row.lots || [] });
             updated++;
           } else {
-            await api('POST', '/api/holdings', { symbol, quantity: row.quantity, avgPrice: row.avgPrice, purchasedAt: row.purchasedAt || null, name: row.name, accountId });
+            await api('POST', '/api/holdings', { symbol, quantity: row.quantity, avgPrice: row.avgPrice, purchasedAt: row.purchasedAt || null, ...(row.lots ? { lots: row.lots } : {}), name: row.name, accountId });
             added++;
           }
         } catch (err) {
@@ -2503,6 +2720,23 @@
       selectStock({ symbol: sym, name: sym, exchange: null, type: 'EQUITY' });
       return;
     }
+    if (e.target.closest('#edit-lots-on')) { lotsOn(); return; }
+    if (e.target.closest('#edit-lots-off')) { lotsOff(); return; }
+    if (e.target.closest('#edit-lot-add')) {
+      edit.lots = [...readLotRows(), { date: '', quantity: '', price: '' }];
+      renderLots();
+      focusSoon('#edit-lot-rows .lot-row:last-child [data-lot="qty"]', 30);
+      return;
+    }
+    const lotDel = e.target.closest('[data-lot-del]');
+    if (lotDel) {
+      const rows = readLotRows();
+      const i = $$('#edit-lot-rows .lot-row').indexOf(lotDel.closest('.lot-row'));
+      rows.splice(i, 1);
+      edit.lots = rows;
+      renderLots();
+      return;
+    }
     if (e.target.closest('#trade-sell-all')) {
       e.preventDefault();
       const p = positions().find((x) => x.id === trade.id);
@@ -2649,6 +2883,7 @@
       }
       add.timer = setTimeout(() => runSearch(q), 250);
     } else if (id === 'add-qty' || id === 'add-price') updateAddSummary();
+    else if (e.target.dataset.lot !== undefined) updateEditSummary();
     else if (id === 'edit-qty' || id === 'edit-price') updateEditSummary();
     else if (id === 'trade-qty' || id === 'trade-price') updateTradeSummary();
     else if (e.target.dataset.importSymbol !== undefined) {

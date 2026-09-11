@@ -165,9 +165,22 @@
         <label for="edit-account">Depot</label>
         <select class="input" id="edit-account"></select>
       </div>
-      <div class="field">
+      <div class="field" id="edit-date-field">
         <label for="edit-date">Købt den <span class="muted">(valgfri)</span></label>
         <input class="input" id="edit-date" type="date" autocomplete="off">
+        <button type="button" class="btn btn-ghost btn-sm lots-toggle" id="edit-lots-on">Købt ad flere omgange?</button>
+      </div>
+      <div class="lots hidden" id="edit-lots">
+        <div class="lots-head">
+          <h3>Dine køb</h3>
+          <button type="button" class="btn btn-ghost btn-sm" id="edit-lots-off">Brug samlet antal</button>
+        </div>
+        <div class="lot-head-row" aria-hidden="true">
+          <span class="lot-head-date">Dato</span><span>Antal</span><span>Kurs</span><span class="lot-head-spacer"></span>
+        </div>
+        <div id="edit-lot-rows"></div>
+        <button type="button" class="btn btn-sm" id="edit-lot-add">+ Tilføj køb</button>
+        <p class="lots-sum" id="edit-lots-sum"></p>
       </div>
       <div class="field">
         <label for="edit-note">Note</label>
@@ -202,6 +215,10 @@
           <label for="trade-price">Kurs</label>
           <div class="input-group"><input class="input n" id="trade-price" inputmode="decimal" autocomplete="off"><span class="addon" id="trade-price-addon">DKK</span></div>
         </div>
+      </div>
+      <div class="field" id="trade-date-field">
+        <label for="trade-date">Købsdato <span class="muted">(valgfri)</span></label>
+        <input class="input" id="trade-date" type="date" autocomplete="off">
       </div>
       <div class="form-summary" id="trade-summary"></div>
       <a href="#" id="trade-sell-all" class="small hidden" style="display:inline-block;margin:-6px 0 12px">Sælg alt</a>

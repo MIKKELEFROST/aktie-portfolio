@@ -177,7 +177,7 @@ window.parseBrokerCsv = (function () {
     for (const e of entries) {
       let p = positions.get(e.key);
       if (!p) {
-        p = { depot: e.depot, isin: e.isin, name: e.name, currency: e.currency, quantity: 0, cost: 0, trades: 0, sold: 0, date: '', firstBuy: '' };
+        p = { depot: e.depot, isin: e.isin, name: e.name, currency: e.currency, quantity: 0, cost: 0, trades: 0, sold: 0, date: '', firstBuy: '', lots: [] };
         positions.set(e.key, p);
       }
       if (!p.name && e.name) p.name = e.name;
@@ -190,15 +190,24 @@ window.parseBrokerCsv = (function () {
       if (e.isBuy) {
         p.quantity += e.quantity;
         p.cost += e.quantity * e.price + e.fee;
+        // Hvert køb gemmes for sig med sin egen dato. Kurtagen lægges oveni
+        // kursen, så gennemsnittet af købene giver præcis det samme som
+        // regnestykket ovenfor.
+        p.lots.push({ date: e.date || null, quantity: e.quantity, price: e.quantity > 0 ? e.price + e.fee / e.quantity : e.price });
       } else {
         const avg = p.quantity > 0 ? p.cost / p.quantity : e.price;
         const sold = Math.min(e.quantity, p.quantity);
+        // Salg skrumper alle køb forholdsmæssigt – samme gennemsnitsmetode
+        // som kostprisen ovenfor, så de to aldrig kommer i utakt.
+        const andel = p.quantity > 0 ? (p.quantity - sold) / p.quantity : 0;
+        p.lots = andel > 0 ? p.lots.map((l) => ({ ...l, quantity: l.quantity * andel })) : [];
         p.quantity -= sold;
         p.cost -= avg * sold;
         p.sold += e.quantity;
         if (p.quantity < 1e-9) {
           p.quantity = 0;
           p.cost = 0;
+          p.lots = [];
         }
       }
       p.trades++;
@@ -217,6 +226,10 @@ window.parseBrokerCsv = (function () {
         trades: p.trades,
         date: p.date,
         purchasedAt: p.firstBuy || null,
+        // Kun værd at gemme køb for sig, når der faktisk er flere af dem med dato.
+        lots: p.lots.length > 1 && p.lots.every((l) => l.date)
+          ? p.lots.map((l) => ({ date: l.date, quantity: round(l.quantity, 6), price: round(l.price, 6) }))
+          : null,
       }))
       .sort((a, b) => (a.depot === b.depot ? a.name.localeCompare(b.name, 'da') : String(a.depot).localeCompare(String(b.depot))));
 

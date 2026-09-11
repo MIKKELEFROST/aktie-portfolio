@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { newId } from './store.js';
-import { computeAnalytics, computePortfolio, computeValueHistory, dayKey, parseDanishNumber } from './portfolio-math.js';
+import { computeAnalytics, computePortfolio, computeValueHistory, dayKey, parseDanishNumber, reduceLots, summarizeLots } from './portfolio-math.js';
 import { resolveSecurities } from './resolve.js';
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter, passwordVersion } from './auth.js';
 import { createAccounts, publicProfile, SignupError, normalizeEmail } from './accounts.js';
@@ -33,6 +33,7 @@ const HISTORY_RANGES = new Set(['5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '5
 const HOLDABLE_TYPES = new Set(['EQUITY', 'ETF', 'MUTUALFUND']);
 const MAX_HOLDINGS = 200;
 const MAX_ACCOUNTS = 20;
+const MAX_LOTS = 100;
 const TYPE_NAMES = { INDEX: 'et indeks', CRYPTOCURRENCY: 'en kryptovaluta', CURRENCY: 'en valuta', FUTURE: 'en future', OPTION: 'en option' };
 
 export function createApp({ store, yahoo, config, logger = console, onPortfolioRequest = null }) {
@@ -343,6 +344,46 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     return s;
   }
 
+  // Ét køb: dato, antal og (valgfri) kurs. Uden kurs tæller købet med i antallet,
+  // men ikke i gennemsnitskursen – som når man ikke kan huske, hvad man gav.
+  function parseLot(raw, i) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new HttpError(400, `Køb nr. ${i + 1} kan ikke læses`);
+    const quantity = parseNumber(raw.quantity, `Antal i køb nr. ${i + 1}`, { min: 0 });
+    if (!(quantity > 0)) throw new HttpError(400, `Antal i køb nr. ${i + 1} skal være større end 0`);
+    return {
+      id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newId(),
+      date: parsePurchaseDate(raw.date),
+      quantity,
+      price: parseNumber(raw.price, `Kurs i køb nr. ${i + 1}`, { min: 0, allowNull: true }),
+    };
+  }
+
+  function parseLots(value) {
+    if (value === null || value === undefined) return null;
+    if (!Array.isArray(value)) throw new HttpError(400, 'Købene skal være en liste');
+    if (value.length > MAX_LOTS) throw new HttpError(400, `Der kan højst registreres ${MAX_LOTS} køb pr. aktie`);
+    const lots = value.map(parseLot);
+    // Ældste først, så listen altid læses i den rækkefølge, den skete.
+    lots.sort((a, b) => String(a.date || '9999').localeCompare(String(b.date || '9999')));
+    return lots;
+  }
+
+  // Er der skrevet enkelte køb ind, er antal og gennemsnitskurs ikke noget,
+  // man taster – de følger af købene, så de to aldrig kan komme i utakt.
+  function applyLots(h) {
+    const sum = summarizeLots(h.lots);
+    if (!sum) {
+      delete h.lots;
+      delete h.weightedAt;
+      return h;
+    }
+    h.quantity = sum.quantity;
+    h.avgPrice = sum.avgPrice;
+    h.purchasedAt = sum.purchasedAt;
+    h.weightedAt = sum.weightedAt;
+    return h;
+  }
+
   function parseNote(value) {
     const s = String(value ?? '').trim();
     if (s.length > 200) throw new HttpError(400, 'Noten må højst være 200 tegn');
@@ -367,7 +408,8 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const slot = `${symbol}@${accountId ?? ''}`;
       if (seen.has(slot)) throw new HttpError(400, `Symbolet ${symbol} optræder flere gange i samme depot`);
       seen.add(slot);
-      return {
+      const lots = parseLots(raw.lots);
+      return applyLots({
         accountId,
         id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newId(),
         symbol,
@@ -376,9 +418,11 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         quantity: parseQuantity(raw.quantity),
         avgPrice: parseNumber(raw.avgPrice, 'Købskurs', { min: 0, allowNull: true }),
         note: parseNote(raw.note),
+        purchasedAt: parsePurchaseDate(raw.purchasedAt),
+        ...(lots ? { lots } : {}),
         addedAt: typeof raw.addedAt === 'string' && raw.addedAt.length <= 40 ? raw.addedAt : null,
         updatedAt: typeof raw.updatedAt === 'string' && raw.updatedAt.length <= 40 ? raw.updatedAt : null,
-      };
+      });
     });
   }
 
@@ -434,7 +478,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   function publicHolding(h) {
-    return { id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, purchasedAt: h.purchasedAt ?? null, addedAt: h.addedAt, updatedAt: h.updatedAt };
+    return { id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, purchasedAt: h.purchasedAt ?? null, weightedAt: h.weightedAt ?? null, lots: Array.isArray(h.lots) ? h.lots : null, addedAt: h.addedAt, updatedAt: h.updatedAt };
   }
 
   // Alle med en profil kan se alle andres portefølje – man kommer kun ind på
@@ -727,6 +771,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const avgPrice = parseNumber(body.avgPrice, 'Købskurs', { min: 0, allowNull: true });
       const note = parseNote(body.note);
       const purchasedAt = parsePurchaseDate(body.purchasedAt);
+      const lots = parseLots(body.lots);
 
       const currentData = await (await own(req)).get();
       const current = currentData.holdings;
@@ -755,9 +800,11 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         note,
         accountId,
         purchasedAt,
+        ...(lots ? { lots } : {}),
         addedAt: now,
         updatedAt: now,
       };
+      applyLots(holding);
       await (await own(req)).update((draft) => {
         if (draft.holdings.some((h) => sameSlot(h, symbol, accountId))) throw new HttpError(409, 'Aktien er allerede i porteføljen');
         draft.holdings.push(holding);
@@ -774,11 +821,13 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         if (body.avgPrice !== undefined) h.avgPrice = parseNumber(body.avgPrice, 'Købskurs', { min: 0, allowNull: true });
         if (body.note !== undefined) h.note = parseNote(body.note);
         if (body.purchasedAt !== undefined) h.purchasedAt = parsePurchaseDate(body.purchasedAt);
+        if (body.lots !== undefined) h.lots = parseLots(body.lots) || [];
         if (body.accountId !== undefined) {
           const accountId = parseAccountId(body.accountId, draft.settings.accounts);
           if (draft.holdings.some((x) => x.id !== h.id && sameSlot(x, h.symbol, accountId))) throw new HttpError(409, `${h.name || h.symbol} findes allerede i det depot – brug "Køb til" dér i stedet`);
           h.accountId = accountId;
         }
+        applyLots(h);
         h.updatedAt = new Date().toISOString();
         updated = h;
       });
@@ -792,18 +841,32 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       if (!type) throw new HttpError(400, 'Type skal være "buy" eller "sell"');
       const quantity = parseQuantity(body.quantity);
       const price = parseNumber(body.price, 'Kurs', { min: 0, allowNull: type === 'sell' });
+      const date = parsePurchaseDate(body.date);
       let result;
       await (await own(req)).update((draft) => {
         const h = findHolding(draft, params.id);
         const oldQty = Number(h.quantity) || 0;
         if (type === 'buy') {
-          const newQty = oldQty + quantity;
-          if (h.avgPrice != null && oldQty > 0) {
-            h.avgPrice = Math.round(((oldQty * h.avgPrice + quantity * price) / newQty) * 1e6) / 1e6;
-          } else if (oldQty === 0 || h.avgPrice == null) {
-            h.avgPrice = oldQty === 0 ? price : h.avgPrice;
+          // Føres aktien køb for køb – eller skriver man en dato på dette køb –
+          // lægges købet i listen, og antal og gennemsnitskurs regnes derudfra.
+          const førerKøb = Array.isArray(h.lots) && h.lots.length > 0;
+          if (førerKøb || date) {
+            const lots = førerKøb ? [...h.lots] : (oldQty > 0
+              ? [{ id: newId(), date: h.purchasedAt ?? null, quantity: oldQty, price: h.avgPrice ?? null }]
+              : []);
+            if (lots.length >= MAX_LOTS) throw new HttpError(409, `Der kan højst registreres ${MAX_LOTS} køb pr. aktie`);
+            lots.push({ id: newId(), date, quantity, price });
+            h.lots = parseLots(lots);
+            applyLots(h);
+          } else {
+            const newQty = oldQty + quantity;
+            if (h.avgPrice != null && oldQty > 0) {
+              h.avgPrice = Math.round(((oldQty * h.avgPrice + quantity * price) / newQty) * 1e6) / 1e6;
+            } else if (oldQty === 0 || h.avgPrice == null) {
+              h.avgPrice = oldQty === 0 ? price : h.avgPrice;
+            }
+            h.quantity = Math.round(newQty * 1e6) / 1e6;
           }
-          h.quantity = Math.round(newQty * 1e6) / 1e6;
         } else {
           if (quantity > oldQty + 1e-9) throw new HttpError(400, `Du ejer kun ${formatQty(oldQty)} stk.`);
           const newQty = Math.round((oldQty - quantity) * 1e6) / 1e6;
@@ -811,6 +874,10 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
             draft.holdings = draft.holdings.filter((x) => x.id !== h.id);
             result = { removed: true, holding: publicHolding({ ...h, quantity: 0 }) };
             return;
+          }
+          if (Array.isArray(h.lots) && h.lots.length) {
+            h.lots = reduceLots(h.lots, quantity);
+            applyLots(h);
           }
           h.quantity = newQty;
         }
@@ -886,7 +953,8 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         const slot = `${symbol}@${accountId ?? ''}`;
         if (seen.has(slot)) throw new HttpError(400, `Symbolet ${symbol} optræder flere gange i samme depot (linje ${i + 1})`);
         seen.add(slot);
-        return {
+        const lots = parseLots(raw.lots);
+        return applyLots({
           id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newId(),
           symbol,
           accountId,
@@ -896,9 +964,10 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
           avgPrice: parseNumber(raw.avgPrice, 'Købskurs', { min: 0, allowNull: true }),
           note: parseNote(raw.note),
           purchasedAt: parsePurchaseDate(raw.purchasedAt),
+          ...(lots ? { lots } : {}),
           addedAt: typeof raw.addedAt === 'string' && raw.addedAt.length <= 40 && !Number.isNaN(Date.parse(raw.addedAt)) ? raw.addedAt : now,
           updatedAt: now,
-        };
+        });
       });
       const baseCurrency = body.settings?.baseCurrency ? parseCurrency(body.settings.baseCurrency) : undefined;
       const cash = body.settings?.cash !== undefined ? parseNumber(body.settings.cash, 'Kontanter', { min: 0, allowNull: true }) ?? 0 : undefined;
