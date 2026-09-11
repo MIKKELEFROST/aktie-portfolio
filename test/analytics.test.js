@@ -9,7 +9,7 @@ import path from 'node:path';
 import { createApp } from '../server/app.js';
 import { createStore } from '../server/store.js';
 import { createMockYahooClient } from '../server/yahoo-mock.js';
-import { computeAnalytics, projectValue } from '../server/portfolio-math.js';
+import { computeAnalytics, computeHistoryFacts, computePurchaseFacts, projectValue, round } from '../server/portfolio-math.js';
 
 const NU = Date.parse('2026-09-11T12:00:00Z');
 const dageSiden = (n) => new Date(NU - n * 86_400_000).toISOString().slice(0, 10);
@@ -168,6 +168,148 @@ test('analyse via API: hele vejen igennem', async () => {
     assert.ok(a.perMonth > 0, 'gennemsnit pr. måned');
     assert.equal(a.annualizedReliable, true, 'to års ejertid er nok');
     assert.equal(a.biggest.symbol, 'NOVO-B.CO');
+  } finally {
+    server.close();
+  }
+});
+
+// ---------- tal om købene ----------
+
+test('computePurchaseFacts: hvor tit, hvor meget og hvornår', () => {
+  const nu = Date.parse('2026-09-11T10:00:00Z');
+  const facts = computePurchaseFacts([
+    {
+      symbol: 'A', name: 'Alfa', quantity: 30, fxRate: 2,
+      lots: [
+        { date: '2026-01-10', quantity: 10, price: 100 }, // 2.000 i basisvaluta
+        { date: '2026-03-10', quantity: 20, price: 100 }, // 4.000
+      ],
+    },
+    { symbol: 'B', name: 'Bravo', quantity: 5, fxRate: 1, purchasedAt: '2026-03-10', costBase: 1000 },
+  ], nu);
+
+  assert.equal(facts.purchases, 3);
+  assert.equal(facts.units, 35);
+  assert.equal(facts.firstBuy, '2026-01-10');
+  assert.equal(facts.lastBuy, '2026-03-10');
+  // 59 dage fordelt på to mellemrum.
+  assert.equal(facts.daysBetweenBuys, 29.5);
+  assert.equal(facts.biggestBuy.name, 'Alfa');
+  assert.equal(facts.biggestBuy.amountBase, 4000);
+  assert.equal(facts.avgBuy, round((2000 + 4000 + 1000) / 3));
+  assert.equal(facts.busiestMonth.month, '2026-03');
+  assert.equal(facts.busiestMonth.amountBase, 5000, 'marts: 4.000 + 1.000');
+  assert.equal(facts.busiestMonth.count, 2);
+});
+
+test('computePurchaseFacts: uden datoer er der ikke noget at fortælle', () => {
+  const facts = computePurchaseFacts([{ symbol: 'A', quantity: 10, costBase: 500 }]);
+  assert.equal(facts.purchases, 0);
+  assert.equal(facts.units, 10, 'antallet kender vi godt');
+  assert.equal(facts.firstBuy, null);
+  assert.equal(facts.biggestBuy, null);
+});
+
+test('computePurchaseFacts: et køb uden kurs tæller med i antallet, men ikke i beløbene', () => {
+  const facts = computePurchaseFacts([{
+    symbol: 'A', name: 'Alfa', quantity: 20, fxRate: 1,
+    lots: [{ date: '2026-01-10', quantity: 10, price: 100 }, { date: '2026-02-10', quantity: 10, price: null }],
+  }], Date.parse('2026-09-11T10:00:00Z'));
+  assert.equal(facts.purchases, 2);
+  assert.equal(facts.avgBuy, 1000, 'gennemsnittet er kun over de køb, vi kender prisen på');
+  assert.equal(facts.biggestBuy.amountBase, 1000);
+});
+
+// ---------- rekorder fra kurven ----------
+
+const kurve = (liste) => liste.map(([date, value, invested]) => ({ date, value, invested }));
+
+test('computeHistoryFacts: top, bedste og værste dag', () => {
+  const r = computeHistoryFacts(kurve([
+    ['2026-01-01', 1000, 1000],
+    ['2026-01-02', 1200, 1000],
+    ['2026-01-03', 900, 1000],
+    ['2026-01-04', 1100, 1000],
+  ]));
+  assert.equal(r.peak.value, 1200);
+  assert.equal(r.peak.date, '2026-01-02');
+  assert.equal(r.fromPeakPercent, round(((1100 - 1200) / 1200) * 100, 2));
+  assert.equal(r.bestDay.date, '2026-01-02');
+  assert.equal(r.bestDay.change, 200);
+  assert.equal(r.worstDay.date, '2026-01-03');
+  assert.equal(r.worstDay.change, -300);
+  assert.equal(r.tradingDays, 4);
+});
+
+test('computeHistoryFacts: en indbetaling er ikke en kanondag', () => {
+  // Dag 2 fordobles indskuddet; kursen rører sig ikke. Det må ikke tælle som gevinst.
+  const r = computeHistoryFacts(kurve([
+    ['2026-01-01', 1000, 1000],
+    ['2026-01-02', 2000, 2000],
+    ['2026-01-03', 2100, 2000],
+  ]));
+  assert.equal(r.bestDay.date, '2026-01-03', 'den rigtige gode dag er den, hvor kursen steg');
+  assert.equal(r.bestDay.change, 100);
+  assert.equal(r.worstDay.change, 0, 'indbetalingsdagen gav hverken plus eller minus');
+});
+
+test('computeHistoryFacts: dage i plus og længste stime', () => {
+  const r = computeHistoryFacts(kurve([
+    ['2026-01-01', 900, 1000],   // minus
+    ['2026-01-02', 1010, 1000],  // plus, op
+    ['2026-01-03', 1020, 1000],  // plus, op
+    ['2026-01-04', 1030, 1000],  // plus, op
+    ['2026-01-05', 990, 1000],   // minus, ned
+    ['2026-01-06', 1005, 1000],  // plus, op
+  ]));
+  assert.equal(r.daysInProfit, 4);
+  assert.equal(r.longestStreak, 3);
+});
+
+test('computeHistoryFacts: står man på toppen, siges det', () => {
+  const r = computeHistoryFacts(kurve([['2026-01-01', 1000, 1000], ['2026-01-02', 1200, 1000]]));
+  assert.equal(r.peak.date, '2026-01-02');
+  assert.equal(r.fromPeakPercent, 0);
+});
+
+test('computeHistoryFacts: for lidt data giver ingen rekorder', () => {
+  assert.equal(computeHistoryFacts([]), null);
+  assert.equal(computeHistoryFacts([{ date: '2026-01-01', value: 100 }]), null);
+});
+
+test('analyse via API: rekorder og købstal kommer med', async () => {
+  const store = createStore(await mkdtemp(path.join(tmpdir(), 'aktie-rekord-')));
+  const config = { envPassword: '', sessionSecret: '', setupToken: 'x', baseCurrency: 'DKK', publicAccess: true, storageMode: 'file' };
+  const app = createApp({ store, yahoo: createMockYahooClient(), config, logger: { warn() {}, error() {} } });
+  const server = http.createServer(app);
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = async (method, p, body) => {
+    const res = await fetch(base + p, { method, headers: { 'content-type': 'application/json' }, body: method === 'GET' ? undefined : JSON.stringify(body ?? {}) });
+    return { status: res.status, json: await res.json().catch(() => null) };
+  };
+  try {
+    const dag = (n) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+    await call('POST', '/api/holdings', {
+      symbol: 'NOVO-B.CO',
+      quantity: 50,
+      lots: [
+        { date: dag(60), quantity: 10, price: 250 },
+        { date: dag(20), quantity: 40, price: 280 },
+      ],
+    });
+    const a = (await call('GET', '/api/analytics')).json;
+    assert.equal(a.purchases, 2);
+    assert.equal(a.units, 50);
+    assert.equal(a.firstBuy, dag(60));
+    assert.equal(a.lastBuy, dag(20));
+    // Dagene tælles fra kl. 12, så tallet lander på 19 eller 20 alt efter tidspunkt.
+    assert.ok(a.daysSinceLastBuy === 19 || a.daysSinceLastBuy === 20, `fik ${a.daysSinceLastBuy}`);
+    assert.equal(a.biggestBuy.amountBase, 40 * 280);
+    assert.ok(a.records, 'rekorderne skal være der');
+    assert.ok(a.records.tradingDays > 1);
+    assert.ok(a.records.peak.value > 0);
+    assert.ok(a.records.bestDay && a.records.worstDay);
   } finally {
     server.close();
   }
