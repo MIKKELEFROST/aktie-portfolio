@@ -343,6 +343,7 @@ table.holdings tbody tr { cursor: pointer; }
 table.holdings tbody tr:hover { background: var(--surface-2); }
 table.holdings tbody tr.error-row { opacity: 0.85; }
 table.holdings tfoot td { font-weight: 600; border-bottom: none; border-top: 2px solid var(--border-strong); background: var(--surface); }
+table.holdings .col-avg, table.holdings .col-share { display: none; }
 table.holdings td:first-child, table.holdings th:first-child { padding-left: 4px; }
 table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px; }
 
@@ -485,7 +486,7 @@ table.holdings td:last-child, table.holdings th:last-child { padding-right: 4px;
 .lots-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
 .lots-toggle { margin-top: 6px; align-self: flex-start; padding-left: 0; padding-right: 0; }
 .lot-row, .lot-head-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; }
-.lot-head-row { font-size: 11px; color: var(--muted); text-align: right; margin-bottom: 4px; }
+.lot-head-row { font-size: 11px; color: var(--muted); text-align: right; margin-bottom: 4px; display: none; }
 .lot-head-date { display: none; }
 .lot-head-spacer { width: 40px; }
 /* Dato på egen linje: en stiplet streg holder hvert køb samlet som ét. */
@@ -581,6 +582,13 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
     margin: 0 -20px -12px; padding: 12px 20px calc(12px + env(safe-area-inset-bottom));
     background: var(--surface); border-top: 1px solid var(--border);
   }
+  /* Uden det her skærer knapperne den sidste linje midt over, så den ligner
+     en fejl i stedet for noget, der fortsætter nedenfor. En blød overgang
+     viser, at der er mere at rulle til. */
+  .panel-actions::before {
+    content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: 20px;
+    background: linear-gradient(to top, var(--surface), transparent); pointer-events: none;
+  }
 }
 .panel-actions .btn { justify-content: center; }
 .panel-actions .span2 { grid-column: 1 / -1; }
@@ -640,6 +648,9 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 
 /* Lidt mere plads: to spalter hvor det giver mening. */
 @media (min-width: 480px) {
+  /* Først her står dato, antal og kurs på samme linje, så overskrifterne
+     faktisk peger på de felter, de hører til. */
+  .lot-head-row { display: grid; }
   .lot-row, .lot-head-row { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1fr) auto; }
   .lot-row .lot-date { grid-column: auto; }
   .lot-head-date { display: block; text-align: left; }
@@ -655,7 +666,7 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
   :root { --sidebar-w: 72px; }
   .sidebar { display: flex; padding: 16px 12px; }
   .brand { justify-content: center; padding: 0 0 14px; }
-  .brand span, .nav a span, .sidebar-status, .sidebar .btn-primary span { display: none; }
+  .brand > span, .nav a span, .sidebar-status, .sidebar .btn-primary span { display: none; }
   .nav a { justify-content: center; padding: 10px; }
   .sidebar .btn-primary { padding: 10px; }
 
@@ -667,8 +678,6 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
   .grid-kpi, .grid-2 { margin-bottom: 16px; }
   .page-header { margin-bottom: 20px; }
 
-  table.holdings { display: table; }
-  .holding-cards { display: none; }
   .table-wrap { margin: 0 -20px -18px; padding: 0 20px; }
 
   /* Detaljer glider ind fra siden i stedet for op nedefra. */
@@ -681,12 +690,30 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
   .panel::before { display: none; }
 }
 
+/* Tabellen har ni kolonner og vil have omkring 1180 px. Først her er der plads
+   til den; indtil da er kortene både pænere og til at læse. */
+@media (min-width: 1240px) {
+  table.holdings { display: table; }
+  .holding-cards { display: none; }
+}
+
+/* De to kolonner, der også står i detaljepanelet, kommer til, når de kan være
+   der – i stedet for at rækken bliver klippet af i kanten. */
+@media (min-width: 1360px) {
+  table.holdings .col-share { display: table-cell; }
+}
+@media (min-width: 1500px) {
+  table.holdings .col-avg { display: table-cell; }
+}
+
 /* Plads til navnene i sidebjælken. */
 @media (min-width: 1024px) {
   :root { --sidebar-w: 232px; }
   .sidebar { padding: 20px 14px; }
   .brand { justify-content: flex-start; padding: 4px 10px 18px; }
-  .brand span, .nav a span, .sidebar-status, .sidebar .btn-primary span { display: initial; }
+  /* Kun det ydre span: "display: initial" er inline og ville gøre undertitlen
+     til en fortsættelse af navnet i stedet for sin egen linje. */
+  .brand > span, .nav a span, .sidebar-status, .sidebar .btn-primary span { display: initial; }
   .nav a { justify-content: flex-start; padding: 9px 10px; }
   .sidebar .btn-primary { padding: 9px 14px; }
   .content { padding: 28px 28px 80px; }
@@ -755,6 +782,12 @@ dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
     background: var(--surface); border-top: 1px solid var(--border);
     padding-bottom: calc(14px + env(safe-area-inset-bottom));
   }
+  /* Samme bløde overgang som i detaljepanelet: indholdet skal se ud til at
+     fortsætte nedenunder, ikke til at være skåret over. */
+  .dialog-foot::before {
+    content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: 18px;
+    background: linear-gradient(to top, var(--surface), transparent); pointer-events: none;
+  }
   .dialog-head { position: sticky; top: 0; z-index: 2; background: var(--surface); }
 }
 @media (min-width: 768px) {
@@ -806,7 +839,7 @@ body.viewing-person [data-action="add"] { display: none !important; }
 /* ---------- Mobil: berøringsflader og rytme ---------- */
 @media (max-width: 767px) {
   .btn { min-height: 44px; }
-  .btn-sm { min-height: 38px; }
+  .btn-sm { min-height: 40px; }
   .btn-icon { min-width: 44px; }
   .input, .select-inline, select, input[type="text"], input[type="password"], input[type="email"], input[type="search"] {
     min-height: 44px;
@@ -814,7 +847,11 @@ body.viewing-person [data-action="add"] { display: none !important; }
   }
   .setting-row { flex-wrap: wrap; padding: 14px 0; }
   .setting-row > :last-child { margin-left: auto; }
-  .range-pills button { min-height: 36px; padding-inline: 10px; }
+  /* Trykflader på telefon: 44 px, som resten af knapperne. */
+  .range-pills button { min-height: 44px; padding-inline: 11px; }
+  .chip-btn { min-height: 44px; padding-inline: 14px; }
+  /* Knapper med kun et ikon skal kunne rammes – ikke 36 px brede. */
+  .btn-sm.btn-icon, .setting-row .btn-icon, .setting-row .btn-sm[aria-label] { min-width: 44px; min-height: 42px; }
   .card-header h2 { font-size: 15px; }
   .card-header .input-group { flex: 1 1 100%; max-width: none; }
   /* Små tekstlinks skal stadig kunne rammes med en tommelfinger. */
@@ -830,6 +867,11 @@ body.viewing-person [data-action="add"] { display: none !important; }
   /* Står det sidste nøgletal alene på en række, får det hele bredden. */
   .grid-kpi > :last-child:nth-child(even) { grid-column: 1 / -1; }
 }
+
+/* Fra 1024 px har knappen i sidebjælken sin tekst, og så er den i
+   sidehovedet den samme knap to gange ved siden af hinanden. */
+@media (min-width: 1024px) {
+  .page-header .page-actions .btn-primary { display: none; }
 }
 
 /* ---------- Analyse ---------- */
