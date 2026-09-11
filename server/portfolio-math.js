@@ -254,6 +254,26 @@ export function narrowRange(range, ownedFrom, now = Date.now()) {
   return mindste[1] < rangeDays(range, now) ? mindste[0] : range;
 }
 
+// Hvornår hver portion kom ind i beholdningen. Er aktien ført køb for køb,
+// er det ét trin pr. køb; ellers ét trin med hele antallet fra købsdatoen.
+// Uden dato regnes portionen med hele vejen – vi ved ikke bedre.
+function ownedSteps(holding) {
+  const lots = (Array.isArray(holding.lots) ? holding.lots : []).filter((l) => l && Number(l.quantity) > 0);
+  const trin = lots.length
+    ? lots.map((l) => ({
+      date: l.date ? String(l.date).slice(0, 10) : null,
+      quantity: Number(l.quantity),
+      cost: harKurs(l) ? Number(l.quantity) * Number(l.price) : 0,
+    }))
+    : [{
+      date: holding.purchasedAt ? String(holding.purchasedAt).slice(0, 10) : null,
+      quantity: Number(holding.quantity) || 0,
+      cost: holding.avgPrice == null ? 0 : (Number(holding.quantity) || 0) * Number(holding.avgPrice),
+    }];
+  // Tomme datoer sorterer først og tælles derfor med fra første dag.
+  return trin.sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+}
+
 export function computeValueHistory({ holdings, histories, fxRates, fxHistories = {} }) {
   const series = [];
   const med = [];
@@ -262,15 +282,24 @@ export function computeValueHistory({ holdings, histories, fxRates, fxHistories 
     if (!hist || !hist.points?.length) continue;
     const fx = fxRates[hist.currency];
     if (!fx || !fx.ok) continue;
-    const qty = Number(h.quantity) || 0;
     // Historiske valutakurser når de findes; ellers dagens kurs hele vejen.
     const rateOn = dailyRates(fxHistories[hist.currency], fx.rate);
     const byDay = new Map();
     for (const p of hist.points) {
       const day = dayKey(p.t);
-      byDay.set(day, { local: p.close * qty, day });
+      byDay.set(day, { close: p.close, day });
     }
-    series.push({ symbol: hist.symbol || h.symbol, currency: hist.currency, byDay, rateOn, first: [...byDay.keys()].sort()[0] });
+    series.push({
+      symbol: hist.symbol || h.symbol,
+      currency: hist.currency,
+      byDay,
+      rateOn,
+      first: [...byDay.keys()].sort()[0],
+      steps: ownedSteps(h),
+      // Det investerede omregnes med dagens valutakurs – samme regnestykke som
+      // tallet "Investeret" over grafen, så de to ikke siger hver sit.
+      rateNow: fx.rate,
+    });
     med.push(h);
   }
   if (!series.length) return { points: [], backfilled: [], ownedFrom: null };
@@ -286,25 +315,38 @@ export function computeValueHistory({ holdings, histories, fxRates, fxHistories 
   for (const s of series) for (const d of s.byDay.keys()) allDays.add(d);
   const days = [...allDays].sort();
 
+  // Antal og kostpris vokser hen ad vejen: et køb midt i perioden skal give et
+  // hop i kurven, ikke tælle med fra første dag. Trinene er sorteret, så der
+  // kun skal læses fremad én gang.
   const last = series.map((s) => s.byDay.get(s.first));
+  const ejet = series.map(() => ({ i: 0, quantity: 0, cost: 0 }));
   const out = [];
   for (const day of days) {
     let total = 0;
+    let invested = 0;
     for (let i = 0; i < series.length; i++) {
-      const v = series[i].byDay.get(day);
+      const s = series[i];
+      const e = ejet[i];
+      while (e.i < s.steps.length && (!s.steps[e.i].date || s.steps[e.i].date <= day)) {
+        e.quantity += s.steps[e.i].quantity;
+        e.cost += s.steps[e.i].cost;
+        e.i++;
+      }
+      const v = s.byDay.get(day);
       if (v != null) last[i] = v;
-      total += last[i].local * series[i].rateOn(day);
+      total += last[i].close * e.quantity * s.rateOn(day);
+      invested += e.cost * s.rateNow;
     }
-    out.push({ date: day, value: total });
+    out.push({ date: day, value: round(total), invested: round(invested) });
   }
 
-  let points = out;
-  if (ownedFrom) {
-    const efterKøb = out.filter((p) => p.date >= ownedFrom);
-    // Er alt købt i dag, er der ikke en kurve endnu; så beholdes de sidste par
-    // dage, så grafen ikke står helt tom.
-    points = efterKøb.length >= 2 ? efterKøb : out.slice(-2);
-  }
+  // Dagene før det første køb er nuller – der var ikke noget at være værd.
+  let første = 0;
+  while (første < out.length - 1 && out[første].value <= 0) første++;
+  let points = out.slice(første);
+  // Er alt købt i dag, er der ikke en kurve endnu; så beholdes de sidste par
+  // dage, så grafen ikke står helt tom.
+  if (points.length < 2) points = out.slice(-2);
 
   // Et papir med kortere historik end resten afkortede før hele grafen. I stedet
   // regnes det med til sin første kendte kurs i tiden inden. Det er stadig et gæt,

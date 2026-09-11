@@ -364,3 +364,47 @@ test('graf: mangler datoen på én af to, klippes der ikke', async () => {
     server.close();
   }
 });
+
+test('graf: de enkelte køb giver et hop den dag, der blev købt til', async () => {
+  const { call, server } = await start();
+  try {
+    const dag = (n) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+    const gammelt = dag(60);
+    const nyt = dag(10);
+    await call('POST', '/api/holdings', {
+      symbol: 'NOVO-B.CO',
+      quantity: 100,
+      lots: [
+        { date: gammelt, quantity: 10, price: 250 },
+        { date: nyt, quantity: 90, price: 280 },
+      ],
+    });
+
+    const h = (await call('GET', '/api/portfolio/history?range=6mo')).json;
+    const før = h.points.filter((p) => p.date < nyt);
+    const efter = h.points.filter((p) => p.date >= nyt);
+    assert.ok(før.length && efter.length, 'der skal være dage på begge sider af købet');
+
+    // Før det store køb ejede man kun 10 stk. – værdien skal svare til det.
+    const sidsteFør = før[før.length - 1];
+    const førsteEfter = efter[0];
+    assert.ok(førsteEfter.value > sidsteFør.value * 5, `intet hop: ${sidsteFør.value} → ${førsteEfter.value}`);
+    assert.equal(sidsteFør.invested, 2500, 'kun det første køb var lagt ind endnu');
+    assert.equal(førsteEfter.invested, 2500 + 90 * 280);
+    assert.equal(h.points[0].invested, 2500);
+  } finally {
+    server.close();
+  }
+});
+
+test('graf: uden købsdato tæller hele beholdningen med i hele perioden', async () => {
+  const { call, server } = await start();
+  try {
+    await call('POST', '/api/holdings', { symbol: 'NOVO-B.CO', quantity: 10, avgPrice: 250 });
+    const h = (await call('GET', '/api/portfolio/history?range=6mo')).json;
+    const værdier = h.points.map((p) => p.invested);
+    assert.deepEqual([...new Set(værdier)], [2500], 'det indsatte må ikke trappe, når vi ikke kender datoen');
+  } finally {
+    server.close();
+  }
+});
