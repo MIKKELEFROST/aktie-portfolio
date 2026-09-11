@@ -174,3 +174,50 @@ test('datoer i dd-mm-åååå sorteres rigtigt, så salg efter køb regnes korre
   assert.equal(r.positions[0].quantity, 20);
   assert.equal(r.positions[0].avgPrice, 100, 'salg ændrer ikke gennemsnittet');
 });
+
+test('flere køb af samme papir bliver til en liste med dato, antal og kurs', () => {
+  const r = parse(file([
+    row({ id: '1', dato: '2025-01-10', type: 'KØBT', navn: 'Novo', isin: 'DK0062498333', antal: '10', kurs: '100', beloeb: '-1000' }),
+    row({ id: '2', dato: '2025-06-10', type: 'KØBT', navn: 'Novo', isin: 'DK0062498333', antal: '30', kurs: '200', beloeb: '-6000' }),
+  ]));
+  const p = r.positions[0];
+  assert.equal(p.quantity, 40);
+  assert.equal(p.lots.length, 2);
+  assert.deepEqual(p.lots.map((l) => l.date), ['2025-01-10', '2025-06-10']);
+  assert.deepEqual(p.lots.map((l) => l.quantity), [10, 30]);
+  assert.equal(p.purchasedAt, '2025-01-10');
+  // Gennemsnittet af købene skal ramme præcis det samme som den samlede kurs.
+  const vægtet = p.lots.reduce((s, l) => s + l.quantity * l.price, 0) / p.quantity;
+  assert.ok(Math.abs(vægtet - p.avgPrice) < 1e-6, `${vægtet} mod ${p.avgPrice}`);
+});
+
+test('kurtage lægges oveni kursen på det enkelte køb, så listen stemmer med gennemsnittet', () => {
+  const r = parse(file([
+    row({ id: '1', dato: '2025-01-10', type: 'KØBT', navn: 'Novo', isin: 'DK0062498333', antal: '10', kurs: '100', beloeb: '-1029', kurtage: '29' }),
+    row({ id: '2', dato: '2025-06-10', type: 'KØBT', navn: 'Novo', isin: 'DK0062498333', antal: '10', kurs: '200', beloeb: '-2029', kurtage: '29' }),
+  ]));
+  const p = r.positions[0];
+  assert.equal(p.lots[0].price, 102.9);
+  assert.equal(p.lots[1].price, 202.9);
+  assert.equal(p.avgPrice, 152.9);
+});
+
+test('salg skrumper købene forholdsmæssigt, så gennemsnitskursen ikke flytter sig', () => {
+  const r = parse(file([
+    row({ id: '1', dato: '2025-01-10', type: 'KØBT', navn: 'Novo', isin: 'DK0062498333', antal: '10', kurs: '100', beloeb: '-1000' }),
+    row({ id: '2', dato: '2025-06-10', type: 'KØBT', navn: 'Novo', isin: 'DK0062498333', antal: '30', kurs: '200', beloeb: '-6000' }),
+    row({ id: '3', dato: '2025-08-10', type: 'SOLGT', navn: 'Novo', isin: 'DK0062498333', antal: '20', kurs: '300', beloeb: '6000' }),
+  ]));
+  const p = r.positions[0];
+  assert.equal(p.quantity, 20);
+  assert.equal(p.avgPrice, 175);
+  assert.deepEqual(p.lots.map((l) => l.quantity), [5, 15]);
+});
+
+test('ét enkelt køb får ingen liste – der er ikke noget at holde adskilt', () => {
+  const r = parse(file([
+    row({ id: '1', dato: '2025-01-10', type: 'KØBT', navn: 'Novo', isin: 'DK0062498333', antal: '10', kurs: '100', beloeb: '-1000' }),
+  ]));
+  assert.equal(r.positions[0].lots, null);
+  assert.equal(r.positions[0].purchasedAt, '2025-01-10');
+});

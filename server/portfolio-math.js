@@ -41,6 +41,12 @@ export function computePosition(holding, quoteResult, fxResult) {
     accountId: holding.accountId ?? null,
     purchasedAt: holding.purchasedAt || null,
     heldDays: heldDays(holding.purchasedAt),
+    // Er aktien købt ad flere omgange, ligger tyngden af pengene senere end
+    // det første køb. weightedAt er den dato, pengene i gennemsnit blev sat
+    // ind – den bruges til afkast pr. år, mens ejertid tæller fra første køb.
+    weightedAt: holding.weightedAt || holding.purchasedAt || null,
+    moneyDays: heldDays(holding.weightedAt || holding.purchasedAt),
+    lots: Array.isArray(holding.lots) && holding.lots.length ? holding.lots : null,
     addedAt: holding.addedAt || null,
     updatedAt: holding.updatedAt || null,
   };
@@ -113,7 +119,7 @@ export function computePosition(holding, quoteResult, fxResult) {
     gainPercent,
     // Afkast pr. år. +20 % på tre måneder og +20 % på fem år er ikke det samme,
     // og uden en købsdato kan man ikke se forskel.
-    annualizedPercent: annualized(gainPercent, base.heldDays),
+    annualizedPercent: annualized(gainPercent, base.moneyDays),
     dayChange,
     dayChangeBase: toBase(dayChange),
     dayChangePercent: q.changePercent,
@@ -300,9 +306,10 @@ function vægtetEjertid(poster) {
   let vægt = 0;
   let sum = 0;
   for (const p of poster) {
-    if (!Number.isFinite(p.costBase) || !Number.isFinite(p.heldDays)) continue;
+    const dage = Number.isFinite(p.moneyDays) ? p.moneyDays : p.heldDays;
+    if (!Number.isFinite(p.costBase) || !Number.isFinite(dage)) continue;
     vægt += p.costBase;
-    sum += p.costBase * p.heldDays;
+    sum += p.costBase * dage;
   }
   return vægt > 0 ? sum / vægt : null;
 }
@@ -392,4 +399,77 @@ export function projectValue({ start = 0, perMonth = 0, annualPercent = 0, years
     contributed: round(indbetalt),
     growth: round(slut - indbetalt),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Køb (lots): har man købt den samme aktie ad flere omgange, kan hvert køb
+// skrives ind for sig. Så er antal og gennemsnitskurs ikke noget, man selv
+// skal regne ud – og man kan se forskel på, hvornår papiret blev købt, og
+// hvornår pengene faktisk gik ind.
+// ---------------------------------------------------------------------------
+
+// Et køb uden kurs tæller med i antallet, men ikke i gennemsnitskursen.
+// Bemærk at Number(null) er 0 og består Number.isFinite – derfor null-tjekket.
+const harKurs = (l) => l.price !== null && l.price !== undefined && l.price !== '' && Number.isFinite(Number(l.price));
+
+export function summarizeLots(lots) {
+  const gyldige = (Array.isArray(lots) ? lots : []).filter((l) => l && Number.isFinite(Number(l.quantity)) && Number(l.quantity) > 0);
+  if (!gyldige.length) return null;
+
+  let quantity = 0;
+  let cost = 0;
+  let medKurs = 0;
+  for (const l of gyldige) {
+    const antal = Number(l.quantity);
+    quantity += antal;
+    if (harKurs(l)) {
+      cost += antal * Number(l.price);
+      medKurs += antal;
+    }
+  }
+
+  const datoer = gyldige.map((l) => String(l.date || '').slice(0, 10)).filter(Boolean).sort();
+  // Mangler der dato på bare ét køb, kan vi ikke sige, hvornår beholdningen
+  // blev startet – og så skal der ikke regnes ejertid eller afkast pr. år på
+  // den. Bedre ingen dato end en, der ser for ny ud.
+  const udenDato = gyldige.length - datoer.length;
+  const purchasedAt = udenDato > 0 ? null : (datoer[0] || null);
+
+  // Pengevægtet dato: hvert køb vejer efter hvor mange penge der gik ind.
+  // Uden kurser vejes der efter antal i stedet, så datoen stadig siger noget.
+  const medDato = gyldige.filter((l) => l.date);
+  const vægt = (l) => (harKurs(l) && medKurs > 0 ? Number(l.quantity) * Number(l.price) : Number(l.quantity));
+  const samletVægt = medDato.reduce((s, l) => s + vægt(l), 0);
+  let weightedAt = purchasedAt;
+  if (samletVægt > 0 && purchasedAt) {
+    const ms = medDato.reduce((s, l) => s + Date.parse(`${String(l.date).slice(0, 10)}T12:00:00Z`) * (vægt(l) / samletVægt), 0);
+    if (Number.isFinite(ms)) weightedAt = new Date(ms).toISOString().slice(0, 10);
+  }
+
+  return {
+    count: gyldige.length,
+    missingDates: udenDato,
+    quantity: round(quantity, 6),
+    // Kun de køb, hvor der står en kurs, tæller med i gennemsnittet.
+    avgPrice: medKurs > 0 ? round(cost / medKurs, 6) : null,
+    purchasedAt,
+    weightedAt,
+  };
+}
+
+// Sælger man en del af sin beholdning, skrumper alle køb forholdsmæssigt.
+// Det er gennemsnitsmetoden, som danske aktieavancer gøres op efter – og det
+// betyder, at et salg hverken flytter gennemsnitskursen eller den vægtede
+// købsdato. Havde vi solgt de ældste køb først (FIFO), ville begge dele
+// hoppe efter hvert salg.
+export function reduceLots(lots, antalSolgt) {
+  const liste = (Array.isArray(lots) ? lots : []).filter((l) => l && Number(l.quantity) > 0);
+  const ialt = liste.reduce((s, l) => s + Number(l.quantity), 0);
+  const solgt = Number(antalSolgt) || 0;
+  if (solgt <= 0) return liste;
+  if (solgt >= ialt - 1e-9) return [];
+  const andel = (ialt - solgt) / ialt;
+  return liste
+    .map((l) => ({ ...l, quantity: round(Number(l.quantity) * andel, 6) }))
+    .filter((l) => l.quantity > 0);
 }
