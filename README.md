@@ -109,7 +109,7 @@ Alle indstillinger er valgfrie miljøvariabler. Læg dem i en `.env`-fil i proje
 ## Sådan virker det
 
 - **Kurser** hentes server-side fra Yahoo Finance' uofficielle endpoints (dem finance.yahoo.com selv bruger). Der er intet officielt API, så det kan i princippet ændre sig. Al Yahoo-kode ligger i `server/yahoo.js`. Kurser kan være op til 15 min. forsinkede.
-- **Beholdninger** gemmes som *antal* + *gns. købskurs* pr. aktie (i aktiens egen valuta) – præcis som din bank viser det. Der er bevidst ikke en fuld handelslog.
+- **Beholdninger** gemmes som *antal* + *gns. købskurs* pr. aktie (i aktiens egen valuta) – præcis som din bank viser det. Der er bevidst ikke en fuld handelslog. En **købsdato** kan skrives ind (valgfri, sættes automatisk ved import fra banken) og bruges til at vise ejertid og afkast pr. år.
 - **Afkast** = kursafkast i forhold til din gns. købskurs, omregnet til basisvalutaen med *dagens* valutakurs. Valutaudsving siden købet indgår ikke. Det står også i dashboardet.
 - **Grafen** beregnes ud fra din nuværende beholdning og historiske lukkekurser (markeret "ca.").
 - **Data** ligger som JSON i `DATA_DIR`. Filen skrives atomisk, og de 5 seneste versioner gemmes i `DATA_DIR/backups/`. Der sendes intet til andre end Yahoo Finance (kun aktiesymboler).

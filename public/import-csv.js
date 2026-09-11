@@ -177,13 +177,15 @@ window.parseBrokerCsv = (function () {
     for (const e of entries) {
       let p = positions.get(e.key);
       if (!p) {
-        p = { depot: e.depot, isin: e.isin, name: e.name, currency: e.currency, quantity: 0, cost: 0, trades: 0, sold: 0, date: '' };
+        p = { depot: e.depot, isin: e.isin, name: e.name, currency: e.currency, quantity: 0, cost: 0, trades: 0, sold: 0, date: '', firstBuy: '' };
         positions.set(e.key, p);
       }
       if (!p.name && e.name) p.name = e.name;
       // Valutaen tages fra købene: på salgslinjer står beløbet ofte i kontoens valuta.
       if (e.currency && (e.isBuy || !p.currency)) p.currency = e.currency;
       if (e.date > p.date) p.date = e.date;
+      // Købsdatoen er det første køb – dét er dagen, man har ejet papiret siden.
+      if (e.isBuy && e.date && (!p.firstBuy || e.date < p.firstBuy)) p.firstBuy = e.date;
 
       if (e.isBuy) {
         p.quantity += e.quantity;
@@ -214,6 +216,7 @@ window.parseBrokerCsv = (function () {
         avgPrice: round(p.cost / p.quantity, 6),
         trades: p.trades,
         date: p.date,
+        purchasedAt: p.firstBuy || null,
       }))
       .sort((a, b) => (a.depot === b.depot ? a.name.localeCompare(b.name, 'da') : String(a.depot).localeCompare(String(b.depot))));
 

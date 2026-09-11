@@ -330,6 +330,19 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     return s;
   }
 
+  // Købsdato: en ren dato (åååå-mm-dd). Fremtidige datoer afvises – man kan ikke
+  // have købt i morgen – og tomt felt betyder "ved det ikke", ikke "i dag".
+  function parsePurchaseDate(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const s = String(value).trim().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new HttpError(400, 'Købsdatoen skal skrives som åååå-mm-dd');
+    const t = Date.parse(`${s}T12:00:00Z`);
+    if (Number.isNaN(t)) throw new HttpError(400, 'Købsdatoen er ikke en gyldig dato');
+    if (t > Date.now() + 86_400_000) throw new HttpError(400, 'Købsdatoen kan ikke ligge i fremtiden');
+    if (s < '1970-01-01') throw new HttpError(400, 'Købsdatoen er for langt tilbage');
+    return s;
+  }
+
   function parseNote(value) {
     const s = String(value ?? '').trim();
     if (s.length > 200) throw new HttpError(400, 'Noten må højst være 200 tegn');
@@ -421,7 +434,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   function publicHolding(h) {
-    return { id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, addedAt: h.addedAt, updatedAt: h.updatedAt };
+    return { id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, purchasedAt: h.purchasedAt ?? null, addedAt: h.addedAt, updatedAt: h.updatedAt };
   }
 
   // Alle med en profil kan se alle andres portefølje – man kommer kun ind på
@@ -694,6 +707,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
       const quantity = parseQuantity(body.quantity);
       const avgPrice = parseNumber(body.avgPrice, 'Købskurs', { min: 0, allowNull: true });
       const note = parseNote(body.note);
+      const purchasedAt = parsePurchaseDate(body.purchasedAt);
 
       const currentData = await (await own(req)).get();
       const current = currentData.holdings;
@@ -721,6 +735,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         avgPrice,
         note,
         accountId,
+        purchasedAt,
         addedAt: now,
         updatedAt: now,
       };
@@ -739,6 +754,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         if (body.quantity !== undefined) h.quantity = parseQuantity(body.quantity);
         if (body.avgPrice !== undefined) h.avgPrice = parseNumber(body.avgPrice, 'Købskurs', { min: 0, allowNull: true });
         if (body.note !== undefined) h.note = parseNote(body.note);
+        if (body.purchasedAt !== undefined) h.purchasedAt = parsePurchaseDate(body.purchasedAt);
         if (body.accountId !== undefined) {
           const accountId = parseAccountId(body.accountId, draft.settings.accounts);
           if (draft.holdings.some((x) => x.id !== h.id && sameSlot(x, h.symbol, accountId))) throw new HttpError(409, `${h.name || h.symbol} findes allerede i det depot – brug "Køb til" dér i stedet`);
@@ -860,6 +876,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
           quantity: parseQuantity(raw.quantity),
           avgPrice: parseNumber(raw.avgPrice, 'Købskurs', { min: 0, allowNull: true }),
           note: parseNote(raw.note),
+          purchasedAt: parsePurchaseDate(raw.purchasedAt),
           addedAt: typeof raw.addedAt === 'string' && raw.addedAt.length <= 40 && !Number.isNaN(Date.parse(raw.addedAt)) ? raw.addedAt : now,
           updatedAt: now,
         };

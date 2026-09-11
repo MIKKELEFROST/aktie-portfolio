@@ -532,6 +532,16 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 .range52 i { position: absolute; top: -4px; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); border: 2px solid var(--surface); transform: translateX(-50%); }
 .range52-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
 .panel-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+/* På telefonen er arket lavt, og knapperne endte under skærmkanten. De bliver
+   siddende nederst, så man altid kan nå Køb til, Sælg, Redigér og Slet. */
+@media (max-width: 767px) {
+  .panel-body { padding-bottom: 12px; }
+  .panel-actions {
+    position: sticky; bottom: 0; z-index: 2;
+    margin: 0 -20px -12px; padding: 12px 20px calc(12px + env(safe-area-inset-bottom));
+    background: var(--surface); border-top: 1px solid var(--border);
+  }
+}
 .panel-actions .btn { justify-content: center; }
 .panel-actions .span2 { grid-column: 1 / -1; }
 
@@ -559,6 +569,9 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 .toasts {
   position: fixed; left: 14px; right: 14px; bottom: calc(var(--tabbar-h) + 12px + env(safe-area-inset-bottom));
   display: flex; flex-direction: column; gap: 8px; z-index: 50;
+  /* En besked må aldrig sluge et tryk på det, den ligger oven på. Kun dens egen
+     knap tager imod klik. */
+  pointer-events: none;
 }
 @media (min-width: 768px) {
   .toasts { left: auto; right: 20px; bottom: 20px; }
@@ -567,7 +580,7 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px
 @media (min-width: 768px) { .toast { max-width: 360px; } }
 .toast.error { background: var(--neg); color: #fff; }
 .toast.success { background: var(--pos); color: #fff; }
-.toast button { background: transparent; border: none; color: inherit; font-weight: 600; text-decoration: underline; padding: 0; }
+.toast button { background: transparent; border: none; color: inherit; font-weight: 600; text-decoration: underline; padding: 0; pointer-events: auto; }
 @keyframes toast-in { from { transform: translateY(8px); opacity: 0; } }
 
 /* Menu (⋯) */
@@ -689,6 +702,16 @@ table.holdings th:focus-visible { outline-offset: -2px; }
 .kpi-label[title] { cursor: help; }
 dialog { max-height: calc(100dvh - 24px); overflow-y: auto; }
 dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
+/* Dialogen kan scrolle. Knapperne skal blive nederst, så "Gem" ikke ender
+   under skærmkanten, når der kommer et felt mere. */
+@media (max-width: 767px) {
+  .dialog-foot {
+    position: sticky; bottom: 0; z-index: 2;
+    background: var(--surface); border-top: 1px solid var(--border);
+    padding-bottom: calc(14px + env(safe-area-inset-bottom));
+  }
+  .dialog-head { position: sticky; top: 0; z-index: 2; background: var(--surface); }
+}
 @media (min-width: 768px) {
   dialog { width: min(var(--dialog-w, 520px), calc(100vw - 32px)); max-height: calc(100dvh - 64px); }
 }

@@ -39,6 +39,8 @@ export function computePosition(holding, quoteResult, fxResult) {
     avgPrice,
     note: holding.note || '',
     accountId: holding.accountId ?? null,
+    purchasedAt: holding.purchasedAt || null,
+    heldDays: heldDays(holding.purchasedAt),
     addedAt: holding.addedAt || null,
     updatedAt: holding.updatedAt || null,
   };
@@ -58,6 +60,7 @@ export function computePosition(holding, quoteResult, fxResult) {
       gain: null,
       gainBase: null,
       gainPercent: null,
+      annualizedPercent: null,
       dayChange: null,
       dayChangeBase: null,
       dayChangePercent: null,
@@ -108,11 +111,33 @@ export function computePosition(holding, quoteResult, fxResult) {
     gain,
     gainBase: toBase(gain),
     gainPercent,
+    // Afkast pr. år. +20 % på tre måneder og +20 % på fem år er ikke det samme,
+    // og uden en købsdato kan man ikke se forskel.
+    annualizedPercent: annualized(gainPercent, base.heldDays),
     dayChange,
     dayChangeBase: toBase(dayChange),
     dayChangePercent: q.changePercent,
     weight: null, // udfyldes af computePortfolio
   };
+}
+
+// Antal dage siden købsdatoen. null hvis datoen mangler eller ikke giver mening.
+export function heldDays(purchasedAt, now = Date.now()) {
+  if (!purchasedAt) return null;
+  const t = Date.parse(`${String(purchasedAt).slice(0, 10)}T12:00:00Z`);
+  if (Number.isNaN(t)) return null;
+  const dage = Math.floor((now - t) / 86_400_000);
+  return dage < 0 ? null : dage;
+}
+
+// Omregner et samlet afkast til afkast pr. år. Under en måned giver det et
+// misvisende stort tal (et par gode dage bliver til hundreder af procent),
+// så dér lader vi være.
+export function annualized(gainPercent, days, { minDays = 30 } = {}) {
+  if (!Number.isFinite(gainPercent) || !Number.isFinite(days) || days < minDays) return null;
+  const vækst = 1 + gainPercent / 100;
+  if (vækst <= 0) return null;
+  return round((vækst ** (365 / days) - 1) * 100, 2);
 }
 
 export function computePortfolio({ holdings, quotes, fxRates, baseCurrency }) {
