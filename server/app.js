@@ -26,7 +26,7 @@ const CURRENCY_RE = /^[A-Z]{3}$/;
 // Sider klienten kan tegne. Står en sti ikke her, giver et direkte besøg eller en
 // genindlæsning 404, selv om navigation inde i appen virker.
 // Skal holdes i takt med ROUTES i public/app.js – test/pages.test.js kontrollerer det.
-const PAGE_ROUTES = new Set(['/', '/beholdninger', '/indstillinger', '/folk', '/liste']);
+const PAGE_ROUTES = new Set(['/', '/beholdninger', '/indstillinger', '/folk']);
 // Profil-sider: /profil/<id> viser en andens portefølje, hvis man følger vedkommende.
 const PERSON_PAGE = /^\/profil\/[^/]+$/;
 const HISTORY_RANGES = new Set(['5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '5y', 'max']);
