@@ -31,13 +31,17 @@
   const fmtNum = (n, min = 2, max = 2) => (isNum(n) ? nf({ minimumFractionDigits: min, maximumFractionDigits: max }).format(n) : '–');
 
   // Beløb i basisvaluta: "1.234.567 kr." – decimaler kan slås til i indstillinger.
+  // Fast mellemrum mellem tal og enhed. Med et alm. mellemrum kunne linjen
+  // brydes efter tallet, så "%" eller "kr." stod alene på næste linje.
+  const NBSP = '\u00a0';
+
   function fmtAmount(n, currency = state.baseCurrency, { decimals = null, sign = false } = {}) {
     if (!isNum(n)) return '–';
     const d = decimals ?? (state.settings.showDecimals ? 2 : 0);
     const abs = nf({ minimumFractionDigits: d, maximumFractionDigits: d }).format(Math.abs(n));
     const sym = CURRENCY_SYMBOLS[currency] || currency;
     const prefix = n < 0 ? '−' : sign && n > 0 ? '+' : '';
-    return `${prefix}${abs} ${sym}`;
+    return `${prefix}${abs}${NBSP}${sym}`;
   }
 
   // Kurs i aktiens egen valuta: 2 decimaler, flere for små kurser.
@@ -51,7 +55,7 @@
     if (!isNum(n)) return '–';
     const abs = fmtNum(Math.abs(n), 1, 2);
     const prefix = n < 0 ? '−' : sign && n > 0 ? '+' : '';
-    return `${prefix}${abs} %`;
+    return `${prefix}${abs}${NBSP}%`;
   }
 
   // Til input-felter: fuld præcision, uden tusindtalspunkter (parseInput læser komma som decimal)
@@ -84,8 +88,8 @@
   // Kompakt aksemærkat: 1,28 mio. / 128.000
   function fmtCompact(n) {
     if (!isNum(n)) return '';
-    if (Math.abs(n) >= 1e9) return `${fmtNum(n / 1e9, 1, 2)} mia.`;
-    if (Math.abs(n) >= 1e6) return `${fmtNum(n / 1e6, 1, 2)} mio.`;
+    if (Math.abs(n) >= 1e9) return `${fmtNum(n / 1e9, 1, 2)}${NBSP}mia.`;
+    if (Math.abs(n) >= 1e6) return `${fmtNum(n / 1e6, 1, 2)}${NBSP}mio.`;
     return fmtNum(n, 0, 0);
   }
 
@@ -415,7 +419,7 @@
             h.quantity = round6(newQty);
           }
         } else {
-          if (q > h.quantity + 1e-9) throw localErr(400, `Du ejer kun ${fmtQty(h.quantity)} stk.`);
+          if (q > h.quantity + 1e-9) throw localErr(400, `Du ejer kun ${fmtQty(h.quantity)}\u00a0stk.`);
           const newQty = round6(h.quantity - q);
           if (newQty <= 0) {
             data.holdings = data.holdings.filter((x) => x !== h);
@@ -756,12 +760,20 @@
     if (location.pathname !== path) history.pushState({}, '', path);
     closeMenu();
     closePanel();
+    closeMore();
     render();
     window.scrollTo({ top: 0 });
   }
 
+  // Går man videre fra "Mere", skal arket ikke blive liggende oven på siden.
+  function closeMore() {
+    const dlg = $('#dlg-more');
+    if (dlg?.open) dlg.close();
+  }
+
   window.addEventListener('popstate', () => {
     closePanel();
+    closeMore();
     render();
   });
 
@@ -792,6 +804,10 @@
       if (active) a.setAttribute('aria-current', 'page');
       else a.removeAttribute('aria-current');
     });
+    // "Mere" er selv en fane: den skal lyse op, når man står på en af de sider,
+    // den gemmer på – ellers ser fanebjælken ud som om ingenting er valgt.
+    const mereKnap = $('.tabbar [data-action="more"]');
+    if (mereKnap) mereKnap.classList.toggle('active', ['people', 'settings'].includes(route));
     // Afbryd ikke brugeren midt i et felt ved en stille baggrundsopdatering.
     const active = document.activeElement;
     if (silent && active && active !== document.body && $('#page')?.contains(active)) {
@@ -974,13 +990,13 @@
   function ejertid(dage) {
     if (!isNum(dage)) return '';
     if (dage < 1) return 'i dag';
-    if (dage === 1) return '1 dag';
-    if (dage < 45) return `${dage} dage`;
+    if (dage === 1) return `1${NBSP}dag`;
+    if (dage < 45) return `${dage}${NBSP}dage`;
     const måneder = Math.round(dage / 30.44);
-    if (måneder < 24) return `${måneder} md.`;
+    if (måneder < 24) return `${måneder}${NBSP}md.`;
     const år = Math.floor(måneder / 12);
     const rest = måneder % 12;
-    return rest ? `${år} år og ${rest} md.` : `${år} år`;
+    return rest ? `${år}${NBSP}år og ${rest}${NBSP}md.` : `${år}${NBSP}år`;
   }
 
   // Sætter punktum, medmindre teksten allerede ender på et.
@@ -1253,7 +1269,7 @@
         const beløb = i.amount > 0
           ? `for <b>${fmtPrice(i.amount)} ${esc(i.currency || '')}</b>${i.currency && i.currency !== state.baseCurrency ? ` (${fmtAmount(i.amountBase)})` : ''}`
           : '';
-        return `<span class="tip-event">Købt ${fmtQty(i.quantity)} stk. ${esc(i.name)} ${beløb}</span>`;
+        return `<span class="tip-event">Købt ${fmtQty(i.quantity)}\u00a0stk. ${esc(i.name)} ${beløb}</span>`;
       }).join('');
       tip.innerHTML = `${esc(fmtDate(p.date, { year: true }))}<b class="amount">${fmtAmount(p.value)}</b>`
         + (afkast == null
@@ -1445,13 +1461,13 @@
     </tr></tfoot>` : '';
 
     const cards = rows.map((p) => pendingOnly
-      ? `<div class="hcard"><div class="l1">${esc(p.name || p.symbol)}</div><div class="r1">${sk}</div><div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk.</div><div class="r2">${sk}</div></div>`
+      ? `<div class="hcard"><div class="l1">${esc(p.name || p.symbol)}</div><div class="r1">${sk}</div><div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)}\u00a0stk.</div><div class="r2">${sk}</div></div>`
       // Tre linjer i stedet for to: så er der plads til både valuta og depot,
       // uden at noget klippes af på en smal skærm.
       : `<div class="hcard"${readonly ? '' : ` data-action="open" data-symbol="${esc(p.symbol)}" tabindex="0" role="button"`}>
       <div class="l1">${p.status !== 'ok' ? '<span class="warn-dot"></span>' : ''}${esc(p.name || p.symbol)}</div>
       <div class="r1 amount">${fmtAmount(p.valueBase)}</div>
-      <div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)} stk.${p.accountName && state.account === 'all' ? ` · ${esc(p.accountName)}` : ''}</div>
+      <div class="l2">${esc(p.symbol)} · ${fmtQty(p.quantity)}\u00a0stk.${p.accountName && state.account === 'all' ? ` · ${esc(p.accountName)}` : ''}</div>
       <div class="r2"><span class="${p.status === 'stale' ? 'stale' : signClass(p.dayChangePercent)}">${arrow(p.dayChangePercent)}${fmtPct(p.dayChangePercent)}</span></div>
       <div class="l3">${isNum(p.price) ? `${fmtPrice(p.price)} ${esc(p.currency || '')}` : 'ingen kurs'}</div>
       <div class="r3"><span class="muted">afkast</span> <span class="${signClass(p.gainPercent)}">${fmtPct(p.gainPercent)}</span></div>
@@ -1654,9 +1670,11 @@
         </div>
       </div>
 
-      ${faktaKort('list', 'Om din portefølje', fakta)}
-      ${faktaKort('cart', 'Dine køb', købFakta)}
-      ${faktaKort('trend', 'Rekorder', rekorder, 'Målt på kursbevægelser – dine egne indbetalinger er trukket fra, så en indbetaling ikke tæller som en god dag.')}`;
+      <div class="grid fact-grid">
+        ${faktaKort('list', 'Om din portefølje', fakta)}
+        ${faktaKort('cart', 'Dine køb', købFakta)}
+        ${faktaKort('trend', 'Rekorder', rekorder, 'Målt på kursbevægelser – dine egne indbetalinger er trukket fra, så en indbetaling ikke tæller som en god dag.')}
+      </div>`;
   }
 
   // ---------- Platform: profil, følgere, søgning ----------
@@ -1882,7 +1900,7 @@
         <div>
           <h3>Din position</h3>
           <dl class="kv">
-            <dt>Antal</dt><dd>${fmtQty(p.quantity)} stk.</dd>
+            <dt>Antal</dt><dd>${fmtQty(p.quantity)}\u00a0stk.</dd>
             <dt>Gns. købskurs</dt><dd>${isNum(p.avgPrice) ? `${fmtPrice(p.avgPrice)} ${esc(cur)}` : '<span class="muted">ikke angivet</span>'}</dd>
             <dt>Investeret</dt><dd class="amount">${fmtAmount(p.costBase)}</dd>
             <dt>Værdi</dt><dd class="amount">${fmtAmount(p.valueBase)}</dd>
@@ -2064,7 +2082,7 @@
     add.existing = state.allHoldings.find((h) => sameSlot(h, add.selected.symbol, accountId)) || null;
     const buy = Boolean(add.existing);
     $('#add-mode-notice').innerHTML = buy
-      ? `<div class="notice info">Du ejer allerede <b>${fmtQty(add.existing.quantity)} stk.</b>${accountId ? ` i ${esc(accountName(accountId) || 'depotet')}` : ''}${isNum(add.existing.avgPrice) ? ` til gns. <b>${fmtPrice(add.existing.avgPrice)} ${esc(add.existing.currency || '')}</b>` : ''}. Det du skriver her lægges oveni, og gennemsnitskursen regnes ud for dig.</div>`
+      ? `<div class="notice info">Du ejer allerede <b>${fmtQty(add.existing.quantity)}\u00a0stk.</b>${accountId ? ` i ${esc(accountName(accountId) || 'depotet')}` : ''}${isNum(add.existing.avgPrice) ? ` til gns. <b>${fmtPrice(add.existing.avgPrice)} ${esc(add.existing.currency || '')}</b>` : ''}. Det du skriver her lægges oveni, og gennemsnitskursen regnes ud for dig.</div>`
       : '';
     $('#add-qty-label').textContent = buy ? 'Antal købt' : 'Antal';
     $('#add-price-label').textContent = buy ? 'Købskurs for dette køb' : 'Gns. købskurs';
@@ -2125,11 +2143,11 @@
       const oldQty = add.existing.quantity;
       const newQty = oldQty + qty;
       const newAvg = isNum(add.existing.avgPrice) && isNum(price) ? (oldQty * add.existing.avgPrice + qty * price) / newQty : null;
-      el.innerHTML = `<span>Ny beholdning: <b>${fmtQty(newQty)} stk.</b></span><span>${isNum(newAvg) ? `Ny gns. købskurs: <b>${fmtPrice(newAvg)} ${esc(cur)}</b>` : !isNum(add.existing.avgPrice) ? '<span class="muted">Gns. købskurs er ukendt for det du ejer – ret den under Redigér</span>' : 'Skriv købskursen for at se ny gns. købskurs'}</span>`;
+      el.innerHTML = `<span>Ny beholdning: <b>${fmtQty(newQty)}\u00a0stk.</b></span><span>${isNum(newAvg) ? `Ny gns. købskurs: <b>${fmtPrice(newAvg)} ${esc(cur)}</b>` : !isNum(add.existing.avgPrice) ? '<span class="muted">Gns. købskurs er ukendt for det du ejer – ret den under Redigér</span>' : 'Skriv købskursen for at se ny gns. købskurs'}</span>`;
       $('#add-deviation').innerHTML = '';
       return;
     }
-    if (isNum(qty) && qty > 0) parts.push(`<span>${fmtQty(qty)} stk.</span>`);
+    if (isNum(qty) && qty > 0) parts.push(`<span>${fmtQty(qty)}\u00a0stk.</span>`);
     if (isNum(price) && price >= 0 && isNum(qty) && qty > 0) parts.push(`<span>Investeret: <b>${fmtPrice(qty * price)} ${esc(cur)}</b></span>`);
     if (isNum(qty) && qty > 0 && add.quote && isNum(add.quote.price)) parts.push(`<span>Værdi nu: <b>${fmtPrice(qty * add.quote.price)} ${esc(cur)}</b></span>`);
     el.innerHTML = parts.join('') || '<span class="muted">Skriv antal – og gerne din gennemsnitlige købskurs.</span>';
@@ -2155,7 +2173,7 @@
         if (!isNum(price) || price < 0) return setError('#add-error', 'Skriv kursen, du købte til – så regnes den nye gennemsnitskurs ud.');
         const data = await api('POST', `/api/holdings/${encodeURIComponent(add.existing.id)}/trade`, { type: 'buy', quantity: qty, price });
         $('#dlg-add').close();
-        toast(`Købte ${fmtQty(qty)} stk. ${data.holding.name} – du har nu ${fmtQty(data.holding.quantity)} stk.`, 'success');
+        toast(`Købte ${fmtQty(qty)}\u00a0stk. ${data.holding.name} – du har nu ${fmtQty(data.holding.quantity)}\u00a0stk.`, 'success');
         await afterMutation();
         return;
       }
@@ -2177,9 +2195,40 @@
     const cur = p.currency || '';
     const rækker = [...p.lots]
       .sort((a, b) => String(a.date || '9999').localeCompare(String(b.date || '9999')))
-      .map((l) => `<li><span>${l.date ? esc(fmtDate(l.date, { year: true })) : '<span class="muted">uden dato</span>'}</span><span class="amount">${fmtQty(l.quantity)} stk.</span><span class="amount">${isNum(l.price) ? `${fmtPrice(l.price)} ${esc(cur)}` : '<span class="muted">–</span>'}</span></li>`)
+      .map((l) => `<li><span>${l.date ? esc(fmtDate(l.date, { year: true })) : '<span class="muted">uden dato</span>'}</span><span class="amount">${fmtQty(l.quantity)}\u00a0stk.</span><span class="amount">${isNum(l.price) ? `${fmtPrice(l.price)} ${esc(cur)}` : '<span class="muted">–</span>'}</span></li>`)
       .join('');
     return `<div class="lot-list"><h3>Dine ${p.lots.length} køb</h3><ul>${rækker}</ul></div>`;
+  }
+
+  // ---------- "Mere" på telefon ----------
+  // Fanebjælken har fem pladser. Resten – Folk, Indstillinger og de knapper,
+  // der før lå i toplinjen – ligger her, ét tryk væk.
+
+  function moreItems() {
+    const rute = location.pathname;
+    const punkter = [];
+    if (state.access === 'platform') punkter.push({ href: '/folk', icon: 'users', label: 'Folk', hint: 'Se andres porteføljer' });
+    punkter.push({ href: '/indstillinger', icon: 'settings', label: 'Indstillinger', hint: 'Depoter, valuta, data' });
+    punkter.push({ action: 'privacy', icon: state.privacy ? 'eye-off' : 'eye', label: state.privacy ? 'Vis beløb' : 'Skjul beløb', hint: 'Slør tallene, når nogen kigger med' });
+    punkter.push({ action: 'refresh', icon: 'refresh', label: 'Opdatér kurser', hint: 'Hent de nyeste kurser nu' });
+    if (state.storage === 'server') punkter.push({ action: 'logout', icon: 'logout', label: 'Log ud', danger: true });
+    return punkter.map((p) => ({ ...p, active: p.href === rute }));
+  }
+
+  function renderMore() {
+    const nav = $('#more-nav');
+    if (!nav) return;
+    nav.innerHTML = moreItems().map((p) => {
+      const indhold = `${icon(p.icon)}<span class="sheet-label">${esc(p.label)}${p.hint ? `<span class="sheet-hint">${esc(p.hint)}</span>` : ''}</span>`;
+      return p.href
+        ? `<a href="${p.href}" data-link class="sheet-item${p.active ? ' active' : ''}"${p.active ? ' aria-current="page"' : ''}>${indhold}</a>`
+        : `<button type="button" class="sheet-item${p.danger ? ' danger' : ''}" data-action="${p.action}">${indhold}</button>`;
+    }).join('');
+  }
+
+  function openMore() {
+    renderMore();
+    openDialog('#dlg-more');
   }
 
   // ---------- Redigér ----------
@@ -2294,7 +2343,7 @@
       price = parseInput($('#edit-price').value);
     }
     if (!p || !isNum(qty)) return (el.innerHTML = '');
-    const parts = [`<span>${fmtQty(qty)} stk.</span>`];
+    const parts = [`<span>${fmtQty(qty)}\u00a0stk.</span>`];
     if (isNum(price)) parts.push(`<span>Investeret: <b>${fmtPrice(qty * price)} ${esc(p.currency || '')}</b></span>`);
     if (isNum(p.price)) parts.push(`<span>Værdi nu: <b>${fmtPrice(qty * p.price)} ${esc(p.currency || '')}</b></span>`);
     el.innerHTML = parts.join('');
@@ -2395,18 +2444,18 @@
     const qty = parseInput($('#trade-qty').value);
     const price = parseInput($('#trade-price').value);
     if (!isNum(qty) || qty <= 0) {
-      el.innerHTML = `<span class="muted">Du ejer ${fmtQty(p.quantity)} stk.${isNum(p.avgPrice) ? ` til gns. ${fmtPrice(p.avgPrice)} ${esc(p.currency || '')}` : ''}</span>`;
+      el.innerHTML = `<span class="muted">Du ejer ${fmtQty(p.quantity)}\u00a0stk.${isNum(p.avgPrice) ? ` til gns. ${fmtPrice(p.avgPrice)} ${esc(p.currency || '')}` : ''}</span>`;
       return;
     }
     if (trade.type === 'buy') {
       const newQty = p.quantity + qty;
       const newAvg = isNum(p.avgPrice) && isNum(price) ? (p.quantity * p.avgPrice + qty * price) / newQty : null;
-      el.innerHTML = `<span>Ny beholdning: <b>${fmtQty(newQty)} stk.</b></span><span>${isNum(newAvg) ? `Ny gns. købskurs: <b>${fmtPrice(newAvg)} ${esc(p.currency || '')}</b>` : !isNum(p.avgPrice) ? '<span class="muted">Gns. købskurs forbliver ukendt – ret den under Redigér</span>' : ''}</span>`;
+      el.innerHTML = `<span>Ny beholdning: <b>${fmtQty(newQty)}\u00a0stk.</b></span><span>${isNum(newAvg) ? `Ny gns. købskurs: <b>${fmtPrice(newAvg)} ${esc(p.currency || '')}</b>` : !isNum(p.avgPrice) ? '<span class="muted">Gns. købskurs forbliver ukendt – ret den under Redigér</span>' : ''}</span>`;
     } else {
       const newQty = p.quantity - qty;
       el.innerHTML = newQty < -1e-9
-        ? `<span class="neg">Du ejer kun ${fmtQty(p.quantity)} stk.</span>`
-        : `<span>Tilbage: <b>${fmtQty(Math.max(0, newQty))} stk.</b>${newQty <= 1e-9 ? ' – aktien fjernes fra porteføljen' : ''}</span>${isNum(price) ? `<span>Salgssum: <b>${fmtPrice(qty * price)} ${esc(p.currency || '')}</b></span>` : ''}`;
+        ? `<span class="neg">Du ejer kun ${fmtQty(p.quantity)}\u00a0stk.</span>`
+        : `<span>Tilbage: <b>${fmtQty(Math.max(0, newQty))}\u00a0stk.</b>${newQty <= 1e-9 ? ' – aktien fjernes fra porteføljen' : ''}</span>${isNum(price) ? `<span>Salgssum: <b>${fmtPrice(qty * price)} ${esc(p.currency || '')}</b></span>` : ''}`;
     }
   }
 
@@ -2426,7 +2475,7 @@
         toast(`${data.holding.name} er solgt helt og fjernet fra porteføljen`, 'success');
         closePanel();
       } else {
-        toast(trade.type === 'buy' ? `Købte ${fmtQty(qty)} stk. ${data.holding.name}` : `Solgte ${fmtQty(qty)} stk. ${data.holding.name}`, 'success');
+        toast(trade.type === 'buy' ? `Købte ${fmtQty(qty)}\u00a0stk. ${data.holding.name}` : `Solgte ${fmtQty(qty)}\u00a0stk. ${data.holding.name}`, 'success');
       }
       await afterMutation();
     } catch (err) {
@@ -2439,7 +2488,7 @@
   async function deleteHolding(id) {
     const p = positions().find((x) => x.id === id);
     if (!p) return;
-    const ok = await confirmDialog({ title: `Slet ${p.name || p.symbol}?`, text: `${fmtQty(p.quantity)} stk. fjernes fra porteføljen. Det kan ikke fortrydes.` });
+    const ok = await confirmDialog({ title: `Slet ${p.name || p.symbol}?`, text: `${fmtQty(p.quantity)}\u00a0stk. fjernes fra porteføljen. Det kan ikke fortrydes.` });
     if (!ok) return;
     try {
       await api('DELETE', `/api/holdings/${encodeURIComponent(id)}`);
@@ -2872,11 +2921,15 @@
 
     switch (action) {
       case 'add': return openAdd(el.dataset.query || '');
+      case 'more': return openMore();
       case 'refresh': return manualRefresh();
       case 'privacy':
         state.privacy = !state.privacy;
         storageSet('privacy', state.privacy ? '1' : '0');
-        return render();
+        render();
+        // Står man i arket, skal teksten skifte med, ikke blive stående.
+        if ($('#dlg-more')?.open) renderMore();
+        return;
       case 'logout':
         api('POST', '/api/auth/logout').finally(() => location.replace('/login'));
         return;

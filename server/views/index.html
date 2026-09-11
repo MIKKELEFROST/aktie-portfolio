@@ -77,13 +77,14 @@
 
     <main class="content" id="page"></main>
 
+    <!-- Fem pladser er, hvad der er plads til på en telefon. Folk, Indstillinger
+         og de småting, der før lå i toplinjen, samles under "Mere". -->
     <nav class="tabbar" aria-label="Navigation">
       <a href="/" data-link data-nav="/"><svg class="icon"><use href="#i-grid"/></svg>Overblik</a>
-      <a href="/beholdninger" data-link data-nav="/beholdninger"><svg class="icon"><use href="#i-list"/></svg><span class="tab-long">Beholdninger</span><span class="tab-short">Aktier</span></a>
+      <a href="/beholdninger" data-link data-nav="/beholdninger"><svg class="icon"><use href="#i-list"/></svg>Aktier</a>
       <button class="tab-add" data-action="add"><svg class="icon"><use href="#i-plus"/></svg>Tilføj</button>
-      <a href="/analyse" data-link data-nav="/analyse"><svg class="icon"><use href="#i-spark"/></svg><span class="tab-long">Analyse</span><span class="tab-short">Tal</span></a>
-      <a href="/folk" data-link data-nav="/folk" class="only-platform"><svg class="icon"><use href="#i-users"/></svg>Folk</a>
-      <a href="/indstillinger" data-link data-nav="/indstillinger"><svg class="icon"><use href="#i-settings"/></svg><span class="tab-long">Indstillinger</span><span class="tab-short">Mere</span></a>
+      <a href="/analyse" data-link data-nav="/analyse"><svg class="icon"><use href="#i-spark"/></svg>Analyse</a>
+      <button data-action="more" aria-haspopup="dialog"><svg class="icon"><use href="#i-more"/></svg>Mere</button>
     </nav>
   </div>
 </div>
@@ -198,6 +199,11 @@
 </dialog>
 
 <!-- Køb til / sælg -->
+<dialog id="dlg-more" class="sheet">
+  <div class="dialog-head"><h2>Mere</h2><button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Luk"><svg class="icon"><use href="#i-x"/></svg></button></div>
+  <div class="dialog-body"><nav class="sheet-nav" id="more-nav" aria-label="Flere handlinger"></nav></div>
+</dialog>
+
 <dialog id="dlg-trade">
   <form method="dialog" id="form-trade" novalidate>
     <div class="dialog-head"><h2 id="dlg-trade-title">Køb til</h2><button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Luk"><svg class="icon"><use href="#i-x"/></svg></button></div>
