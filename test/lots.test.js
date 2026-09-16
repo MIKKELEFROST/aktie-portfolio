@@ -430,3 +430,87 @@ test('graf: et køb få dage før første kurs får stadig sin markør', async (
     server.close();
   }
 });
+
+// ---------- flere køb på én gang ----------
+
+test('køb til med en liste: flere handler skrives ind på én gang', async () => {
+  const { call, server } = await start();
+  try {
+    const id = (await call('POST', '/api/holdings', { symbol: 'NOVO-B.CO', quantity: 10, avgPrice: 100, purchasedAt: '2024-01-10' })).json.holding.id;
+    const efter = await call('POST', `/api/holdings/${id}/trade`, {
+      type: 'buy',
+      lots: [
+        { date: '2024-06-10', quantity: 10, price: 300 },
+        { date: '2024-09-10', quantity: 20, price: 250 },
+      ],
+    });
+    assert.equal(efter.status, 200);
+    assert.equal(efter.json.holding.lots.length, 3, 'det gamle køb plus de to nye');
+    assert.equal(efter.json.holding.quantity, 40);
+    assert.equal(efter.json.holding.avgPrice, 225); // (10*100 + 10*300 + 20*250) / 40
+    assert.equal(efter.json.holding.purchasedAt, '2024-01-10');
+  } finally {
+    server.close();
+  }
+});
+
+test('køb til med en liste på en aktie, der allerede føres køb for køb', async () => {
+  const { call, server } = await start();
+  try {
+    const id = (await call('POST', '/api/holdings', {
+      symbol: 'NOVO-B.CO',
+      quantity: 40,
+      lots: [
+        { date: '2024-01-10', quantity: 10, price: 100 },
+        { date: '2024-07-10', quantity: 30, price: 200 },
+      ],
+    })).json.holding.id;
+    const efter = await call('POST', `/api/holdings/${id}/trade`, {
+      type: 'buy',
+      lots: [{ date: '2024-11-01', quantity: 10, price: 400 }],
+    });
+    assert.equal(efter.json.holding.lots.length, 3);
+    assert.equal(efter.json.holding.quantity, 50);
+    assert.equal(efter.json.holding.avgPrice, 220); // (1000 + 6000 + 4000) / 50
+  } finally {
+    server.close();
+  }
+});
+
+test('køb til med en liste uden datoer: købene tæller med, men datoen bliver ukendt', async () => {
+  const { call, server } = await start();
+  try {
+    const id = (await call('POST', '/api/holdings', { symbol: 'NOVO-B.CO', quantity: 10, avgPrice: 100, purchasedAt: '2024-01-10' })).json.holding.id;
+    const efter = await call('POST', `/api/holdings/${id}/trade`, {
+      type: 'buy',
+      lots: [{ quantity: 10, price: 300 }],
+    });
+    assert.equal(efter.json.holding.quantity, 20);
+    assert.equal(efter.json.holding.avgPrice, 200);
+    assert.equal(efter.json.holding.purchasedAt, null, 'mangler der dato på ét køb, kan vi ikke sige hvornår beholdningen blev startet');
+  } finally {
+    server.close();
+  }
+});
+
+test('køb til: en tom liste afvises', async () => {
+  const { call, server } = await start();
+  try {
+    const id = (await call('POST', '/api/holdings', { symbol: 'NOVO-B.CO', quantity: 10, avgPrice: 100 })).json.holding.id;
+    const efter = await call('POST', `/api/holdings/${id}/trade`, { type: 'buy', lots: [] });
+    assert.equal(efter.status, 400);
+  } finally {
+    server.close();
+  }
+});
+
+test('salg kan ikke sendes som en liste', async () => {
+  const { call, server } = await start();
+  try {
+    const id = (await call('POST', '/api/holdings', { symbol: 'NOVO-B.CO', quantity: 10, avgPrice: 100 })).json.holding.id;
+    const efter = await call('POST', `/api/holdings/${id}/trade`, { type: 'sell', lots: [{ quantity: 5 }] });
+    assert.equal(efter.status, 400);
+  } finally {
+    server.close();
+  }
+});

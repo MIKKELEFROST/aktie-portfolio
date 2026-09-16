@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { newId } from './store.js';
-import { computeAnalytics, computeHistoryFacts, computePortfolio, computeValueHistory, dayKey, firstPurchaseDate, heldDays, narrowRange, parseDanishNumber, rangeDays, reduceLots, summarizeLots } from './portfolio-math.js';
+import { computeAnalytics, computeHistoryFacts, computePortfolio, computeValueHistory, dayKey, firstPurchaseDate, heldDays, narrowRange, parseDanishNumber, rangeDays, reduceLots, round, summarizeLots } from './portfolio-math.js';
 import { resolveSecurities } from './resolve.js';
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter, passwordVersion } from './auth.js';
 import { createAccounts, publicProfile, SignupError, normalizeEmail } from './accounts.js';
@@ -863,27 +863,34 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     },
 
     // Køb til / sælg: opdaterer antal og (ved køb) vægtet gennemsnitskurs.
+    // Et køb kan komme alene (quantity/price/date) eller som en liste i lots,
+    // så flere handler kan skrives ind på én gang.
     async trade(req, res, url, params) {
       const body = await readJsonBody(req);
       const type = body.type === 'sell' ? 'sell' : body.type === 'buy' ? 'buy' : null;
       if (!type) throw new HttpError(400, 'Type skal være "buy" eller "sell"');
-      const quantity = parseQuantity(body.quantity);
-      const price = parseNumber(body.price, 'Kurs', { min: 0, allowNull: type === 'sell' });
-      const date = parsePurchaseDate(body.date);
+      if (type === 'sell' && body.lots !== undefined) throw new HttpError(400, 'Et salg skrives som ét antal, ikke som en liste');
+      const flere = type === 'buy' && body.lots !== undefined ? (parseLots(body.lots) || []) : null;
+      if (flere && !flere.length) throw new HttpError(400, 'Skriv mindst ét køb');
+      const quantity = flere ? round(flere.reduce((s, l) => s + l.quantity, 0), 6) : parseQuantity(body.quantity);
+      const price = flere ? null : parseNumber(body.price, 'Kurs', { min: 0, allowNull: type === 'sell' });
+      const date = flere ? null : parsePurchaseDate(body.date);
       let result;
       await (await own(req)).update((draft) => {
         const h = findHolding(draft, params.id);
         const oldQty = Number(h.quantity) || 0;
         if (type === 'buy') {
-          // Føres aktien køb for køb – eller skriver man en dato på dette køb –
-          // lægges købet i listen, og antal og gennemsnitskurs regnes derudfra.
+          // Føres aktien køb for køb – eller skriver man datoer på det, der
+          // købes nu – lægges købene i listen, og antal og gennemsnitskurs
+          // regnes derudfra.
           const førerKøb = Array.isArray(h.lots) && h.lots.length > 0;
-          if (førerKøb || date) {
+          if (førerKøb || flere || date) {
+            const nye = flere || [{ id: newId(), date, quantity, price }];
             const lots = førerKøb ? [...h.lots] : (oldQty > 0
               ? [{ id: newId(), date: h.purchasedAt ?? null, quantity: oldQty, price: h.avgPrice ?? null }]
               : []);
-            if (lots.length >= MAX_LOTS) throw new HttpError(409, `Der kan højst registreres ${MAX_LOTS} køb pr. aktie`);
-            lots.push({ id: newId(), date, quantity, price });
+            if (lots.length + nye.length > MAX_LOTS) throw new HttpError(409, `Der kan højst registreres ${MAX_LOTS} køb pr. aktie`);
+            lots.push(...nye);
             h.lots = parseLots(lots);
             applyLots(h);
           } else {
