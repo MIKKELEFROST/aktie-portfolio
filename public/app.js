@@ -400,16 +400,20 @@
       if (!h) throw localErr(404, 'Aktien findes ikke i porteføljen');
       if (m[2] && method === 'POST') {
         const type = body.type === 'sell' ? 'sell' : 'buy';
-        const q = localQty(body.quantity);
-        const date = localDate(body.date);
+        // Køb kan komme alene eller som en liste – flere handler på én gang.
+        const flere = type === 'buy' && body.lots !== undefined ? (localLots(body.lots) || []) : null;
+        if (flere && !flere.length) throw localErr(400, 'Skriv mindst ét køb');
+        const q = flere ? round6(flere.reduce((s, l) => s + Number(l.quantity), 0)) : localQty(body.quantity);
+        const date = flere ? null : localDate(body.date);
         if (type === 'buy') {
-          const price = localPrice(body.price, { allowNull: false });
+          const price = flere ? null : localPrice(body.price, { allowNull: false });
           const oldQty = Number(h.quantity) || 0;
           const førerKøb = Array.isArray(h.lots) && h.lots.length > 0;
-          if (førerKøb || date) {
+          if (førerKøb || flere || date) {
+            const nye = flere || [{ id: newLocalId(), date, quantity: q, price }];
             const lots = førerKøb ? [...h.lots] : (oldQty > 0 ? [{ id: newLocalId(), date: h.purchasedAt ?? null, quantity: oldQty, price: h.avgPrice ?? null }] : []);
-            if (lots.length >= 100) throw localErr(409, 'Der kan højst registreres 100 køb pr. aktie');
-            lots.push({ id: newLocalId(), date, quantity: q, price });
+            if (lots.length + nye.length > 100) throw localErr(409, 'Der kan højst registreres 100 køb pr. aktie');
+            lots.push(...nye);
             h.lots = localLots(lots);
             localApplyLots(h);
           } else {
@@ -1968,7 +1972,9 @@
 
   // ---------- Tilføj ----------
 
-  const add = { selected: null, results: [], active: -1, timer: null, seq: 0, quote: null, lastQuery: '', existing: null };
+  // add.lots er null, når der skrives ét samlet antal, og en liste af rækker,
+  // når man fører flere køb ind på én gang.
+  const add = { selected: null, results: [], active: -1, timer: null, seq: 0, quote: null, lastQuery: '', existing: null, lots: null };
 
   // Udfylder et depot-<select> med de kendte depoter + "Uden depot".
   function fillAccountSelect(sel, value) {
@@ -1990,6 +1996,7 @@
     add.active = -1;
     add.quote = null;
     add.existing = null;
+    add.lots = null;
     $('#add-search').value = query;
     add.lastQuery = query;
     $('#add-results').innerHTML = '';
@@ -2088,15 +2095,62 @@
     $('#add-price-label').textContent = buy ? 'Købskurs for dette køb' : 'Gns. købskurs';
     $('#add-price-help').textContent = buy ? 'Kursen du købte til denne gang.' : 'Valgfri. Uden købskurs vises værdi, men ikke afkast.';
     $('#add-note').closest('.field').classList.toggle('hidden', buy);
-    $('#add-date').closest('.field').classList.toggle('hidden', buy);
+    // Datoen skal også kunne skrives, når man køber til en aktie, man har i
+    // forvejen – ellers lander købet i listen uden at man kan se hvornår.
+    $('#add-date-help').textContent = buy
+      ? 'Skriver du datoen, står købet for sig i listen over dine køb.'
+      : 'Bruges til at vise, hvor længe du har ejet den, og hvad afkastet svarer til pr. år.';
+    $('#add-lots-on').textContent = buy ? 'Flere køb på én gang?' : 'Købt ad flere omgange?';
+    $('#add-lots-title').textContent = buy ? 'Køb, der lægges til' : 'Dine køb';
     $('#add-submit').textContent = buy ? 'Læg til beholdning' : 'Tilføj';
+    renderAddLots();
+  }
+
+  // ---------- Køb for køb i Tilføj-dialogen ----------
+  // Samme rækker som i Redigér, så flere køb kan skrives ind på én gang – både
+  // på en ny aktie og på en, der allerede ligger i porteføljen.
+
+  function renderAddLots() {
+    const on = Array.isArray(add.lots);
+    $('#add-lots').classList.toggle('hidden', !on);
+    $('#add-date-field').classList.toggle('hidden', on);
+    $('#add-qty').closest('.field-row').classList.toggle('hidden', on);
+    if (on) {
+      $('#add-lot-rows').innerHTML = add.lots.map(lotRowHtml).join('');
+      $('#add-lot-add').disabled = add.lots.length >= MAX_LOTS;
+    }
     updateAddSummary();
+  }
+
+  // Slår man flere køb til, bliver det, der allerede står, til det første køb,
+  // og der lægges en tom række til, så man kan skrive videre med det samme.
+  function addLotsOn() {
+    const qty = parseInput($('#add-qty').value);
+    const price = parseInput($('#add-price').value);
+    const første = isNum(qty) && qty > 0
+      ? { date: $('#add-date').value || '', quantity: fmtRaw(qty), price: isNum(price) ? fmtRaw(price) : '' }
+      : { date: '', quantity: '', price: '' };
+    add.lots = [første, { date: '', quantity: '', price: '' }];
+    renderAddLots();
+    focusSoon(`#add-lot-rows .lot-row:${isNum(qty) && qty > 0 ? 'last' : 'first'}-child [data-lot="date"]`, 30);
+  }
+
+  function addLotsOff() {
+    const rows = readLotRows('add');
+    const sum = sumLots(rows);
+    const datoer = rows.map((r) => r.date).filter(Boolean).sort();
+    add.lots = null;
+    renderAddLots();
+    if (sum.quantity > 0) $('#add-qty').value = fmtRaw(round6(sum.quantity));
+    if (isNum(sum.avgPrice)) $('#add-price').value = fmtRaw(afrundKurs(sum.avgPrice));
+    if (datoer.length) $('#add-date').value = datoer[0];
   }
 
   async function selectStock(result) {
     add.selected = result;
     add.quote = null;
     add.existing = null;
+    add.lots = null;
     $('#add-selected').innerHTML = `<span class="stock-avatar">${esc(initials(result.symbol))}</span><span><span class="name">${esc(result.name)}</span><br><span class="meta">${esc(result.symbol)}${result.exchange ? ` · ${esc(result.exchange)}` : ''}</span></span><span class="meta" id="add-quote-info">Henter kurs…</span>`;
     $('#add-price-addon').textContent = result.currency || '';
     $('#add-notice').innerHTML = '';
@@ -2134,10 +2188,27 @@
   }
 
   function updateAddSummary() {
-    const qty = parseInput($('#add-qty').value);
-    const price = parseInput($('#add-price').value);
     const cur = add.quote?.currency || add.selected?.currency || '';
     const el = $('#add-summary');
+    let qty;
+    let price;
+    if (Array.isArray(add.lots)) {
+      const rows = readLotRows('add');
+      const sum = sumLots(rows);
+      qty = sum.quantity || null;
+      price = sum.avgPrice;
+      const skrevne = rows.filter((r) => String(r.quantity).trim() || String(r.price).trim() || r.date);
+      const datoer = skrevne.map((r) => r.date).filter(Boolean).sort();
+      const udenDato = skrevne.length - datoer.length;
+      const dele = [`${skrevne.length} køb`];
+      if (udenDato === 0 && datoer.length) dele.push(`første ${esc(fmtDate(datoer[0], { year: true }))}`);
+      if (udenDato) dele.push(`<span class="neg">${udenDato} mangler dato</span>`);
+      if (sum.mangler) dele.push(`<span class="neg">${sum.mangler} mangler antal</span>`);
+      $('#add-lots-sum').innerHTML = skrevne.length === 0 ? '<span class="muted">Skriv dit første køb.</span>' : dele.join(' · ');
+    } else {
+      qty = parseInput($('#add-qty').value);
+      price = parseInput($('#add-price').value);
+    }
     const parts = [];
     if (add.existing && isNum(qty) && qty > 0) {
       const oldQty = add.existing.quantity;
@@ -2160,26 +2231,55 @@
   async function submitAdd() {
     setError('#add-error', '');
     if (!add.selected) return;
-    const qty = parseInput($('#add-qty').value);
-    const price = parseInput($('#add-price').value);
-    if (!isNum(qty) || qty <= 0) return setError('#add-error', 'Antal skal være større end 0.');
-    if ($('#add-price').value.trim() && (!isNum(price) || price < 0)) return setError('#add-error', 'Købskursen skal være et tal.');
+    const flereKøb = Array.isArray(add.lots);
+    let lots = null;
+    let qty;
+    let price;
+    if (flereKøb) {
+      const læst = lotsFromRows(readLotRows('add'));
+      if (læst.error) return setError('#add-error', læst.error);
+      lots = læst.lots;
+      const sum = sumLots(lots.map((l) => ({ date: l.date || '', quantity: l.quantity, price: l.price ?? '' })));
+      qty = sum.quantity;
+      price = sum.avgPrice;
+    } else {
+      qty = parseInput($('#add-qty').value);
+      price = parseInput($('#add-price').value);
+      if (!isNum(qty) || qty <= 0) return setError('#add-error', 'Antal skal være større end 0.');
+      if ($('#add-price').value.trim() && (!isNum(price) || price < 0)) return setError('#add-error', 'Købskursen skal være et tal.');
+    }
     const accountId = $('#add-account').value || null;
+    const dato = $('#add-date').value || null;
     const btn = $('#add-submit');
     btn.disabled = true;
     try {
       if (accountId) storageSet('lastAccount', accountId);
       if (add.existing) {
-        if (!isNum(price) || price < 0) return setError('#add-error', 'Skriv kursen, du købte til – så regnes den nye gennemsnitskurs ud.');
-        const data = await api('POST', `/api/holdings/${encodeURIComponent(add.existing.id)}/trade`, { type: 'buy', quantity: qty, price });
+        // Med dato eller flere køb lander de i listen over køb, så man kan se
+        // hver handel for sig. Uden dato skal kursen være der, ellers kan den
+        // nye gennemsnitskurs ikke regnes ud.
+        if (!flereKøb && !dato && (!isNum(price) || price < 0)) return setError('#add-error', 'Skriv kursen, du købte til – så regnes den nye gennemsnitskurs ud.');
+        const body = flereKøb
+          ? { type: 'buy', lots }
+          : { type: 'buy', quantity: qty, price, ...(dato ? { date: dato } : {}) };
+        const data = await api('POST', `/api/holdings/${encodeURIComponent(add.existing.id)}/trade`, body);
         $('#dlg-add').close();
         toast(`Købte ${fmtQty(qty)}\u00a0stk. ${data.holding.name} – du har nu ${fmtQty(data.holding.quantity)}\u00a0stk.`, 'success');
         await afterMutation();
         return;
       }
-      const data = await api('POST', '/api/holdings', { symbol: add.selected.symbol, quantity: qty, avgPrice: price ?? null, note: $('#add-note').value, purchasedAt: $('#add-date').value || null, name: add.selected.name, accountId });
+      const data = await api('POST', '/api/holdings', {
+        symbol: add.selected.symbol,
+        quantity: qty,
+        avgPrice: isNum(price) ? price : null,
+        note: $('#add-note').value,
+        purchasedAt: flereKøb ? null : dato,
+        ...(flereKøb ? { lots } : {}),
+        name: add.selected.name,
+        accountId,
+      });
       $('#dlg-add').close();
-      toast(`${data.holding.name} er tilføjet${accountId ? ` i ${accountName(accountId)}` : ''}`, 'success');
+      toast(`${data.holding.name} er tilføjet${accountId ? ` i ${accountName(accountId)}` : ''}${flereKøb ? ` med ${lots.length} køb` : ''}`, 'success');
       if (data.warning) toast(data.warning);
       await afterMutation();
     } catch (err) {
@@ -2261,12 +2361,29 @@
   }
 
   // Læser rækkerne tilbage fra DOM'en, så tastede værdier overlever en ny tegning.
-  function readLotRows() {
-    return $$('#edit-lot-rows .lot-row').map((row) => ({
+  // Køb-rækkerne bruges både i Redigér og i Tilføj – pfx siger hvilken dialog.
+  function readLotRows(pfx = 'edit') {
+    return $$(`#${pfx}-lot-rows .lot-row`).map((row) => ({
       date: row.querySelector('[data-lot="date"]').value,
       quantity: row.querySelector('[data-lot="qty"]').value,
       price: row.querySelector('[data-lot="price"]').value,
     }));
+  }
+
+  // Læser køb-rækkerne som en liste, der kan sendes til serveren. Returnerer
+  // en fejltekst i stedet, hvis en række ikke kan bruges.
+  function lotsFromRows(rows) {
+    const brugte = rows.filter((r) => String(r.quantity).trim() || String(r.price).trim() || r.date);
+    if (!brugte.length) return { error: 'Skriv mindst ét køb.' };
+    const lots = [];
+    for (const [i, r] of brugte.entries()) {
+      const q = parseInput(r.quantity);
+      if (!isNum(q) || q <= 0) return { error: `Køb nr. ${i + 1}: antal skal være større end 0.` };
+      const pr = String(r.price).trim() ? parseInput(r.price) : null;
+      if (String(r.price).trim() && (!isNum(pr) || pr < 0)) return { error: `Køb nr. ${i + 1}: kursen skal være et tal.` };
+      lots.push({ date: r.date || null, quantity: q, price: pr });
+    }
+    return { lots };
   }
 
   // Antal og gennemsnitskurs regnet ud af købene – samme regnestykke som på serveren.
@@ -2375,17 +2492,9 @@
     setError('#edit-error', '');
     const body = { note: $('#edit-note').value };
     if (Array.isArray(edit.lots)) {
-      const rows = readLotRows().filter((r) => String(r.quantity).trim() || String(r.price).trim() || r.date);
-      if (!rows.length) return setError('#edit-error', 'Skriv mindst ét køb – eller vælg "Brug samlet antal".');
-      const lots = [];
-      for (const [i, r] of rows.entries()) {
-        const q = parseInput(r.quantity);
-        if (!isNum(q) || q <= 0) return setError('#edit-error', `Køb nr. ${i + 1}: antal skal være større end 0.`);
-        const pr = String(r.price).trim() ? parseInput(r.price) : null;
-        if (String(r.price).trim() && (!isNum(pr) || pr < 0)) return setError('#edit-error', `Køb nr. ${i + 1}: kursen skal være et tal.`);
-        lots.push({ date: r.date || null, quantity: q, price: pr });
-      }
-      body.lots = lots;
+      const læst = lotsFromRows(readLotRows());
+      if (læst.error) return setError('#edit-error', læst.error === 'Skriv mindst ét køb.' ? 'Skriv mindst ét køb – eller vælg "Brug samlet antal".' : læst.error);
+      body.lots = læst.lots;
     } else {
       const qty = parseInput($('#edit-qty').value);
       const priceRaw = $('#edit-price').value.trim();
@@ -2887,19 +2996,24 @@
     }
     if (e.target.closest('#edit-lots-on')) { lotsOn(); return; }
     if (e.target.closest('#edit-lots-off')) { lotsOff(); return; }
-    if (e.target.closest('#edit-lot-add')) {
-      edit.lots = [...readLotRows(), { date: '', quantity: '', price: '' }];
-      renderLots();
-      focusSoon('#edit-lot-rows .lot-row:last-child [data-lot="qty"]', 30);
+    if (e.target.closest('#add-lots-on')) { addLotsOn(); return; }
+    if (e.target.closest('#add-lots-off')) { addLotsOff(); return; }
+    // Køb-rækkerne findes i to dialoger; pfx siger hvilken der blev trykket i.
+    const lotAdd = e.target.closest('#edit-lot-add, #add-lot-add');
+    if (lotAdd) {
+      const pfx = lotAdd.id.startsWith('add') ? 'add' : 'edit';
+      const rows = [...readLotRows(pfx), { date: '', quantity: '', price: '' }];
+      if (pfx === 'add') { add.lots = rows; renderAddLots(); } else { edit.lots = rows; renderLots(); }
+      focusSoon(`#${pfx}-lot-rows .lot-row:last-child [data-lot="date"]`, 30);
       return;
     }
     const lotDel = e.target.closest('[data-lot-del]');
     if (lotDel) {
-      const rows = readLotRows();
-      const i = $$('#edit-lot-rows .lot-row').indexOf(lotDel.closest('.lot-row'));
+      const pfx = lotDel.closest('#add-lot-rows') ? 'add' : 'edit';
+      const rows = readLotRows(pfx);
+      const i = $$(`#${pfx}-lot-rows .lot-row`).indexOf(lotDel.closest('.lot-row'));
       rows.splice(i, 1);
-      edit.lots = rows;
-      renderLots();
+      if (pfx === 'add') { add.lots = rows; renderAddLots(); } else { edit.lots = rows; renderLots(); }
       return;
     }
     if (e.target.closest('#trade-sell-all')) {
@@ -3052,7 +3166,10 @@
       }
       add.timer = setTimeout(() => runSearch(q), 250);
     } else if (id === 'add-qty' || id === 'add-price') updateAddSummary();
-    else if (e.target.dataset.lot !== undefined) updateEditSummary();
+    else if (e.target.dataset.lot !== undefined) {
+      if (e.target.closest('#add-lot-rows')) updateAddSummary();
+      else updateEditSummary();
+    }
     else if (id === 'edit-qty' || id === 'edit-price') updateEditSummary();
     else if (id === 'trade-qty' || id === 'trade-price') updateTradeSummary();
     else if (e.target.dataset.importSymbol !== undefined) {

@@ -125,10 +125,23 @@
             <span class="help" id="add-price-help">Valgfri. Uden købskurs vises værdi, men ikke afkast.</span>
           </div>
         </div>
-        <div class="field">
+        <div class="field" id="add-date-field">
           <label for="add-date" id="add-date-label">Købt den <span class="muted">(valgfri)</span></label>
           <input class="input" id="add-date" type="date" autocomplete="off">
-          <span class="help">Bruges til at vise, hvor længe du har ejet den, og hvad afkastet svarer til pr. år.</span>
+          <span class="help" id="add-date-help">Bruges til at vise, hvor længe du har ejet den, og hvad afkastet svarer til pr. år.</span>
+          <button type="button" class="btn btn-ghost btn-sm lots-toggle" id="add-lots-on">Flere køb på én gang?</button>
+        </div>
+        <div class="lots hidden" id="add-lots">
+          <div class="lots-head">
+            <h3 id="add-lots-title">Dine køb</h3>
+            <button type="button" class="btn btn-ghost btn-sm" id="add-lots-off">Brug ét samlet antal</button>
+          </div>
+          <div class="lot-head-row" aria-hidden="true">
+            <span class="lot-head-date">Dato</span><span>Antal</span><span>Kurs</span><span class="lot-head-spacer"></span>
+          </div>
+          <div id="add-lot-rows"></div>
+          <button type="button" class="btn btn-sm" id="add-lot-add">+ Tilføj køb</button>
+          <p class="lots-sum" id="add-lots-sum"></p>
         </div>
         <div class="field">
           <label for="add-note">Note <span class="muted">(valgfri)</span></label>
