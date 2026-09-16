@@ -1977,7 +1977,7 @@
 
   // add.lots er null, når der skrives ét samlet antal, og en liste af rækker,
   // når man fører flere køb ind på én gang.
-  const add = { selected: null, results: [], active: -1, timer: null, seq: 0, quote: null, lastQuery: '', existing: null, lots: null };
+  const add = { selected: null, results: [], active: -1, timer: null, seq: 0, quote: null, lastQuery: '', existing: null, existingPos: null, lots: null };
 
   // Udfylder et depot-<select> med de kendte depoter + "Uden depot".
   function fillAccountSelect(sel, value) {
@@ -1999,6 +1999,7 @@
     add.active = -1;
     add.quote = null;
     add.existing = null;
+    add.existingPos = null;
     add.lots = null;
     $('#add-search').value = query;
     add.lastQuery = query;
@@ -2090,9 +2091,14 @@
     if (!add.selected) return;
     const accountId = $('#add-account').value || null;
     add.existing = state.allHoldings.find((h) => sameSlot(h, add.selected.symbol, accountId)) || null;
+    // Beskeden skal vise det antal, dashboardet viser – altså efter et
+    // eventuelt split – ikke de rå tal, købene er skrevet med.
+    add.existingPos = add.existing ? (positions().find((x) => x.id === add.existing.id) || null) : null;
     const buy = Boolean(add.existing);
+    const ejer = add.existingPos?.quantity ?? add.existing?.quantity;
+    const ejerKurs = add.existingPos?.avgPrice ?? add.existing?.avgPrice;
     $('#add-mode-notice').innerHTML = buy
-      ? `<div class="notice info">Du ejer allerede <b>${fmtQty(add.existing.quantity)}\u00a0stk.</b>${accountId ? ` i ${esc(accountName(accountId) || 'depotet')}` : ''}${isNum(add.existing.avgPrice) ? ` til gns. <b>${fmtPrice(add.existing.avgPrice)} ${esc(add.existing.currency || '')}</b>` : ''}. Det du skriver her lægges oveni, og gennemsnitskursen regnes ud for dig.</div>`
+      ? `<div class="notice info">Du ejer allerede <b>${fmtQty(ejer)}\u00a0stk.</b>${accountId ? ` i ${esc(accountName(accountId) || 'depotet')}` : ''}${isNum(ejerKurs) ? ` til gns. <b>${fmtPrice(ejerKurs)} ${esc(add.existing.currency || '')}</b>` : ''}${add.existingPos?.splitAdjusted ? ' <span class="muted">(efter split)</span>' : ''}. Det du skriver her lægges oveni, og gennemsnitskursen regnes ud for dig.</div>`
       : '';
     $('#add-qty-label').textContent = buy ? 'Antal købt' : 'Antal';
     $('#add-price-label').textContent = buy ? 'Købskurs for dette køb' : 'Gns. købskurs';
@@ -2153,6 +2159,7 @@
     add.selected = result;
     add.quote = null;
     add.existing = null;
+    add.existingPos = null;
     add.lots = null;
     $('#add-selected').innerHTML = `<span class="stock-avatar">${esc(initials(result.symbol))}</span><span><span class="name">${esc(result.name)}</span><br><span class="meta">${esc(result.symbol)}${result.exchange ? ` · ${esc(result.exchange)}` : ''}</span></span><span class="meta" id="add-quote-info">Henter kurs…</span>`;
     $('#add-price-addon').textContent = result.currency || '';
@@ -2214,10 +2221,11 @@
     }
     const parts = [];
     if (add.existing && isNum(qty) && qty > 0) {
-      const oldQty = add.existing.quantity;
+      const oldQty = add.existingPos?.quantity ?? add.existing.quantity;
+      const oldAvg = add.existingPos?.avgPrice ?? add.existing.avgPrice;
       const newQty = oldQty + qty;
-      const newAvg = isNum(add.existing.avgPrice) && isNum(price) ? (oldQty * add.existing.avgPrice + qty * price) / newQty : null;
-      el.innerHTML = `<span>Ny beholdning: <b>${fmtQty(newQty)}\u00a0stk.</b></span><span>${isNum(newAvg) ? `Ny gns. købskurs: <b>${fmtPrice(newAvg)} ${esc(cur)}</b>` : !isNum(add.existing.avgPrice) ? '<span class="muted">Gns. købskurs er ukendt for det du ejer – ret den under Redigér</span>' : 'Skriv købskursen for at se ny gns. købskurs'}</span>`;
+      const newAvg = isNum(oldAvg) && isNum(price) ? (oldQty * oldAvg + qty * price) / newQty : null;
+      el.innerHTML = `<span>Ny beholdning: <b>${fmtQty(newQty)}\u00a0stk.</b></span><span>${isNum(newAvg) ? `Ny gns. købskurs: <b>${fmtPrice(newAvg)} ${esc(cur)}</b>` : !isNum(oldAvg) ? '<span class="muted">Gns. købskurs er ukendt for det du ejer – ret den under Redigér</span>' : 'Skriv købskursen for at se ny gns. købskurs'}</span>`;
       $('#add-deviation').innerHTML = '';
       return;
     }

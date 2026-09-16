@@ -142,6 +142,16 @@ export function dividendCash(lots, events) {
   return { total: round(total, 2), count: antalMed, lastDate: sidsteDato, lastAmount: sidsteBeløb };
 }
 
+// Et split fra før man købte er uden betydning – kurserne var allerede regnet
+// om, da man trådte ind. Kun dem efter det ældste køb siger noget.
+function relevanteSplits(splits, lots) {
+  const datoer = (lots || []).map((l) => dag(l?.date)).filter(Boolean).sort();
+  const ældste = datoer[0] || null;
+  return (splits || [])
+    .filter((s) => !ældste || dag(s.date) > ældste)
+    .map((s) => ({ date: dag(s.date), ratio: s.ratio, label: s.label || `${s.ratio}:1` }));
+}
+
 // Hele beholdningen set med dagens øjne. Returnerer null, når der ikke er
 // noget at rette – så kan resten af appen regne videre præcis som før.
 export function adjustHolding(holding, events, { splits: brugSplits = true, dividends: brugUdbytte = true } = {}) {
@@ -177,7 +187,9 @@ export function adjustHolding(holding, events, { splits: brugSplits = true, divi
     lots: justerede,
     splitAdjusted: splitRettet,
     addedBySplits: splitRettet ? round(splitStk - oprindeligt, 6) : 0,
-    splits: (events.splits || []).map((s) => ({ date: dag(s.date), ratio: s.ratio, label: s.label || `${s.ratio}:1` })),
+    // Kun de splits, der ligger efter ens ældste køb. Apple har splittet fem
+    // gange siden 1987; har man købt i 2019, rager de fire af dem ikke en.
+    splits: relevanteSplits(events.splits, lots),
     // De oprindelige køb sendes ind: dividendCash ganger selv op for splits,
     // så de justerede tal ville tælle splittet med to gange.
     dividend: brugUdbytte && harUdbytte ? dividendCash(lots, events) : null,
