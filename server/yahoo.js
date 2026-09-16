@@ -200,14 +200,17 @@ const quoteCache = new TtlCache({ maxEntries: 500 });
 const fxCache = new TtlCache({ maxEntries: 100 });
 const searchCache = new TtlCache({ maxEntries: 300 });
 const historyCache = new TtlCache({ maxEntries: 200 });
+const eventsCache = new TtlCache({ maxEntries: 300 });
 
 const FX_TTL_MS = 5 * 60_000;
 const SEARCH_TTL_MS = 10 * 60_000;
 const HISTORY_TTL_MS = 15 * 60_000;
+// Splits og udbytte sker få gange om året – de skal ikke hentes hvert kvarter.
+const EVENTS_TTL_MS = 6 * 3600_000;
 
 export function createYahooClient({ quoteTtlMs = 60_000 } = {}) {
-  async function fetchChart(symbol, range = '1d', interval = '1d') {
-    const url = `${CHART_URL}${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`;
+  async function fetchChart(symbol, range = '1d', interval = '1d', { events = '' } = {}) {
+    const url = `${CHART_URL}${encodeURIComponent(symbol)}?range=${range}&interval=${interval}${events ? `&events=${encodeURIComponent(events)}` : ''}`;
     const json = await fetchJson(url, { symbol });
     const result = json?.chart?.result?.[0];
     if (!result) {
@@ -403,7 +406,71 @@ export function createYahooClient({ quoteTtlMs = 60_000 } = {}) {
     return Object.fromEntries(entries);
   }
 
-  return { getQuote, getQuotes, getFxRate, getFxRates, search, getHistory, getFxHistory, getFxHistories };
+  // Splits og udbytte. Hentes med månedlige bars over hele papirets levetid:
+  // Yahoo leverer alle begivenheder uanset interval, så det er den billigste
+  // måde at få dem alle – og adjclose følger med, som udbyttet regnes af.
+  async function getEvents(symbol) {
+    const key = symbol.toUpperCase();
+    return eventsCache.through(key, EVENTS_TTL_MS, async () => {
+      const result = await fetchChart(symbol, 'max', '1mo', { events: 'div,split' });
+      const meta = result.meta || {};
+      const rå = meta.currency || null;
+      // Pence-noterede papirer: både kurser og udbytte deles med 100.
+      const currency = MINOR_UNIT_CURRENCIES[rå] || rå;
+      const divisor = MINOR_UNIT_CURRENCIES[rå] ? 100 : 1;
+      const day = (sekunder) => new Date(sekunder * 1000).toISOString().slice(0, 10);
+
+      const splits = Object.values(result.events?.splits || {})
+        .map((s) => {
+          const tæller = num(s.numerator);
+          const nævner = num(s.denominator);
+          const ratio = tæller && nævner ? tæller / nævner : null;
+          return ratio && ratio > 0 ? { date: day(s.date), ratio, label: s.splitRatio || `${tæller}:${nævner}` } : null;
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.date.localeCompare(b.date));
+
+      const dividends = Object.values(result.events?.dividends || {})
+        .map((d) => {
+          const beløb = num(d.amount);
+          return beløb && beløb > 0 ? { date: day(d.date), amount: beløb / divisor } : null;
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.date.localeCompare(b.date));
+
+      // close/adjclose pr. måned – forholdet er, hvor mange gange flere stk.
+      // det geninvesterede udbytte har købt siden dengang.
+      const ts = result.timestamp || [];
+      const lukke = result.indicators?.quote?.[0]?.close || [];
+      const just = result.indicators?.adjclose?.[0]?.adjclose || [];
+      const factors = [];
+      for (let i = 0; i < ts.length; i++) {
+        const c = num(lukke[i]);
+        const a = num(just[i]);
+        if (c == null || a == null || a <= 0) continue;
+        factors.push({ date: day(ts[i]), close: c / divisor, adjclose: a / divisor });
+      }
+
+      return { ok: true, symbol: meta.symbol || key, currency, splits, dividends, factors };
+    });
+  }
+
+  async function getEventsFor(symbols) {
+    const unique = [...new Set(symbols.map((s) => s.toUpperCase()))];
+    const entries = await Promise.all(
+      unique.map(async (sym) => {
+        try {
+          return [sym, await getEvents(sym)];
+        } catch (err) {
+          // Uden begivenheder regnes der bare videre på det, brugeren har skrevet.
+          return [sym, { ok: false, error: describeError(err) }];
+        }
+      }),
+    );
+    return Object.fromEntries(entries);
+  }
+
+  return { getQuote, getQuotes, getFxRate, getFxRates, search, getHistory, getFxHistory, getFxHistories, getEvents, getEventsFor };
 }
 
 // Ugentlige bars stemples forskelligt af Yahoo (søndag aften UTC for Europa, mandag for USA).
