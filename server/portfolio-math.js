@@ -29,13 +29,38 @@ export function round(n, decimals = 2) {
   return Math.round((n + Number.EPSILON) * f) / f;
 }
 
-export function computePosition(holding, quoteResult, fxResult) {
-  const quantity = Number(holding.quantity) || 0;
-  const avgPrice = holding.avgPrice == null ? null : Number(holding.avgPrice);
+// adjust er resultatet af adjustHolding() i corporate-actions.js, eller null.
+// Er den der, har der været et split eller udbytte på papiret, og så er det
+// antal, værdien regnes på, ikke det samme som det, brugeren skrev ind.
+export function computePosition(holding, quoteResult, fxResult, adjust = null) {
+  const skrevet = Number(holding.quantity) || 0;
+  // Stk. man ejer i dag: skrevet antal ganget op for splits. Værdien regnes
+  // på det plus de stk., udbyttet har købt.
+  const quantity = adjust ? adjust.quantity : skrevet;
+  const dividendShares = adjust ? adjust.dividendShares : 0;
+  const effective = adjust ? adjust.effectiveQuantity : skrevet;
+  // Gennemsnitskursen følger med splittet ned, så det investerede er uændret.
+  const avgPrice = holding.avgPrice == null
+    ? null
+    : (adjust && adjust.splitAdjusted && quantity > 0 ? round((Number(holding.avgPrice) * skrevet) / quantity, 6) : Number(holding.avgPrice));
   const base = {
     id: holding.id,
     symbol: holding.symbol,
     quantity,
+    // Det brugeren selv har skrevet. Redigér skal vise de tal – ikke de
+    // rettede – ellers bliver splittet gemt ind i tallene og talt med igen
+    // næste gang.
+    enteredQuantity: skrevet,
+    enteredAvgPrice: holding.avgPrice == null ? null : Number(holding.avgPrice),
+    enteredLots: Array.isArray(holding.lots) && holding.lots.length ? holding.lots : null,
+    skipSplitAdjust: holding.skipSplitAdjust === true,
+    skipDividends: holding.skipDividends === true,
+    dividendShares,
+    effectiveQuantity: effective,
+    splitAdjusted: Boolean(adjust?.splitAdjusted),
+    addedBySplits: adjust?.addedBySplits ?? 0,
+    splits: adjust?.splits?.length ? adjust.splits : null,
+    dividend: adjust?.dividend?.count ? adjust.dividend : null,
     avgPrice,
     note: holding.note || '',
     accountId: holding.accountId ?? null,
@@ -46,7 +71,7 @@ export function computePosition(holding, quoteResult, fxResult) {
     // ind – den bruges til afkast pr. år, mens ejertid tæller fra første køb.
     weightedAt: holding.weightedAt || holding.purchasedAt || null,
     moneyDays: heldDays(holding.weightedAt || holding.purchasedAt),
-    lots: Array.isArray(holding.lots) && holding.lots.length ? holding.lots : null,
+    lots: adjust?.lots?.length ? adjust.lots : (Array.isArray(holding.lots) && holding.lots.length ? holding.lots : null),
     addedAt: holding.addedAt || null,
     updatedAt: holding.updatedAt || null,
   };
@@ -66,6 +91,8 @@ export function computePosition(holding, quoteResult, fxResult) {
       gain: null,
       gainBase: null,
       gainPercent: null,
+      dividendValue: null,
+      dividendValueBase: null,
       annualizedPercent: null,
       dayChange: null,
       dayChangeBase: null,
@@ -79,11 +106,15 @@ export function computePosition(holding, quoteResult, fxResult) {
   const fxOk = fxResult && fxResult.ok && Number.isFinite(fxResult.rate);
   const fx = fxOk ? fxResult.rate : null;
   const price = q.price;
-  const value = price != null ? quantity * price : null;
+  // Værdien regnes på alle de stk., man sidder med i dag – også dem udbyttet
+  // har købt. Det investerede er kun det, man selv har lagt ind, så gevinsten
+  // kommer til at rumme udbyttet.
+  const value = price != null ? effective * price : null;
   const cost = avgPrice != null ? quantity * avgPrice : null;
   const gain = value != null && cost != null ? value - cost : null;
   const gainPercent = gain != null && cost ? (gain / cost) * 100 : null;
-  const dayChange = q.change != null ? quantity * q.change : null;
+  const dividendValue = price != null && dividendShares ? dividendShares * price : null;
+  const dayChange = q.change != null ? effective * q.change : null;
   const toBase = (n) => (n != null && fx != null ? n * fx : null);
 
   let status = 'ok';
@@ -117,6 +148,9 @@ export function computePosition(holding, quoteResult, fxResult) {
     gain,
     gainBase: toBase(gain),
     gainPercent,
+    // Hvad de stk., udbyttet har købt, er værd i dag.
+    dividendValue,
+    dividendValueBase: toBase(dividendValue),
     // Afkast pr. år. +20 % på tre måneder og +20 % på fem år er ikke det samme,
     // og uden en købsdato kan man ikke se forskel.
     annualizedPercent: annualized(gainPercent, base.moneyDays),
@@ -146,12 +180,12 @@ export function annualized(gainPercent, days, { minDays = 30 } = {}) {
   return round((vækst ** (365 / days) - 1) * 100, 2);
 }
 
-export function computePortfolio({ holdings, quotes, fxRates, baseCurrency }) {
+export function computePortfolio({ holdings, quotes, fxRates, baseCurrency, adjustments = {} }) {
   const positions = holdings.map((h) => {
     const quoteResult = quotes[h.symbol.toUpperCase()];
     const currency = quoteResult?.quote?.currency;
     const fxResult = currency ? fxRates[currency] : null;
-    return computePosition(h, quoteResult, fxResult);
+    return computePosition(h, quoteResult, fxResult, adjustments[h.id] || null);
   });
 
   let valueBase = 0;
@@ -159,12 +193,20 @@ export function computePortfolio({ holdings, quotes, fxRates, baseCurrency }) {
   let valueWithCostBase = 0; // værdi af de positioner, der har en kendt købskurs
   let dayChangeBase = 0;
   let prevValueBase = 0;
+  let dividendValueBase = 0;
   let hasCost = false;
   let hasDay = false;
+  let hasDividend = false;
   let incomplete = false;
   let hasStale = false;
+  let hasSplit = false;
 
   for (const p of positions) {
+    if (p.dividendValueBase != null) {
+      dividendValueBase += p.dividendValueBase;
+      hasDividend = true;
+    }
+    if (p.splitAdjusted) hasSplit = true;
     if (p.valueBase == null) {
       incomplete = true;
       continue;
@@ -207,6 +249,10 @@ export function computePortfolio({ holdings, quotes, fxRates, baseCurrency }) {
       gainPercent,
       dayChangeBase: hasDay ? dayChangeBase : null,
       dayChangePercent,
+      // Hvad det geninvesterede udbytte er værd i dag. Det er en del af
+      // gevinsten ovenfor, ikke noget der skal lægges til.
+      dividendValueBase: hasDividend ? round(dividendValueBase, 2) : null,
+      splitAdjusted: hasSplit,
       positionCount: positions.length,
       okCount,
       errorCount: positions.length - okCount,
@@ -257,27 +303,34 @@ export function narrowRange(range, ownedFrom, now = Date.now()) {
 // Hvornår hver portion kom ind i beholdningen. Er aktien ført køb for køb,
 // er det ét trin pr. køb; ellers ét trin med hele antallet fra købsdatoen.
 // Uden dato regnes portionen med hele vejen – vi ved ikke bedre.
-function ownedSteps(holding) {
-  const lots = (Array.isArray(holding.lots) ? holding.lots : []).filter((l) => l && Number(l.quantity) > 0);
+function ownedSteps(holding, adjust = null) {
+  // Er der splits eller udbytte på papiret, bruges de justerede køb: antallet
+  // er ganget op for splittet, så det passer med Yahoos kurser, der er regnet
+  // om på samme måde. Kostprisen er uændret – man har ikke betalt mere.
+  const kilde = adjust?.lots?.length ? adjust.lots : holding.lots;
+  const lots = (Array.isArray(kilde) ? kilde : []).filter((l) => l && Number(l.quantity) > 0);
   const trin = lots.length
     ? lots.map((l) => ({
       date: l.date ? String(l.date).slice(0, 10) : null,
       quantity: Number(l.quantity),
       cost: harKurs(l) ? Number(l.quantity) * Number(l.price) : 0,
+      divFactor: Number(l.dividendFactor) || 1,
     }))
     : [{
       date: holding.purchasedAt ? String(holding.purchasedAt).slice(0, 10) : null,
-      quantity: Number(holding.quantity) || 0,
+      quantity: adjust ? adjust.quantity : (Number(holding.quantity) || 0),
       cost: holding.avgPrice == null ? 0 : (Number(holding.quantity) || 0) * Number(holding.avgPrice),
+      divFactor: 1,
     }];
   // Tomme datoer sorterer først og tælles derfor med fra første dag.
   return trin.sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
 }
 
-export function computeValueHistory({ holdings, histories, fxRates, fxHistories = {}, windowStart = null }) {
+export function computeValueHistory({ holdings, histories, fxRates, fxHistories = {}, windowStart = null, adjustments = {} }) {
   const series = [];
   const med = [];
   for (const h of holdings) {
+    const adjust = adjustments[h.id] || null;
     const hist = histories[h.symbol.toUpperCase()];
     if (!hist || !hist.points?.length) continue;
     const fx = fxRates[hist.currency];
@@ -296,7 +349,12 @@ export function computeValueHistory({ holdings, histories, fxRates, fxHistories 
       byDay,
       rateOn,
       first: [...byDay.keys()].sort()[0],
-      steps: ownedSteps(h),
+      steps: ownedSteps(h, adjust),
+      // Udbytte-faktoren på en given dag. Stk. på den dag er købets antal
+      // ganget med faktoren på købsdatoen og divideret med faktoren den dag –
+      // så vokser antallet, efterhånden som udbyttet bliver udbetalt, i stedet
+      // for at ligge der fra første dag. Uden udbytte er faktoren 1 hele vejen.
+      factorOn: faktorSlå(adjust?.factors),
       // Det investerede omregnes med dagens valutakurs – samme regnestykke som
       // tallet "Investeret" over grafen, så de to ikke siger hver sit.
       rateNow: fx.rate,
@@ -320,7 +378,7 @@ export function computeValueHistory({ holdings, histories, fxRates, fxHistories 
   // hop i kurven, ikke tælle med fra første dag. Trinene er sorteret, så der
   // kun skal læses fremad én gang.
   const last = series.map((s) => s.byDay.get(s.first));
-  const ejet = series.map(() => ({ i: 0, quantity: 0, cost: 0 }));
+  const ejet = series.map(() => ({ i: 0, quantity: 0, cost: 0, vægt: 0 }));
   const out = [];
   for (const day of days) {
     let total = 0;
@@ -331,11 +389,15 @@ export function computeValueHistory({ holdings, histories, fxRates, fxHistories 
       while (e.i < s.steps.length && (!s.steps[e.i].date || s.steps[e.i].date <= day)) {
         e.quantity += s.steps[e.i].quantity;
         e.cost += s.steps[e.i].cost;
+        e.vægt += s.steps[e.i].quantity * s.steps[e.i].divFactor;
         e.i++;
       }
       const v = s.byDay.get(day);
       if (v != null) last[i] = v;
-      total += last[i].close * e.quantity * s.rateOn(day);
+      // Stk. den dag: vægten delt med udbytte-faktoren samme dag. Uden udbytte
+      // er begge dele 1, og så er det bare antallet.
+      const stk = e.vægt / s.factorOn(day);
+      total += last[i].close * stk * s.rateOn(day);
       invested += e.cost * s.rateNow;
     }
     out.push({ date: day, value: round(total), invested: round(invested) });
@@ -402,6 +464,31 @@ export function computeValueHistory({ holdings, histories, fxRates, fxHistories 
 
 // Opslag fra dato til valutakurs. Bruger seneste kurs til og med dagen; er dagen
 // før seriens start, bruges den første kendte kurs.
+// Slår udbytte-faktoren op på en dag. Serien er månedlig, så der bruges det
+// punkt, der ligger nærmest; faktoren flytter sig kun et par procent om året.
+// Uden serie svarer den 1 på alle dage, og så regnes der som hidtil.
+function faktorSlå(factors) {
+  const punkter = (factors || [])
+    .map((p) => ({ t: Date.parse(`${String(p.date).slice(0, 10)}T12:00:00Z`), f: p.adjclose > 0 ? p.close / p.adjclose : 1 }))
+    .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.f) && p.f >= 1)
+    .sort((a, b) => a.t - b.t);
+  if (!punkter.length) return () => 1;
+  return (day) => {
+    const t = Date.parse(`${day}T12:00:00Z`);
+    if (!Number.isFinite(t)) return 1;
+    if (t <= punkter[0].t) return punkter[0].f;
+    if (t >= punkter[punkter.length - 1].t) return punkter[punkter.length - 1].f;
+    let lo = 0;
+    let hi = punkter.length - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (punkter[mid].t <= t) lo = mid;
+      else hi = mid;
+    }
+    return t - punkter[lo].t <= punkter[hi].t - t ? punkter[lo].f : punkter[hi].f;
+  };
+}
+
 export function dailyRates(history, fallback) {
   const points = history?.ok !== false && Array.isArray(history?.points) ? history.points : [];
   if (!points.length) return () => fallback;

@@ -20,6 +20,39 @@ const FX = { USDDKK: 6.42, EURDKK: 7.46, GBPDKK: 8.7, SEKDKK: 0.68, NOKDKK: 0.63
 
 const MINOR = { GBp: 'GBP', GBX: 'GBP' };
 
+// Splits og udbytte med runde tal, så testene kan regnes i hånden.
+// factors er close/adjclose pr. dato: forholdet er, hvor mange gange flere
+// stk. det geninvesterede udbytte har købt siden dengang. 1,00 i dag.
+const EVENTS = {
+  AAPL: {
+    splits: [{ date: '2020-08-31', ratio: 4, label: '4:1' }],
+    dividends: [
+      { date: '2019-06-01', amount: 0.5 },
+      { date: '2021-06-01', amount: 0.2 },
+      { date: '2023-06-01', amount: 0.25 },
+      { date: '2025-06-01', amount: 0.3 },
+    ],
+    factors: [
+      { date: '2019-01-01', close: 110, adjclose: 100 }, // 1,10
+      { date: '2020-01-01', close: 105, adjclose: 100 }, // 1,05
+      { date: '2022-01-01', close: 104, adjclose: 100 }, // 1,04
+      { date: '2024-01-01', close: 102, adjclose: 100 }, // 1,02
+      { date: '2030-01-01', close: 100, adjclose: 100 }, // 1,00 – i dag
+    ],
+  },
+  'NOVO-B.CO': {
+    splits: [],
+    dividends: [
+      { date: '2024-03-01', amount: 5 },
+      { date: '2025-03-01', amount: 6 },
+    ],
+    factors: [
+      { date: '2023-01-01', close: 105, adjclose: 100 }, // 1,05
+      { date: '2030-01-01', close: 100, adjclose: 100 }, // 1,00 – i dag
+    ],
+  },
+};
+
 function hourInZone(tz, now) {
   const parts = new Intl.DateTimeFormat('en-GB', { hour: 'numeric', minute: 'numeric', weekday: 'short', hour12: false, timeZone: tz }).formatToParts(now);
   const get = (t) => parts.find((p) => p.type === t)?.value;
@@ -154,6 +187,28 @@ export function createMockYahooClient({ now = () => new Date() } = {}) {
           out[c] = { ok: true, ...(await this.getFxHistory(c, base, range)) };
         } catch (err) {
           out[c] = { ok: false, error: describeError(err) };
+        }
+      }
+      return out;
+    },
+    // Splits og udbytte. Faste tal, så testene kan regne efter i hånden:
+    // AAPL har et 4:1-split og fire udbytter, NOVO-B.CO kun udbytte, og
+    // resten har ingen af delene.
+    async getEvents(symbol) {
+      const s = symbol.toUpperCase();
+      const f = FIXTURES[s];
+      if (!f) throw new YahooError(`Ukendt symbol: ${symbol}`, { status: 404, symbol: s, code: 'NOT_FOUND' });
+      const ev = EVENTS[s];
+      if (!ev) return { ok: true, symbol: s, currency: MINOR[f.currency] || f.currency, splits: [], dividends: [], factors: [] };
+      return { ok: true, symbol: s, currency: MINOR[f.currency] || f.currency, ...ev };
+    },
+    async getEventsFor(symbols) {
+      const out = {};
+      for (const s of [...new Set(symbols.map((x) => x.toUpperCase()))]) {
+        try {
+          out[s] = await this.getEvents(s);
+        } catch (err) {
+          out[s] = { ok: false, error: describeError(err) };
         }
       }
       return out;

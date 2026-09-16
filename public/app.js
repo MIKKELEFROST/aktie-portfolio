@@ -273,7 +273,7 @@
 
   const localErr = (status, message, extra = {}) => Object.assign(new Error(message), { status, data: extra });
   const round6 = (n) => Math.round(n * 1e6) / 1e6;
-  const pubHolding = (h) => ({ id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, purchasedAt: h.purchasedAt ?? null, weightedAt: h.weightedAt ?? null, lots: Array.isArray(h.lots) ? h.lots : null, addedAt: h.addedAt || null, updatedAt: h.updatedAt || null });
+  const pubHolding = (h) => ({ id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, purchasedAt: h.purchasedAt ?? null, weightedAt: h.weightedAt ?? null, lots: Array.isArray(h.lots) ? h.lots : null, skipSplitAdjust: h.skipSplitAdjust === true, skipDividends: h.skipDividends === true, addedAt: h.addedAt || null, updatedAt: h.updatedAt || null });
   const newLocalId = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
 
   function localDate(value) {
@@ -446,6 +446,8 @@
         if (body.note !== undefined) h.note = String(body.note ?? '').trim().slice(0, 200);
         if (body.purchasedAt !== undefined) h.purchasedAt = localDate(body.purchasedAt);
         if (body.lots !== undefined) h.lots = localLots(body.lots) || [];
+        if (body.skipSplitAdjust !== undefined) h.skipSplitAdjust = body.skipSplitAdjust === true;
+        if (body.skipDividends !== undefined) h.skipDividends = body.skipDividends === true;
         if (body.accountId !== undefined) {
           const accountId = localAccountId(body.accountId, data.settings.accounts);
           if (data.holdings.some((x) => x !== h && sameSlot(x, h.symbol, accountId))) throw localErr(409, `${h.name || h.symbol} findes allerede i det depot – brug "Køb til" dér i stedet`);
@@ -1904,7 +1906,7 @@
         <div>
           <h3>Din position</h3>
           <dl class="kv">
-            <dt>Antal</dt><dd>${fmtQty(p.quantity)}\u00a0stk.</dd>
+            <dt>Antal</dt><dd>${fmtQty(p.quantity)}\u00a0stk.${p.splitAdjusted ? ` <span class="muted" title="Dine ${fmtQty(p.enteredQuantity)} stk. fra før splittet">efter split</span>` : ''}${p.dividendShares > 0 ? `<div class="muted small">+${fmtQty(p.dividendShares)}\u00a0stk. for geninvesteret udbytte</div>` : ''}</dd>
             <dt>Gns. købskurs</dt><dd>${isNum(p.avgPrice) ? `${fmtPrice(p.avgPrice)} ${esc(cur)}` : '<span class="muted">ikke angivet</span>'}</dd>
             <dt>Investeret</dt><dd class="amount">${fmtAmount(p.costBase)}</dd>
             <dt>Værdi</dt><dd class="amount">${fmtAmount(p.valueBase)}</dd>
@@ -1916,6 +1918,7 @@
             ${p.weightedAt && p.weightedAt !== p.purchasedAt ? `<dt title="Den dato pengene i gennemsnit blev sat ind. Afkast pr. år regnes herfra.">Pengene i snit</dt><dd>${esc(fmtDate(p.weightedAt, { year: true }))}${isNum(p.moneyDays) ? ` <span class="muted">· ${esc(ejertid(p.moneyDays))}</span>` : ''}</dd>` : ''}
           </dl>
           ${lotList(p)}
+          ${eventList(p)}
           ${fx}
           ${isNum(p.gainBase) ? `<div class="muted small" style="margin-top:6px">${esc(AFKAST_TOOLTIP)}</div>` : ''}
           ${p.note ? `<div class="muted small" style="margin-top:8px">Note: ${esc(p.note)}</div>` : ''}
@@ -2290,6 +2293,34 @@
   }
 
   // De enkelte køb vist i detaljepanelet – kun når aktien føres køb for køb.
+  // Splits og udbytte: det, der er sket med aktien, uden at man selv handlede.
+  // Tallene er ikke noget, brugeren har skrevet – så de skal forklares, ikke
+  // bare stå der.
+  function eventList(p) {
+    const cur = p.currency || '';
+    const rækker = [];
+
+    if (p.splitAdjusted && p.splits?.length) {
+      const liste = p.splits.map((s) => `<b>${esc(s.label || `${s.ratio}:1`)}</b> den ${esc(fmtDate(s.date, { year: true }))}`).join(', ');
+      rækker.push(`<li><span>${liste}</span><span class="muted">Dine ${fmtQty(p.enteredQuantity)} stk. fra før tæller som ${fmtQty(p.quantity)} stk. i dag</span></li>`);
+    } else if (p.splits?.length) {
+      const liste = p.splits.map((s) => `<b>${esc(s.label || `${s.ratio}:1`)}</b> den ${esc(fmtDate(s.date, { year: true }))}`).join(', ');
+      rækker.push(`<li><span>${liste}</span><span class="muted">Regnes ikke med – dine tal står, som du skrev dem</span></li>`);
+    }
+
+    if (p.dividend?.count) {
+      const d = p.dividend;
+      rækker.push(`<li><span><b>${fmtPrice(d.total)} ${esc(cur)}</b> i udbytte</span><span class="muted">${d.count} ${d.count === 1 ? 'udbetaling' : 'udbetalinger'}${d.lastDate ? `, senest ${esc(fmtDate(d.lastDate, { year: true }))}` : ''}</span></li>`);
+    }
+    if (p.dividendShares > 0) {
+      rækker.push(`<li><span>Geninvesteret: <b>+${fmtQty(p.dividendShares)} stk.</b></span><span class="muted">${isNum(p.dividendValueBase) ? `${fmtAmount(p.dividendValueBase)} i dag` : ''}</span></li>`);
+    }
+
+    if (!rækker.length) return '';
+    return `<div class="lot-list"><h3>Splits og udbytte</h3><ul>${rækker.join('')}</ul>
+      <p class="muted small">Hentet fra Yahoo Finance. Udbyttet regnes som geninvesteret i samme aktie på udbetalingsdagen, så det tæller med i afkastet – ikke som kontanter ved siden af.</p></div>`;
+  }
+
   function lotList(p) {
     if (!Array.isArray(p.lots) || p.lots.length < 2) return '';
     const cur = p.currency || '';
@@ -2344,20 +2375,42 @@
     const p = positions().find((x) => x.id === id);
     if (!p) return;
     edit.id = id;
-    edit.lots = Array.isArray(p.lots) && p.lots.length
-      ? p.lots.map((l) => ({ date: l.date || '', quantity: fmtRaw(l.quantity), price: fmtRaw(l.price) }))
+    // De tal brugeren selv skrev – ikke dem, splittet har rettet. Gemte vi de
+    // rettede, ville splittet blive talt med én gang til næste gang.
+    const skrevneLots = p.enteredLots ?? (Array.isArray(p.lots) && p.lots.length ? p.lots : null);
+    edit.lots = skrevneLots
+      ? skrevneLots.map((l) => ({ date: l.date || '', quantity: fmtRaw(l.quantity), price: fmtRaw(l.price) }))
       : null;
     $('#dlg-edit-title').textContent = `Redigér ${p.name || p.symbol}`;
-    $('#edit-qty').value = fmtRaw(p.quantity);
-    $('#edit-price').value = fmtRaw(p.avgPrice);
+    $('#edit-qty').value = fmtRaw(p.enteredQuantity ?? p.quantity);
+    $('#edit-price').value = fmtRaw(p.enteredAvgPrice ?? p.avgPrice);
     $('#edit-price-addon').textContent = p.currency || '';
     $('#edit-note').value = p.note || '';
     $('#edit-date').value = p.purchasedAt || '';
     fillAccountSelect($('#edit-account'), p.accountId || '');
     setError('#edit-error', '');
     renderLots();
+    renderEditEvents(p);
     openDialog('#dlg-edit');
     if (!edit.lots) setTimeout(() => $('#edit-qty').select(), 30);
+  }
+
+  // Afkrydsningerne for splits og udbytte vises kun, når der faktisk er noget
+  // at slå fra – ellers ville de bare stå og fylde på hver eneste aktie.
+  function renderEditEvents(p) {
+    const harSplit = Boolean(p.splits?.length);
+    const harUdbytte = Boolean(p.dividend?.count) || p.dividendShares > 0 || p.skipDividends;
+    const vis = harSplit || harUdbytte;
+    $('#edit-events').classList.toggle('hidden', !vis);
+    if (!vis) return;
+    const dele = [];
+    if (harSplit) dele.push(`Der har været ${p.splits.length === 1 ? 'et split' : `${p.splits.length} splits`} på ${esc(p.name || p.symbol)}: ${p.splits.map((s) => `${esc(s.label || `${s.ratio}:1`)} ${esc(fmtDate(s.date, { year: true }))}`).join(', ')}.`);
+    if (harUdbytte) dele.push('Udbyttet regnes som geninvesteret i samme aktie.');
+    $('#edit-events-note').innerHTML = dele.join(' ');
+    $('#edit-skip-split').closest('.checkbox').classList.toggle('hidden', !harSplit);
+    $('#edit-skip-split').checked = p.skipSplitAdjust === true;
+    $('#edit-skip-dividends').closest('.checkbox').classList.toggle('hidden', !harUdbytte);
+    $('#edit-skip-dividends').checked = p.skipDividends === true;
   }
 
   // Læser rækkerne tilbage fra DOM'en, så tastede værdier overlever en ny tegning.
@@ -2504,6 +2557,10 @@
       Object.assign(body, { quantity: qty, avgPrice: priceRaw ? price : null, purchasedAt: $('#edit-date').value || null, lots: [] });
     }
     if (accounts().length) body.accountId = $('#edit-account').value || null;
+    if (!$('#edit-events').classList.contains('hidden')) {
+      body.skipSplitAdjust = $('#edit-skip-split').checked;
+      body.skipDividends = $('#edit-skip-dividends').checked;
+    }
     try {
       await api('PUT', `/api/holdings/${encodeURIComponent(edit.id)}`, body);
       $('#dlg-edit').close();

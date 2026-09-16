@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { newId } from './store.js';
 import { computeAnalytics, computeHistoryFacts, computePortfolio, computeValueHistory, dayKey, firstPurchaseDate, heldDays, narrowRange, parseDanishNumber, rangeDays, reduceLots, round, summarizeLots } from './portfolio-math.js';
+import { adjustHolding } from './corporate-actions.js';
 import { resolveSecurities } from './resolve.js';
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, createLoginLimiter, passwordVersion } from './auth.js';
 import { createAccounts, publicProfile, SignupError, normalizeEmail } from './accounts.js';
@@ -190,6 +191,31 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     return holdings.filter((h) => h.accountId === account);
   }
 
+  // Splits og udbytte pr. beholdning. Kan de ikke hentes, regnes der videre på
+  // det, brugeren har skrevet – tallene bliver bare ikke rettet for splittet.
+  async function adjustmentsFor(holdings) {
+    if (!holdings.length || !yahoo.getEventsFor) return {};
+    let events;
+    try {
+      events = await yahoo.getEventsFor(holdings.map((h) => h.symbol));
+    } catch {
+      return {};
+    }
+    const out = {};
+    for (const h of holdings) {
+      const ev = events[h.symbol.toUpperCase()];
+      if (!ev || ev.ok === false) continue;
+      const adj = adjustHolding(h, ev, {
+        // Har man selv skrevet tallene ind efter splittet, skal de ikke ganges
+        // op igen. Det slås fra pr. aktie.
+        splits: h.skipSplitAdjust !== true,
+        dividends: h.skipDividends !== true,
+      });
+      if (adj) out[h.id] = adj;
+    }
+    return out;
+  }
+
   async function computeFrom(data, account = '') {
     const baseCurrency = data.settings.baseCurrency;
     const accounts = data.settings.accounts || [];
@@ -199,8 +225,11 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     const currencies = Object.values(quotes)
       .filter((q) => q.ok && q.quote?.currency)
       .map((q) => q.quote.currency);
-    const fxRates = currencies.length ? await yahoo.getFxRates(currencies, baseCurrency) : {};
-    const result = computePortfolio({ holdings, quotes, fxRates, baseCurrency });
+    const [fxRates, adjustments] = await Promise.all([
+      currencies.length ? yahoo.getFxRates(currencies, baseCurrency) : Promise.resolve({}),
+      adjustmentsFor(holdings),
+    ]);
+    const result = computePortfolio({ holdings, quotes, fxRates, baseCurrency, adjustments });
     const nameOf = new Map(accounts.map((a) => [a.id, a.name]));
     for (const p of result.positions) p.accountName = p.accountId ? nameOf.get(p.accountId) || null : null;
     // Kontanter hører til hele porteføljen, ikke et enkelt depot.
@@ -295,7 +324,8 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
     // få dage før første kurs hører stadig til her.
     const dageTilbage = rangeDays(hentRange);
     const windowStart = Number.isFinite(dageTilbage) ? dayKey(Date.now() - dageTilbage * 86_400_000) : null;
-    const { points, backfilled, events } = computeValueHistory({ holdings, histories, fxRates, fxHistories, windowStart });
+    const adjustments = await adjustmentsFor(holdings);
+    const { points, backfilled, events } = computeValueHistory({ holdings, histories, fxRates, fxHistories, windowStart, adjustments });
 
     // Yahoos dagsserier halter af og til efter de løbende kurser, og så sluttede
     // kurven et andet sted end tallet lige over den. Sidste punkt sættes derfor
@@ -442,6 +472,8 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         note: parseNote(raw.note),
         purchasedAt: parsePurchaseDate(raw.purchasedAt),
         ...(lots ? { lots } : {}),
+        ...(raw.skipSplitAdjust === true ? { skipSplitAdjust: true } : {}),
+        ...(raw.skipDividends === true ? { skipDividends: true } : {}),
         addedAt: typeof raw.addedAt === 'string' && raw.addedAt.length <= 40 ? raw.addedAt : null,
         updatedAt: typeof raw.updatedAt === 'string' && raw.updatedAt.length <= 40 ? raw.updatedAt : null,
       });
@@ -500,7 +532,7 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
   }
 
   function publicHolding(h) {
-    return { id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, purchasedAt: h.purchasedAt ?? null, weightedAt: h.weightedAt ?? null, lots: Array.isArray(h.lots) ? h.lots : null, addedAt: h.addedAt, updatedAt: h.updatedAt };
+    return { id: h.id, symbol: h.symbol, name: h.name || h.symbol, currency: h.currency || null, quantity: h.quantity, avgPrice: h.avgPrice ?? null, note: h.note || '', accountId: h.accountId ?? null, purchasedAt: h.purchasedAt ?? null, weightedAt: h.weightedAt ?? null, lots: Array.isArray(h.lots) ? h.lots : null, skipSplitAdjust: h.skipSplitAdjust === true, skipDividends: h.skipDividends === true, addedAt: h.addedAt, updatedAt: h.updatedAt };
   }
 
   // Alle med en profil kan se alle andres portefølje – man kommer kun ind på
@@ -850,6 +882,11 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
         if (body.note !== undefined) h.note = parseNote(body.note);
         if (body.purchasedAt !== undefined) h.purchasedAt = parsePurchaseDate(body.purchasedAt);
         if (body.lots !== undefined) h.lots = parseLots(body.lots) || [];
+        // Har man skrevet antallet ind, som det ser ud i dag, skal splittet
+        // ikke regnes med igen. Samme for udbytte, hvis man hellere vil se
+        // kursudviklingen alene.
+        if (body.skipSplitAdjust !== undefined) h.skipSplitAdjust = body.skipSplitAdjust === true;
+        if (body.skipDividends !== undefined) h.skipDividends = body.skipDividends === true;
         if (body.accountId !== undefined) {
           const accountId = parseAccountId(body.accountId, draft.settings.accounts);
           if (draft.holdings.some((x) => x.id !== h.id && sameSlot(x, h.symbol, accountId))) throw new HttpError(409, `${h.name || h.symbol} findes allerede i det depot – brug "Køb til" dér i stedet`);
@@ -1000,6 +1037,8 @@ export function createApp({ store, yahoo, config, logger = console, onPortfolioR
           note: parseNote(raw.note),
           purchasedAt: parsePurchaseDate(raw.purchasedAt),
           ...(lots ? { lots } : {}),
+          ...(raw.skipSplitAdjust === true ? { skipSplitAdjust: true } : {}),
+          ...(raw.skipDividends === true ? { skipDividends: true } : {}),
           addedAt: typeof raw.addedAt === 'string' && raw.addedAt.length <= 40 && !Number.isNaN(Date.parse(raw.addedAt)) ? raw.addedAt : now,
           updatedAt: now,
         });
